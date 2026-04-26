@@ -1,0 +1,924 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Hook 机制 - Claude Code 源码分析</title>
+    <link rel="stylesheet" href="shared/styles.css">
+</head>
+<body>
+    <nav class="sidebar">
+<div class="sidebar-header"><div class="logo">CC</div><div><div class="sidebar-title">Claude Code</div><div class="sidebar-subtitle">源码深度分析</div></div></div>
+        <div class="nav-section-title">总览</div>
+        <a href="reading-guide.html" class="nav-link">阅读指南</a>
+        <a href="index.html" class="nav-link">架构全景</a>
+        <a href="dependency-map.html" class="nav-link">模块依赖图</a>
+        <a href="vertical-agent-guide.html" class="nav-link">垂直 Agent 设计指南</a>
+<div class="nav-section-title">核心流程</div>
+<a href="00-startup.html" class="nav-link">启动链路</a>
+<a href="01-query-loop.html" class="nav-link">Query 循环</a>
+<a href="flows/query-lifecycle.html" class="nav-link">查询生命周期</a>
+<div class="nav-section-title">核心机制</div>
+<a href="02-tool-dispatch.html" class="nav-link">工具调度</a>
+<a href="03-permissions.html" class="nav-link">权限系统</a>
+<a href="03b-security-hardening.html" class="nav-link">风控与安全加固</a>
+<a href="04-agent-arch.html" class="nav-link">Agent 架构</a>
+<a href="11-hooks.html" class="nav-link active">Hook 机制</a>
+<div class="nav-section-title">扩展体系</div>
+<a href="05-mcp.html" class="nav-link">MCP 体系</a>
+<a href="07-plugins.html" class="nav-link">插件系统</a>
+<a href="08-commands.html" class="nav-link">命令系统</a>
+<div class="nav-section-title">数据与服务</div>
+<a href="06-context-mgmt.html" class="nav-link">上下文管理</a>
+<a href="10-services.html" class="nav-link">服务层</a>
+<a href="15-cost-limits.html" class="nav-link">成本与限流</a>
+<div class="nav-section-title">界面与配置</div>
+<a href="09-ui.html" class="nav-link">UI 交互层</a>
+<a href="13-config.html" class="nav-link">配置与迁移</a>
+<div class="nav-section-title">外围能力</div>
+<a href="12-external.html" class="nav-link">外部集成</a>
+<a href="14-native.html" class="nav-link">Native 能力</a>
+<div class="nav-section-title">流程图</div>
+<a href="flows/tool-execution.html" class="nav-link">工具执行流程</a>
+<a href="flows/agent-collab.html" class="nav-link">Agent 协作流程</a>
+</nav>
+    <main class="content">
+        <header class="page-header">
+            <span class="breadcrumb"><a href="index.html">源码分析</a></span>
+            <h1>Hook 机制</h1>
+            <p class="subtitle">事件驱动钩子系统——React Hooks 状态管理、通知 Hooks、MCP Elicitation Hooks、Channel 权限钩子、工具合并与插件生命周期管理</p>
+        </header>
+
+        <nav class="page-toc">
+    <div class="page-toc-title">页面导航</div>
+        <a href="#overview"><span class="toc-dot dot-overview"></span>职责概述</a>
+        <a href="#architecture"><span class="toc-dot dot-arch"></span>架构设计</a>
+        <a href="#dataflow"><span class="toc-dot dot-data"></span>数据流</a>
+        <a href="#interfaces"><span class="toc-dot dot-arch"></span>核心接口</a>
+        <a href="#patterns"><span class="toc-dot dot-arch"></span>设计模式</a>
+        <a href="#dev-guide"><span class="toc-dot dot-code"></span>开发者指南</a>
+        <a href="#arch-guide"><span class="toc-dot dot-arch"></span>架构师指南</a>
+        <a href="#topology"><span class="toc-dot dot-data"></span>处理拓扑图</a>
+        <a href="#core-flow"><span class="toc-dot dot-data"></span>核心流程详解</a>
+        <a href="#design-essence"><span class="toc-dot dot-design"></span>设计精华</a>
+        <a href="#agent-practice"><span class="toc-dot dot-practice"></span>Agent 实践借鉴</a>
+        <a href="#code-index"><span class="toc-dot dot-code"></span>代码索引</a>
+</nav>
+
+        <section id="overview" class="card">
+            <h2>职责概述</h2>
+            <p>Claude Code 的 "hooks" 目录包含两层含义的钩子系统：一是 <strong>React Hooks</strong>（50+ 个自定义 Hook），负责 UI 状态管理、事件订阅、副作用协调；二是 <strong>事件钩子</strong>（Event Hooks），由 <code>utils/hooks.ts</code> 管理，支持 Pre/Post 工具调用、Elicitation、Notification 等生命周期事件的拦截与处理。此外，<code>hooks/notifs/</code> 子目录集中了所有用户通知 Hook（MCP 连接状态、插件更新、速率限制等），<code>hooks/toolPermission/</code> 子目录实现了工具权限决策流程。整个 Hook 体系是 CLI 交互层和核心引擎之间的粘合剂。</p>
+        </section>
+
+        <section id="architecture" class="card">
+            <h2>架构设计</h2>
+            <div class="layer-diagram">
+                <div class="layer layer-ui">
+                    <div class="layer-header">通知 Hooks（hooks/notifs/）</div>
+                    <div class="layer-body">
+                        <div class="layer-component">useMcpConnectivityStatus</div>
+                        <div class="layer-component">usePluginAutoupdateNotification</div>
+                        <div class="layer-component">useRateLimitWarningNotification</div>
+                        <div class="layer-component">useStartupNotification</div>
+                        <div class="layer-component">useSettingsErrors</div>
+                    </div>
+                </div>
+                <div class="layer-arrow">&#9660;</div>
+                <div class="layer layer-orchestration">
+                    <div class="layer-header">核心协调 Hooks</div>
+                    <div class="layer-body">
+                        <div class="layer-component highlight">useManagePlugins.ts</div>
+                        <div class="layer-component highlight">useMergedTools.ts</div>
+                        <div class="layer-component highlight">useNotifyAfterTimeout.ts</div>
+                        <div class="layer-component">useGlobalKeybindings.tsx</div>
+                        <div class="layer-component">useTextInput.ts</div>
+                    </div>
+                </div>
+                <div class="layer-arrow">&#9660;</div>
+                <div class="layer layer-security">
+                    <div class="layer-header">权限决策 Hooks（hooks/toolPermission/）</div>
+                    <div class="layer-body">
+                        <div class="layer-component highlight">interactiveHandler.ts</div>
+                        <div class="layer-component">coordinatorHandler.ts</div>
+                        <div class="layer-component">swarmWorkerHandler.ts</div>
+                        <div class="layer-component">PermissionContext.ts</div>
+                    </div>
+                </div>
+                <div class="layer-arrow">&#9660;</div>
+                <div class="layer layer-data">
+                    <div class="layer-header">服务订阅 Hooks</div>
+                    <div class="layer-body">
+                        <div class="layer-component">useDirectConnect.ts</div>
+                        <div class="layer-component">useSSHSession.ts</div>
+                        <div class="layer-component">useIDEIntegration.tsx</div>
+                        <div class="layer-component">useRemoteSession.ts</div>
+                        <div class="layer-component">useQueueProcessor.ts</div>
+                    </div>
+                </div>
+                <div class="layer-arrow">&#9660;</div>
+                <div class="layer layer-infra">
+                    <div class="layer-header">UI 基础 Hooks</div>
+                    <div class="layer-body">
+                        <div class="layer-component">useTerminalSize.ts</div>
+                        <div class="layer-component">useElapsedTime.ts</div>
+                        <div class="layer-component">useAfterFirstRender.ts</div>
+                        <div class="layer-component">useTimeout.ts</div>
+                        <div class="layer-component">useDoublePress.ts</div>
+                    </div>
+                </div>
+            </div>
+        </section>
+
+        <section id="dataflow" class="card">
+            <h2>核心数据流</h2>
+
+            <h3>Hook 生命周期（useNotifyAfterTimeout）</h3>
+            <div class="flow-chart">
+                <div class="flow-step">
+                    <div class="flow-step-title">1. Hook 调用</div>
+                    <div class="flow-step-desc">组件渲染时调用 useNotifyAfterTimeout(message, notificationType)</div>
+                </div>
+                <div class="flow-arrow">&rarr;</div>
+                <div class="flow-step">
+                    <div class="flow-step-title">2. 重置交互时间</div>
+                    <div class="flow-step-desc">useEffect 立即调用 updateLastInteractionTime(true)，避免长时间请求完成后立即弹出通知</div>
+                </div>
+                <div class="flow-arrow">&rarr;</div>
+                <div class="flow-step">
+                    <div class="flow-step-title">3. 轮询检查</div>
+                    <div class="flow-step-desc">setInterval 每 6 秒检查 shouldNotify()：用户是否在最近 6 秒内无交互</div>
+                </div>
+                <div class="flow-arrow">&rarr;</div>
+                <div class="flow-step">
+                    <div class="flow-step-title">4. 发送通知</div>
+                    <div class="flow-step-desc">条件满足时调用 sendNotification()，通过终端通知和/或桌面通知提示用户</div>
+                </div>
+            </div>
+
+            <h3 style="margin-top:2rem">插件管理 Hook 数据流</h3>
+            <div class="flow-chart">
+                <div class="flow-step">
+                    <div class="flow-step-title">1. Mount 加载</div>
+                    <div class="flow-step-desc">useManagePlugins 在组件挂载时调用 initialPluginLoad()</div>
+                </div>
+                <div class="flow-arrow">&rarr;</div>
+                <div class="flow-step">
+                    <div class="flow-step-title">2. 加载所有插件</div>
+                    <div class="flow-step-desc">loadAllPlugins() 返回 { enabled, disabled, errors }，同时执行 delist 检查</div>
+                </div>
+                <div class="flow-arrow">&rarr;</div>
+                <div class="flow-step">
+                    <div class="flow-step-title">3. 组件并发加载</div>
+                    <div class="flow-step-desc">并发加载 commands、agents、hooks、MCP servers、LSP servers，错误收集到 errors[]</div>
+                </div>
+                <div class="flow-arrow">&rarr;</div>
+                <div class="flow-step">
+                    <div class="flow-step-title">4. 状态写入</div>
+                    <div class="flow-step-desc">setAppState() 更新 plugins.enabled/disabled/commands/errors，触发 MCP 重连</div>
+                </div>
+                <div class="flow-arrow">&rarr;</div>
+                <div class="flow-step">
+                    <div class="flow-step-title">5. 变更检测</div>
+                    <div class="flow-step-desc">needsRefresh 变为 true 时显示通知，等待用户执行 /reload-plugins</div>
+                </div>
+            </div>
+
+            <h3 style="margin-top:2rem">工具合并决策树</h3>
+            <div class="flow-chart">
+                <div class="flow-step">
+                    <div class="flow-step-title">assembleToolPool()</div>
+                    <div class="flow-step-desc">获取内置工具列表 getTools()，合并传入的 mcpTools</div>
+                </div>
+                <div class="flow-arrow">&rarr;</div>
+                <div class="flow-step">
+                    <div class="flow-step-title">应用 deny 规则</div>
+                    <div class="flow-step-desc">根据 toolPermissionContext 中的 deny 规则过滤工具池</div>
+                </div>
+                <div class="flow-arrow">&rarr;</div>
+                <div class="flow-step">
+                    <div class="flow-step-title">mergeAndFilterTools()</div>
+                    <div class="flow-step-desc">将 initialTools（带优先级）与 assembled pool 合并，去重同名工具</div>
+                </div>
+                <div class="flow-arrow">&rarr;</div>
+                <div class="flow-step">
+                    <div class="flow-step-title">返回最终 Tools</div>
+                    <div class="flow-step-desc">useMemo 缓存结果，仅在依赖变更时重新计算</div>
+                </div>
+            </div>
+        </section>
+
+        <section id="interfaces" class="card">
+            <h2>关键类型与接口</h2>
+
+            <h3>useNotifyAfterTimeout Hook</h3>
+            <pre><code>// hooks/useNotifyAfterTimeout.ts:38-65
+export function useNotifyAfterTimeout(
+  message: string,
+  notificationType: string,
+): void {
+  const terminal = useTerminalNotification()
+
+  // 重置交互时间（防止长请求完成后立即通知）
+  useEffect(() => {
+    updateLastInteractionTime(true)
+  }, [])
+
+  useEffect(() => {
+    let hasNotified = false
+    const timer = setInterval(() => {
+      if (shouldNotify(DEFAULT_INTERACTION_THRESHOLD_MS) && !hasNotified) {
+        hasNotified = true
+        clearInterval(timer)
+        void sendNotification({ message, notificationType }, terminal)
+      }
+    }, DEFAULT_INTERACTION_THRESHOLD_MS) // 6秒轮询
+    return () => clearInterval(timer)
+  }, [message, notificationType, terminal])
+}</code></pre>
+
+            <h3>useManagePlugins Hook 签名</h3>
+            <pre><code>// hooks/useManagePlugins.ts:37-39
+export function useManagePlugins({
+  enabled = true,
+}: {
+  enabled?: boolean
+} = {})
+
+// 返回 void — 通过 setAppState 副作用更新全局状态
+// 主要效果：
+// - 加载所有插件到 AppState.plugins
+// - 运行 delist 检查和 flag 通知
+// - 遥测 tengu_plugins_loaded 事件</code></pre>
+
+            <h3>useMergedTools Hook</h3>
+            <pre><code>// hooks/useMergedTools.ts:20-44
+export function useMergedTools(
+  initialTools: Tools,
+  mcpTools: Tools,
+  toolPermissionContext: ToolPermissionContext,
+): Tools {
+  return useMemo(() => {
+    // 组装工具池：内置 + MCP，应用 deny 规则和去重
+    const assembled = assembleToolPool(toolPermissionContext, mcpTools)
+    return mergeAndFilterTools(
+      initialTools, assembled, toolPermissionContext.mode,
+    )
+  }, [initialTools, mcpTools, toolPermissionContext,
+      replBridgeEnabled, replBridgeOutboundOnly])
+}</code></pre>
+
+            <h3>通知 Hooks 列表</h3>
+            <pre><code>// hooks/notifs/ — 集中的通知 Hook 模块
+useAutoModeUnavailableNotification  // Auto Mode 不可用提示
+useCanSwitchToExistingSubscription  // 订阅切换建议
+useDeprecationWarningNotification   // 弃用警告
+useFastModeNotification             // 快速模式提示
+useIDEStatusIndicator               // IDE 连接状态指示
+useInstallMessages                  // 安装消息显示
+useLspInitializationNotification    // LSP 初始化状态
+useMcpConnectivityStatus            // MCP 连接状态通知
+useModelMigrationNotifications      // 模型迁移通知
+useNpmDeprecationNotification       // npm 弃用通知
+usePluginAutoupdateNotification     // 插件自动更新通知
+usePluginInstallationStatus         // 插件安装进度
+useRateLimitWarningNotification     // 速率限制警告
+useSettingsErrors                   // 设置错误提示
+useStartupNotification              // 启动消息
+useTeammateShutdownNotification     // 队友关闭通知</code></pre>
+        </section>
+
+        <section id="patterns" class="card">
+            <h2>设计模式与亮点</h2>
+
+            <div class="two-col">
+                <div>
+                    <h3>集中式通知 Hook 模式</h3>
+                    <p><code>hooks/notifs/</code> 目录将所有通知逻辑集中管理，每个通知都是一个独立的 React Hook。这种模式的好处：(1) 通知逻辑与 UI 组件解耦；(2) 可以在任意组件树的任意层级启用/禁用通知；(3) 通知的状态（是否已显示、去重）封装在 Hook 内部。典型用法是顶层 App 组件同时挂载所有通知 Hook。</p>
+                </div>
+                <div>
+                    <h3>idle-detection 通知策略</h3>
+                    <p><code>useNotifyAfterTimeout</code> 实现了智能的通知时机选择：只在用户空闲超过 6 秒时才发送桌面通知。这避免了用户正在打字时弹出干扰通知。交互时间追踪由 App.tsx 的 <code>processKeysInBatch</code> 函数更新，避免与主 stdin 监听器冲突。</p>
+                </div>
+            </div>
+
+            <div class="two-col" style="margin-top:1rem">
+                <div>
+                    <h3>useMemo 工具池缓存</h3>
+                    <p><code>useMergedTools</code> 通过 <code>useMemo</code> 缓存工具池计算结果。依赖项包括 initialTools、mcpTools、toolPermissionContext。由于 MCP 工具列表在连接/断开时会变化（通过 AppState.mcp.tools），这个缓存确保只在工具列表实际变更时重新计算，避免每次渲染都重新组装。</p>
+                </div>
+                <div>
+                    <h3>错误隔离与收集</h3>
+                    <p><code>useManagePlugins</code>（L70-109）对每个组件加载（commands、agents、hooks、MCP、LSP）都用独立的 try-catch 包裹。单个组件的加载失败不会阻止其他组件加载，错误被推入 <code>errors[]</code> 数组并在 Doctor UI 中显示。同时与已有的 LSP 错误合并，去重后写入 AppState。</p>
+                </div>
+            </div>
+
+            <div class="info-box tip" style="margin-top:1rem">
+                <strong>50+ Hooks 的分类体系：</strong>Claude Code 的 hooks/ 目录包含 50 多个自定义 React Hook，可按职责分为以下类别：(1) 通知类（notifs/）—— 16 个通知 Hook；(2) 状态管理类 —— useManagePlugins、useMergedTools、useAppState 等；(3) 输入类 —— useTextInput、useVimInput、useArrowKeyHistory；(4) 集成类 —— useIDEIntegration、useDirectConnect、useSSHSession；(5) UI 基础类 —— useTerminalSize、useElapsedTime、useAfterFirstRender。
+            </div>
+        </section>
+
+        <section id="dev-guide" class="card developer">
+            <h2>开发者实践指南</h2>
+
+            <h3>添加新的通知 Hook</h3>
+            <p>按照 <code>hooks/notifs/</code> 目录中现有 Hook 的模式创建：</p>
+            <ol>
+                <li>在 <code>hooks/notifs/</code> 下创建新文件（如 <code>useMyNotification.tsx</code>）</li>
+                <li>使用 <code>useNotifications()</code> 获取 <code>addNotification</code> 函数</li>
+                <li>用 <code>useEffect</code> 或 <code>useAppState</code> 订阅触发条件</li>
+                <li>在顶层 App 组件中挂载新 Hook</li>
+            </ol>
+            <pre><code>// hooks/notifs/useMyNotification.tsx
+import { useEffect } from 'react'
+import { useNotifications } from '../../context/notifications.js'
+import { useAppState } from '../../state/AppState.js'
+
+export function useMyNotification() {
+  const someCondition = useAppState(s => s.someField)
+  const { addNotification } = useNotifications()
+
+  useEffect(() => {
+    if (someCondition) {
+      addNotification({
+        key: 'my-notification',
+        text: 'Something happened!',
+        color: 'warning',
+        priority: 'high',
+      })
+    }
+  }, [someCondition, addNotification])
+}</code></pre>
+
+            <h3>理解工具合并链</h3>
+            <p>工具池的组装链：getTools()（内置工具）+ mcpTools（MCP 发现的工具）&rarr; assembleToolPool()（应用 deny 规则 + 去重）&rarr; mergeAndFilterTools()（合并 initialTools 带优先级）。在添加自定义工具时，确保通过 <code>initialTools</code> 参数传入以获得优先级。</p>
+
+            <div class="info-box tip">
+                <strong>调试 Hook 行为：</strong>大多数 Hook 通过 <code>logForDebugging</code> 输出关键状态变更。使用 <code>--debug</code> 标志查看详细的 Hook 执行日志。对于通知 Hook，关注 <code>addNotification</code> 调用时机和去重 key。
+            </div>
+        </section>
+
+        <section id="arch-guide" class="card architect">
+            <h2>架构师决策指南</h2>
+
+            <div class="two-col">
+                <div>
+                    <h3>React Hook vs 事件系统</h3>
+                    <p>Claude Code 选择 React Hook 作为主要的状态管理机制而非独立的事件总线。好处是 Hook 天然与 React 渲染周期对齐，避免了事件监听器泄漏和状态不一致。代价是 Hook 无法在 React 组件树外使用——这就是为什么 MCP 层（useManageMCPConnections）和 Hook 层之间存在 Context 桥接（MCPConnectionManager）。</p>
+                </div>
+                <div>
+                    <h3>手动刷新 vs 自动刷新</h3>
+                    <p>插件状态变更采用手动刷新（<code>/reload-plugins</code>）而非自动刷新。决策原因是自动刷新曾导致缓存一致性 bug：<code>loadAllPlugins</code> 的 memoize 被清除了，但下游的 <code>getPluginCommands</code>、<code>loadPluginAgents</code> 等仍有旧缓存。手动刷新通过 <code>refreshActivePlugins()</code> 一次性清除所有缓存再重新加载。</p>
+                </div>
+            </div>
+
+            <h3 style="margin-top:1rem">通知系统架构</h3>
+            <p>通知系统由三层组成：</p>
+            <ol>
+                <li><strong>通知生产者</strong>（hooks/notifs/）—— 16 个 Hook 监听各种状态变更，产生通知</li>
+                <li><strong>通知中心</strong>（context/notifications.ts）—— <code>addNotification()</code> 函数管理通知队列、去重、优先级</li>
+                <li><strong>通知消费者</strong>（UI 组件）—— 渲染通知条，处理用户交互</li>
+            </ol>
+            <p>通知有 <code>priority</code>（high/low）和 <code>color</code>（warning/suggestion/error）属性，<code>key</code> 用于去重。高优先级通知会立即显示，低优先级通知在空闲时显示。</p>
+
+            <div class="info-box warning">
+                <strong>并发安全：</strong>多个 Hook 可能同时调用 <code>setAppState</code>。React 18 的自动批处理（automatic batching）确保同一事件循环内的多个 setState 不会触发多次渲染。但 <code>useManagePlugins</code> 中的异步操作（如插件加载完成后写状态）在 setTimeout 回调中执行，React 18 也会批处理这些更新。
+            </div>
+        </section>
+
+        <!-- ========== 可视化处理拓扑图 ========== -->
+        <section id="topology" class="card">
+            <h2><span class="icon" style="background:rgba(139,92,246,.15);color:var(--purple);">◈</span> 可视化处理拓扑图</h2>
+
+            <!-- Phase 1: 插件初始化 → 工具池 -->
+            <div class="fc">
+                <div class="fc-center">
+                    <div class="fn n-start">REPL 组件挂载<span class="sub">React useEffect → 初始化钩子</span></div>
+                    <div class="vc s24"></div>
+
+                    <div class="fn n-process ww">1. 插件生命周期初始化 — useManagePlugins()<span class="sub">hooks/useManagePlugins.ts:37 — initialPluginLoad（L51）</span><span class="sub">并行调用 loadAllPlugins()（L54）→ 依次加载各组件</span></div>
+                    <div class="vc s16"></div>
+
+                    <div class="fc-row" style="gap:10px;">
+                        <div class="fn n-process" style="font-size:11px;max-width:110px;">加载命令<span class="sub">getPluginCommands</span></div>
+                        <div class="hc s20"></div>
+                        <div class="fn n-process" style="font-size:11px;max-width:110px;">加载 Agent<span class="sub">loadPluginAgents</span></div>
+                        <div class="hc s20"></div>
+                        <div class="fn n-process" style="font-size:11px;max-width:110px;">加载 Hooks<span class="sub">插件钩子定义</span></div>
+                        <div class="hc s20"></div>
+                        <div class="fn n-process" style="font-size:11px;max-width:110px;">预加载 MCP<span class="sub">MCP 服务器配置</span></div>
+                        <div class="hc s20"></div>
+                        <div class="fn n-process" style="font-size:11px;max-width:110px;">预加载 LSP<span class="sub">LSP 服务器配置</span></div>
+                    </div>
+                    <div style="font-size:10px;color:var(--text-muted);margin:6px 0;text-align:center;">每个组件独立 try-catch，错误收集到 errors 数组（不抛出）↓</div>
+                    <div class="vc s16"></div>
+
+                    <div class="fn n-process w">更新 AppState<span class="sub">L148-180 — errors 去重（L154-167）+ Doctor UI</span></div>
+                    <div class="vc s20"></div>
+
+                    <div class="fn n-check ww">2. 工具池组装 — useMergedTools()<span class="sub">hooks/useMergedTools.ts:20 — useMemo 缓存</span><span class="sub">assembleToolPool（合并+去重+deny）→ mergeAndFilterTools（权限过滤）</span></div>
+                    <div class="vc s16"></div>
+
+                    <div class="fc-row" style="gap:24px;">
+                        <div style="display:flex;flex-direction:column;align-items:center;gap:0;">
+                            <div class="fn n-process" style="font-size:11px;">内置工具</div>
+                            <div class="vc s12"></div>
+                            <div style="font-size:10px;color:var(--text-muted);">↓</div>
+                        </div>
+                        <div style="display:flex;flex-direction:column;align-items:center;gap:0;">
+                            <div class="fn n-process" style="font-size:11px;">MCP 工具</div>
+                            <div class="vc s12"></div>
+                            <div style="font-size:10px;color:var(--text-muted);">↓</div>
+                        </div>
+                        <div style="display:flex;flex-direction:column;align-items:center;gap:0;">
+                            <div class="fn n-process" style="font-size:11px;">initialTools</div>
+                            <div class="vc s12"></div>
+                            <div style="font-size:10px;color:var(--text-muted);">↓</div>
+                        </div>
+                    </div>
+                    <div class="fn n-allow">最终工具池<span class="sub">REPL 和 Agent 共享 assembleToolPool 纯函数</span></div>
+                </div>
+            </div>
+
+            <!-- Phase 2: 键盘绑定 → Shell Hook 执行 -->
+            <div class="fc">
+                <div class="fc-center">
+                    <div class="fn n-start">stdin 键盘事件 / 工具调用事件<span class="sub">运行时事件触发</span></div>
+                    <div class="vc s24"></div>
+
+                    <div class="fn n-check w">3. 全局键盘绑定 — GlobalKeybindingHandlers()<span class="sub">hooks/useGlobalKeybindings.tsx:36</span><span class="sub">Ctrl+T 任务切换 / Ctrl+O transcript / Escape 取消</span></div>
+                    <div class="vc s16"></div>
+
+                    <div class="fc-row" style="gap:10px;">
+                        <div class="fn n-process" style="font-size:11px;max-width:110px;">Ctrl+T<span class="sub">任务/队友视图</span></div>
+                        <div class="hc s20"></div>
+                        <div class="fn n-process" style="font-size:11px;max-width:110px;">Ctrl+O<span class="sub">transcript 模式</span></div>
+                        <div class="hc s20"></div>
+                        <div class="fn n-process" style="font-size:11px;max-width:110px;">Escape<span class="sub">取消操作</span></div>
+                    </div>
+                    <div class="vc s20"></div>
+
+                    <div class="fn n-process w">4. 文本输入处理 — useTextInput()<span class="sub">hooks/useTextInput.ts:73</span><span class="sub">mapKey L318 / handleEnter L247 / 历史导航 L269</span></div>
+                    <div class="vc s20"></div>
+
+                    <div class="fn n-process w">5. IDE 集成 — useIDEIntegration()<span class="sub">hooks/useIDEIntegration.tsx:15</span><span class="sub">检测 IDE → initializeIdeIntegration → 文件跳转/diff/诊断</span></div>
+                    <div class="vc s20"></div>
+
+                    <div class="fn n-check ww">6. Shell Hook 执行引擎 — utils/hooks.ts<span class="sub">spawn 子进程执行用户定义的 shell 命令</span><span class="sub">subprocessEnv 注入会话环境变量</span></div>
+                    <div class="vc s16"></div>
+
+                    <!-- Hook 类型分支 -->
+                    <div class="fc-row" style="gap:8px;flex-wrap:wrap;justify-content:center;">
+                        <div class="fn n-process" style="font-size:11px;max-width:120px;border-color:var(--purple);color:var(--purple);">PreToolUse<span class="sub">工具调用前</span></div>
+                        <div class="fn n-process" style="font-size:11px;max-width:120px;border-color:var(--green);color:var(--green);">PostToolUse<span class="sub">工具调用后</span></div>
+                        <div class="fn n-process" style="font-size:11px;max-width:120px;border-color:var(--blue);color:var(--blue);">UserPromptSubmit<span class="sub">用户提交提示</span></div>
+                        <div class="fn n-process" style="font-size:11px;max-width:120px;border-color:var(--amber);color:var(--amber);">Notification<span class="sub">通知事件</span></div>
+                        <div class="fn n-process" style="font-size:11px;max-width:120px;border-color:var(--cyan);color:var(--cyan);">Stop<span class="sub">生成停止</span></div>
+                    </div>
+                    <div class="vc s16"></div>
+
+                    <div class="fc-row">
+                        <div class="fn n-process w" style="max-width:220px;">HookJSONOutput 验证<span class="sub">types/hooks.ts — schema 校验</span></div>
+                        <div class="hc-arrow s60 green"><span class="hc-label" style="color:var(--green);">同步</span></div>
+                        <div class="fn n-process" style="font-size:11px;">阻塞等待结果</div>
+                    </div>
+                    <div class="vc s12"></div>
+                    <div class="fc-row">
+                        <div class="hc s60" style="visibility:hidden;"></div>
+                        <div class="hc-arrow s60 amber"><span class="hc-label" style="color:var(--amber);">异步</span></div>
+                        <div class="fn n-process" style="font-size:11px;">后台执行不阻塞</div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Phase 3: 通知与会话 -->
+            <div class="fc">
+                <div class="fc-center">
+                    <div class="fn n-start">运行时通知/会话事件<span class="sub">工具完成 / 模型响应 / 空闲超时</span></div>
+                    <div class="vc s24"></div>
+
+                    <div class="fn n-check w">7. 空闲通知 — useNotifyAfterTimeout()<span class="sub">hooks/useNotifyAfterTimeout.ts:38</span><span class="sub">6 秒空闲阈值 → sendNotification 桌面通知</span></div>
+                    <div class="vc s20"></div>
+
+                    <div class="fn n-check ww">8. Direct Connect 会话 — useDirectConnect()<span class="sub">hooks/useDirectConnect.ts:39 — WebSocket 管理</span><span class="sub">DirectConnectSessionManager（L66）</span></div>
+                    <div class="vc s16"></div>
+
+                    <div class="fc-row" style="gap:24px;">
+                        <div style="display:flex;flex-direction:column;align-items:center;gap:0;">
+                            <div class="fn n-process" style="font-size:11px;max-width:140px;">onMessage<span class="sub">SDK 消息 → 内部消息</span></div>
+                            <div class="vc s12"></div>
+                            <div class="fn n-process" style="font-size:11px;max-width:140px;">追加到消息列表</div>
+                        </div>
+                        <div style="display:flex;flex-direction:column;align-items:center;gap:0;">
+                            <div class="fn n-process" style="font-size:11px;max-width:140px;">onPermissionRequest<span class="sub">权限请求处理</span></div>
+                            <div class="vc s12"></div>
+                            <div class="fn n-process" style="font-size:11px;max-width:140px;">合成 AssistantMessage + ToolUseConfirm</div>
+                        </div>
+                    </div>
+
+                    <div class="vc s24"></div>
+
+                    <!-- 错误处理策略 -->
+                    <div class="loop-box" style="border-color:var(--green);background:rgba(34,197,94,.04);max-width:560px;">
+                        <div class="loop-title" style="color:var(--green);">防御性错误处理 — 局部失败不影响全局</div>
+                        <div class="loop-text">
+                            <strong>hooks/useManagePlugins.ts:72-109</strong> — 每个加载步骤独立 try-catch<br>
+                            ① 命令加载失败 → errors.push({type, source, error})<br>
+                            ② Agent 加载失败 → 同上，继续执行<br>
+                            ③ Hooks 加载失败 → 同上，继续执行<br>
+                            ④ 所有步骤都失败 → 仍返回有效结果（计数为零）<br>
+                            <span style="color:var(--text-muted);font-size:10px;">Doctor UI（/doctor 命令）精确展示每个错误来源</span>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <div class="info-box info"><strong>分层架构</strong>：底层 Shell Hook 执行引擎只知道 spawn + JSON 解析；中间层 React Hooks 将底层能力绑定到 UI 状态；顶层 REPL 在正确时机调用正确 hook。插件加载采用"收集而非抛出"的错误策略——一个损坏的插件不阻止其他插件加载，也不让 REPL 崩溃。</div>
+        </section>
+
+        <section id="core-flow" class="card">
+            <h2><span class="icon" style="background:rgba(6,182,212,.15);color:var(--cyan);">⇉</span> 核心处理流程详解</h2>
+            <p>Claude Code 的 hooks 系统是一个分层架构：底层是 Shell Hook 执行引擎（utils/hooks.ts），负责安全地执行用户定义的 shell 命令；中间层是 React Hooks（hooks/ 目录），负责将底层能力与 UI 状态绑定；顶层是 REPL 集成点，将 hooks 的结果注入到主循环中。整个流程围绕"插件 → 工具 → 键盘 → 通知"四个核心路径展开。</p>
+            <div class="flow-chart vertical">
+                <div class="flow-step highlight">
+                    <div class="flow-step-title">1. 插件生命周期初始化 — useManagePlugins()</div>
+                    <div class="flow-step-desc">在 <code>hooks/useManagePlugins.ts:37</code> 组件挂载时执行 <code>initialPluginLoad</code>（L51）。并行调用 <code>loadAllPlugins()</code>（L54）加载所有插件，然后依次：检测并卸载已下架插件（L57）、加载插件命令/Agent/Hooks（L72-109）、预加载 MCP 和 LSP 服务器配置（L120-144）、更新 AppState（L148-180）。错误被收集到 <code>errors</code> 数组，合并到 AppState.plugins.errors（Dedup 逻辑在 L154-167）。</div>
+                </div>
+                <div class="flow-arrow">↓</div>
+                <div class="flow-step">
+                    <div class="flow-step-title">2. 工具池组装 — useMergedTools()</div>
+                    <div class="flow-step-desc">在 <code>hooks/useMergedTools.ts:20</code> 通过 <code>useMemo</code> 组装完整的工具池。先调用 <code>assembleToolPool</code>（L30）合并内置工具和 MCP 工具，应用 deny 规则和去重。再通过 <code>mergeAndFilterTools</code>（L32）将 initialTools（启动时传入）和 assembled 池合并，按权限模式过滤。依赖数组包含 <code>toolPermissionContext</code>，权限变更时自动重计算。</div>
+                </div>
+                <div class="flow-arrow">↓</div>
+                <div class="flow-step">
+                    <div class="flow-step-title">3. 全局键盘绑定 — GlobalKeybindingHandlers()</div>
+                    <div class="flow-step-desc">在 <code>hooks/useGlobalKeybindings.tsx:36</code> 注册全局快捷键：Ctrl+T 切换任务/队友视图（L51，三态循环：none → tasks → teammates → none）、Ctrl+O 切换 transcript 模式（L95）、Escape 取消操作。使用 <code>useKeybinding</code> hook 统一注册，通过 <code>useAppState</code> 读写全局状态。Brief 模式有专门的 Escape 处理（L107-114）。</div>
+                </div>
+                <div class="flow-arrow">↓</div>
+                <div class="flow-step">
+                    <div class="flow-step-title">4. 文本输入处理 — useTextInput()</div>
+                    <div class="flow-step-desc">在 <code>hooks/useTextInput.ts:73</code> 处理所有键盘输入编辑：<code>mapKey</code>（L318）将按键映射到编辑操作（光标移动、删除、Kill ring）；<code>handleEnter</code>（L247）区分 Enter 提交与 Shift+Enter 换行；历史导航（<code>upOrHistoryUp</code>，L269）在光标位于行首时切换历史记录；粘贴检测通过输入长度和速度判断。</div>
+                </div>
+                <div class="flow-arrow">↓</div>
+                <div class="flow-step highlight">
+                    <div class="flow-step-title">5. IDE 集成 — useIDEIntegration()</div>
+                    <div class="flow-step-desc">在 <code>hooks/useIDEIntegration.tsx:15</code> 检测并连接 IDE：<code>addIde</code>（L28）在检测到 IDE 时调用 <code>initializeIdeIntegration</code>，设置文件跳转、diff 展示、诊断信息等。使用 <code>useEffect</code> 确保只初始化一次，并传递 <code>ScopedMcpServerConfig</code> 让 IDE 可以使用 MCP 工具。</div>
+                </div>
+                <div class="flow-arrow">↓</div>
+                <div class="flow-step">
+                    <div class="flow-step-title">6. 空闲通知 — useNotifyAfterTimeout()</div>
+                    <div class="flow-step-desc">在 <code>hooks/useNotifyAfterTimeout.ts:38</code> 实现桌面通知：首先重置交互时间戳（L49-51），然后启动轮询定时器（L53-64），每 <code>DEFAULT_INTERACTION_THRESHOLD_MS</code>（6 秒，L9）检查用户是否活跃。当用户空闲超过阈值时，通过 <code>sendNotification</code> 发送桌面通知和终端通知。交互时间由 App.tsx 的 <code>processKeysInBatch</code> 更新（L23-26 注释）。</div>
+                </div>
+                <div class="flow-arrow">↓</div>
+                <div class="flow-step highlight">
+                    <div class="flow-step-title">7. Direct Connect 会话 — useDirectConnect()</div>
+                    <div class="flow-step-desc">在 <code>hooks/useDirectConnect.ts:39</code> 管理 WebSocket 会话连接。创建 <code>DirectConnectSessionManager</code>（L66），监听三种事件：<code>onMessage</code>（L67）将 SDK 消息转换为内部消息格式并追加到消息列表、<code>onPermissionRequest</code>（L87）创建合成 AssistantMessage 和 ToolUseConfirm 注入权限队列。tools 通过 ref 保持最新（L53-56），避免 WebSocket 回调中的闭包过期问题。</div>
+                </div>
+                <div class="flow-arrow">↓</div>
+                <div class="flow-step">
+                    <div class="flow-step-title">8. Shell Hook 执行 — utils/hooks.ts</div>
+                    <div class="flow-step-desc">在 <code>utils/hooks.ts</code> 中实现 Shell Hook 的安全执行：<code>spawn</code> 子进程执行用户定义的命令，通过 <code>subprocessEnv</code> 注入会话环境变量。支持 pre-tool-use、post-tool-use、notification 等生命周期事件。Hook 输出通过 <code>HookJSONOutput</code>（types/hooks.ts）schema 验证，支持同步（阻塞）和异步（后台）两种模式。</div>
+                </div>
+            </div>
+            <div class="info-box info">Hooks 系统的架构哲学是"分离关注点"：底层的 Shell Hook 执行引擎只知道如何安全地 spawn 子进程和解析 JSON；中间层的 React Hooks 只关心如何将底层结果绑定到 UI 状态；顶层 REPL 只需要在正确的时机调用正确的 hook。这种分层让每个部分都可以独立测试和演进——例如，useManagePlugins 的错误处理逻辑（dedup、分类、Doctor UI 展示）完全不影响 useDirectConnect 的 WebSocket 管理。</div>
+        </section>
+        <section id="design-essence" class="card">
+            <h2><span class="icon" style="background:rgba(245,158,11,.15);color:var(--amber);">★</span> 设计精华</h2>
+
+            <h3>1. 插件加载的防御性错误处理</h3>
+            <p><code>useManagePlugins</code>（hooks/useManagePlugins.ts）的错误处理策略体现了"局部失败不影响全局"的设计原则。每个加载步骤（命令、Agent、Hooks、MCP、LSP）都有独立的 try-catch（L75-109），错误被收集到统一的 <code>errors</code> 数组而非抛出。即使所有步骤都失败，函数仍返回有效结果（L251-260），只是计数为零。</p>
+            <div class="component-box">
+                <div class="name">防御性加载</div>
+                <div class="desc">每个组件独立 try-catch，错误收集到数组而非抛出</div>
+                <pre><code>// hooks/useManagePlugins.ts:72-109
+let commands: Command[] = []
+let agents: AgentDefinition[] = []
+
+try { commands = await getPluginCommands() }
+catch (error) {
+  errors.push({
+    type: 'generic-error', source: 'plugin-commands',
+    error: `Failed to load plugin commands: ${errorMessage}`
+  })
+}
+
+try { agents = await loadPluginAgents() }
+catch (error) {
+  errors.push({
+    type: 'generic-error', source: 'plugin-agents',
+    error: `Failed to load plugin agents: ${errorMessage}`
+  })
+}</code></pre>
+            </div>
+            <div class="info-box tip">这种"收集而非抛出"的错误策略在插件系统中至关重要。一个损坏的插件不应该阻止其他插件加载，也不应该让整个 REPL 崩溃。错误被分类存储（source 字段标识来源），Doctor UI（<code>/doctor</code> 命令）可以精确展示哪个插件的哪个组件出了什么问题。</div>
+
+            <h3>2. 工具池的去重与权限过滤</h3>
+            <p><code>useMergedTools</code>（hooks/useMergedTools.ts:20）虽然只有 45 行，但它封装了工具系统的核心逻辑。<code>assembleToolPool</code> 负责合并内置工具和 MCP 工具并应用 deny 规则，<code>mergeAndFilterTools</code> 负责将 initialTools 合入并按权限模式过滤。两层分离确保了 REPL 和 Agent（runAgent）共享相同的工具组装逻辑。</p>
+            <div class="component-box">
+                <div class="name">共享工具组装函数</div>
+                <div class="desc">REPL 和 Agent 共用 assembleToolPool，确保一致的权限行为</div>
+                <pre><code>// hooks/useMergedTools.ts:20-44
+export function useMergedTools(initialTools, mcpTools, ctx): Tools {
+  return useMemo(() =&gt; {
+    // assembleToolPool: 共享的纯函数，REPL 和 runAgent 都用
+    const assembled = assembleToolPool(ctx, mcpTools)
+    // mergeAndFilterTools: 按 permission mode 过滤
+    return mergeAndFilterTools(initialTools, assembled, ctx.mode)
+  }, [initialTools, mcpTools, ctx])
+}</code></pre>
+            </div>
+            <div class="info-box tip">将工具组装逻辑提取为纯函数而非 React Hook，是可测试性和复用性的关键决策。如果逻辑内联在 Hook 中，Agent（非 React 环境）无法复用，必须重新实现。纯函数 <code>assembleToolPool</code> 可以在任何上下文中调用，并通过 <code>useMemo</code> 在 React 中获得缓存优化。</div>
+
+            <h3>3. 交互时间戳的集中管理</h3>
+            <p>空闲检测（useNotifyAfterTimeout.ts）和交互时间跟踪采用了集中管理策略：<code>getLastInteractionTime</code>/<code>updateLastInteractionTime</code>（bootstrap/state.js）是全局唯一的交互时间源。更新点在 App.tsx 的 <code>processKeysInBatch</code> 中，而非 useNotifyAfterTimeout 内部的 stdin 监听器。注释（L23-26）解释了原因：额外的 stdin listener 会与主 listener 竞争，导致输入字符丢失。</p>
+            <div class="component-box">
+                <div class="name">集中式交互时间</div>
+                <div class="desc">全局单一时间源，避免多个 stdin listener 竞争</div>
+                <pre><code>// hooks/useNotifyAfterTimeout.ts:23-26
+// NOTE: User interaction tracking is now done in App.tsx's
+// processKeysInBatch function. This avoids having a separate
+// stdin 'data' listener that would compete with the main
+// 'readable' listener and cause dropped input characters.
+
+// L49-51 — 仅在 hook 挂载时重置时间戳
+useEffect(() =&gt; {
+  updateLastInteractionTime(true) // true = 立即重置
+}, [])</code></pre>
+            </div>
+            <div class="info-box tip">多个 stdin listener 竞争是终端应用中的经典陷阱。Node.js 的 stdin 是单消费者流，<code>'data'</code> 事件的多个 listener 可能导致字符被随机分配给不同的 listener。集中到一个 listener 并通过全局状态共享时间戳，彻底消除了这个竞态条件。</div>
+
+            <h3>4. WebSocket 的 ref 闭包修复</h3>
+            <p><code>useDirectConnect</code>（hooks/useDirectConnect.ts）面临 React Hook 的经典问题：WebSocket 回调中访问的 tools 可能过期。解决方案是使用 ref 桥接（L53-56）：<code>toolsRef</code> 在每次渲染后同步最新的 tools，WebSocket 回调始终读取 <code>toolsRef.current</code>。这比重新创建 WebSocket 连接高效得多。</p>
+            <div class="component-box">
+                <div class="name">Ref 闭包桥接</div>
+                <div class="desc">通过 ref 保持 WebSocket 回调中的 tools 引用最新</div>
+                <pre><code>// hooks/useDirectConnect.ts:53-56
+const toolsRef = useRef(tools)
+useEffect(() =&gt; {
+  toolsRef.current = tools  // 每次渲染后同步
+}, [tools])
+
+// WebSocket 回调中使用 ref
+const tool = findToolByName(toolsRef.current, request.tool_name)
+  ?? createToolStub(request.tool_name)</code></pre>
+            </div>
+            <div class="info-box tip">这是 React Hooks 中处理长生命周期回调的标准模式。<code>useEffect</code> 的依赖数组决定了何时重新订阅事件，但 WebSocket 连接不应该因为 tools 变化而断开重连。Ref 提供了一个"逃生舱"——不触发重渲染，不触发重新订阅，只保证回调中读取的值是最新的。</div>
+
+            <h3>5. 错误合并的去重策略</h3>
+            <p>在 <code>useManagePlugins</code> 的 <code>setAppState</code> 调用中（L148-180），新错误与现有错误（LSP 错误等）需要合并。去重逻辑（L154-167）通过构造唯一 key（<code>type:source</code> 或 <code>type:source:error</code>）避免同一错误被重复添加。这防止了插件刷新操作导致错误列表无限增长。</p>
+            <div class="info-box tip">错误去重看似简单，但在插件系统中有一个微妙的需求：同一来源的不同错误应该保留（如两个不同的 MCP 连接失败），但同一来源的同一错误应该去重（如反复刷新导致的重复错误）。通过将 generic-error 的 key 包含错误消息而结构化错误只包含类型和来源，精确地实现了这个语义。</div>
+        </section>
+
+        <section id="agent-practice" class="card">
+            <h2><span class="icon" style="background:rgba(34,197,94,.15);color:var(--green);">◈</span> Agent 实践借鉴 — 客服 Agent 事件钩子设计</h2>
+
+            <div class="info-box info">本节回答：如果你在设计一个客服 Agent 助手，工具调用前后需要审计日志、合规检查、异步通知，Claude Code 的 Hook 系统有哪些值得抄、哪些不需要抄？</div>
+
+            <h3>1. 场景映射：客服 Agent 的钩子需求</h3>
+            <p>客服场景有严格的合规要求。每次工具调用都需要审计、有些需要合规拦截、有些需要事后通知。这些需求恰好映射到 CC 的 Pre/Post Hook 模型：</p>
+            <div class="two-col">
+                <div class="component-box">
+                    <div class="name">客服场景的四种钩子需求</div>
+                    <div class="desc">审计、合规、通知、脱敏</div>
+                    <pre><code>// 客服场景的钩子需求
+// ──────────────────────────────────
+// 1. 审计日志（Pre Hook）
+//    坐席查了客户身份证号 → 必须记录：
+//    "坐席张三在 2024-01-15 14:30
+//     查询了客户李四的身份证号"
+//
+// 2. 合规检查（Pre Hook — 可 deny）
+//    查询客户手机号 → 必须先记录查询理由
+//    没填理由 → deny 操作
+//
+// 3. 异步通知（Post Hook）
+//    退单操作完成 → 通知财务部门（异步不阻塞）
+//
+// 4. 数据脱敏（Pre Hook — modify）
+//    客户手机号 138****5678
+//    坐席级别不够 → modify 脱敏后返回</code></pre>
+                </div>
+                <div class="component-box">
+                    <div class="name">CC 借鉴点映射</div>
+                    <div class="desc">CC 的 Hook 机制 → 客服的钩子需求</div>
+                    <pre><code>// Claude Code                 →  客服 Agent
+// ────────────────────────────────────────────
+Pre tool use hook       →  工具调用前的审计 + 合规
+Post tool use hook      →  工具调用后的通知 + 日志
+Hook 返回 allow/deny    →  合规检查可拦截操作
+Hook 返回 modify        →  数据脱敏/权限过滤
+防御性 try-catch        →  审计日志失败不阻塞退单
+Hook 优先级排序         →  合规 hook 先于审计 hook</code></pre>
+                </div>
+            </div>
+
+            <h3>2. 借鉴 CC + 客服改造：伪代码实现</h3>
+            <p>以下是客服 Hook 系统的核心实现，借鉴 CC 的 pre/post 生命周期、防御性错误处理和 allow/deny/modify 三种决策：</p>
+            <div class="component-box">
+                <div class="name">Hook 生命周期：pre → 执行 → post</div>
+                <div class="desc">借鉴 CC 的 executeToolWithHooks，适配客服场景</div>
+                <pre><code>// 客服 Hook 生命周期 — 借鉴 CC 的三阶段执行
+async function executeToolWithCSHooks(
+  toolName: string,
+  input: any,
+  toolFn: (input: any) =&gt; Promise&lt;any&gt;,
+  preHooks: CSHook[],
+  postHooks: CSHook[]
+): Promise&lt;ToolResult&gt; {
+
+  // 阶段 1: Pre-hooks — 审计 + 合规检查
+  let currentInput = input
+  for (const hook of preHooks) {
+    if (!matchPattern(hook.pattern, toolName)) continue
+
+    const result = await safeExecuteHook(hook, toolName, currentInput)
+
+    if (result.decision === "deny") {
+      // 合规检查不通过 → 记录 deny 事件并终止
+      logger.audit("TOOL_DENIED", { tool: toolName, reason: result.reason })
+      return { status: "denied", reason: result.reason }
+    }
+
+    if (result.decision === "modify") {
+      // 数据脱敏 → 替换输入中的敏感字段
+      currentInput = result.updatedInput
+    }
+  }
+
+  // 阶段 2: 执行工具
+  const output = await toolFn(currentInput)
+
+  // 阶段 3: Post-hooks — 通知 + 日志（异步，不阻塞）
+  for (const hook of postHooks) {
+    safeExecuteHook(hook, toolName, currentInput, output)  // fire-and-forget
+  }
+
+  return { status: "success", output }
+}</code></pre>
+            </div>
+
+            <div class="component-box">
+                <div class="name">Hook 返回值类型：allow / deny / modify</div>
+                <div class="desc">借鉴 CC 的 HookResult 三种决策，适配客服的合规和脱敏</div>
+                <pre><code>// Hook 返回类型 — 借鉴 CC 的 allow/deny/modify
+type CSHookResult =
+  | { decision: "allow" }                     // 放行
+  | { decision: "deny"; reason: string }      // 合规拦截
+  | { decision: "modify"; updatedInput: any } // 数据脱敏
+
+// Hook 1: 合规检查 — deny 无理由的敏感操作
+const complianceHook: CSHook = {
+  name: "compliance-check",
+  pattern: /query_id_card|query_phone|query_address/,
+  handler: async (toolName, input) =&gt; {
+    if (!input.queryReason || input.queryReason.trim() === "") {
+      return {
+        decision: "deny",
+        reason: `查询敏感信息(${toolName})必须填写查询理由`
+      }
+    }
+    return { decision: "allow" }
+  }
+}
+
+// Hook 2: 数据脱敏 — modify 手机号和身份证
+const maskSensitiveDataHook: CSHook = {
+  name: "mask-sensitive-data",
+  pattern: /query_phone|query_id_card/,
+  handler: async (toolName, input, agentRole) =&gt; {
+    if (agentRole.level &lt; 3) {  // 级别不够
+      return {
+        decision: "modify",
+        updatedInput: {
+          ...input,
+          fieldsToMask: ["phone", "idCard"]  // 标记需要脱敏的字段
+        }
+      }
+    }
+    return { decision: "allow" }
+  }
+}
+
+// Hook 3: 审计日志 — 记录所有敏感操作
+const auditLogHook: CSHook = {
+  name: "audit-log",
+  pattern: /.*/,  // 匹配所有工具
+  handler: async (toolName, input) =&gt; {
+    await auditLog.write({
+      operator: input.operatorName,
+      action: toolName,
+      customerId: input.customerId,
+      timestamp: new Date(),
+      queryReason: input.queryReason
+    })
+    return { decision: "allow" }
+  }
+}</code></pre>
+            </div>
+
+            <div class="component-box">
+                <div class="name">防御性执行 + Hook 注册和优先级</div>
+                <div class="desc">单个 hook 失败不影响主流程，优先级保证合规先于审计</div>
+                <pre><code>// 防御性 Hook 执行器 — 借鉴 CC 的独立 try-catch
+async function safeExecuteHook(
+  hook: CSHook, toolName: string, ...args: any[]
+): Promise&lt;CSHookResult&gt; {
+  try {
+    return await hook.handler(toolName, ...args)
+  } catch (error) {
+    // 审计日志写入失败不能阻塞退单操作
+    logger.error(`Hook "${hook.name}" failed`, { error: error.message })
+    return { decision: "allow" }  // 失败时放行，不阻塞主流程
+  }
+}
+
+// Hook 注册表 — 按优先级排序
+class CSHookRegistry {
+  private preHooks: RegisteredHook[] = []
+
+  register(name: string, pattern: RegExp, handler: HookHandler, priority: number = 100) {
+    this.preHooks.push({ name, pattern, handler, priority })
+    this.preHooks.sort((a, b) =&gt; a.priority - b.priority)  // 数字小先执行
+  }
+}
+
+// 注册 — 优先级保证执行顺序
+const registry = new CSHookRegistry()
+registry.register("compliance-check", /query_/, complianceHandler, 10)    // 最先：合规
+registry.register("mask-sensitive-data", /query_/, maskHandler, 20)       // 其次：脱敏
+registry.register("audit-log", /.*/, auditHandler, 50)                    // 最后：审计</code></pre>
+            </div>
+
+            <h3>3. 落地清单：必须抄 vs 不需要抄</h3>
+            <div class="two-col">
+                <div class="info-box tip">
+                    <strong>必须抄：</strong>
+                    <ul>
+                        <li><strong>Pre/Post 生命周期</strong> — 工具调用前做审计和合规检查（pre），调用后做通知和日志（post）。CC 的 pre→execute→post 模型完美适配</li>
+                        <li><strong>防御性错误处理</strong> — 每个 hook 独立 try-catch，审计日志写入失败不能阻塞退单操作。CC 的 safeExecute 就是这个模式</li>
+                        <li><strong>Hook 可 deny 操作</strong> — 合规 hook 返回 deny 可以阻止敏感操作。CC 的 allow/deny/modify 三种决策就是为这种场景设计的</li>
+                        <li><strong>Hook 优先级排序</strong> — 合规 hook（priority=10）必须在审计 hook（priority=50）之前执行，确保不合规的请求不会被记录为"已执行"</li>
+                    </ul>
+                </div>
+                <div class="info-box warning">
+                    <strong>不需要抄：</strong>
+                    <ul>
+                        <li><strong>React Hooks</strong> — CC 代码中大量 useXxx 是 React 状态管理 hooks，和本节的"事件钩子"完全不是一回事。客服面板用标准 Web 框架的 hooks 就行</li>
+                        <li><strong>50+ 自定义 hooks</strong> — CC 有 useTextInput、useGlobalKeybindings 等 50+ hooks。客服场景 5-10 个 hook（审计、合规、通知、脱敏、限流）就够</li>
+                        <li><strong>Hook 可修改工具输入路径</strong> — CC 的 modify 可以改变工具调用的输入参数。客服场景主要用 deny 拦截和 modify 脱敏，不需要复杂参数变换</li>
+                    </ul>
+                </div>
+            </div>
+
+            <h3>4. 常见坑</h3>
+            <div class="info-box warning">
+                <strong>坑 1：审计 hook 抛异常导致退单操作失败。</strong>审计日志服务的数据库连接超时，异常向上传播，坐席的退单操作直接报错。解决方案：借鉴 CC 的防御性执行——每个 hook 独立 try-catch，失败记录日志并返回 allow，绝不阻塞主流程。
+            </div>
+            <div class="info-box warning">
+                <strong>坑 2：合规 hook 和审计 hook 执行顺序颠倒。</strong>审计 hook 先执行记录了操作日志，然后合规 hook deny 了操作——日志里记了一条"已执行"但实际没执行。解决方案：通过显式优先级确保合规 hook（priority=10）永远在审计 hook（priority=50）之前。
+            </div>
+            <div class="info-box warning">
+                <strong>坑 3：Post hook 同步 await 导致坐席等待。</strong>退单操作本身 200ms 完成，但 post hook 里的"通知财务"发了邮件等了 3 秒，坐席等了 3.2 秒才看到结果。解决方案：Post hook 用 fire-and-forget 模式（不 await），或者放消息队列异步处理。
+            </div>
+            <div class="info-box warning">
+                <strong>坑 4：Hook 注册太分散，不知道系统里有哪些 hook。</strong>有人在 controller 里直接 if-else 做合规检查，有人用 hook 系统注册，两套逻辑互相覆盖。解决方案：所有拦截逻辑必须通过 HookRegistry 注册，禁止在业务代码中直接写 if-else 拦截。
+            </div>
+        </section>
+        <section id="code-index" class="card">
+            <h2>代码索引</h2>
+            <table>
+                <thead><tr><th>文件</th><th>行数</th><th>说明</th></tr></thead>
+                <tbody>
+                    <tr><td><code>hooks/useManagePlugins.ts</code></td><td>~305</td><td>插件管理 Hook：初始化加载、错误收集、刷新通知</td></tr>
+                    <tr><td><code>hooks/useMergedTools.ts</code></td><td>~45</td><td>工具合并 Hook：assembleToolPool + mergeAndFilterTools</td></tr>
+                    <tr><td><code>hooks/useNotifyAfterTimeout.ts</code></td><td>~66</td><td>空闲通知 Hook：idle 检测 + 桌面/终端通知</td></tr>
+                    <tr><td><code>hooks/useGlobalKeybindings.tsx</code></td><td>~大型</td><td>全局键盘绑定：Escape/Ctrl+C/自定义快捷键</td></tr>
+                    <tr><td><code>hooks/useTextInput.ts</code></td><td>~大型</td><td>文本输入处理：stdin 读取、多行编辑、粘贴</td></tr>
+                    <tr><td><code>hooks/useIDEIntegration.tsx</code></td><td>~大型</td><td>IDE 集成：文件跳转、diff 展示、诊断</td></tr>
+                    <tr><td><code>hooks/useDirectConnect.ts</code></td><td>~中型</td><td>Direct Connect：WebSocket 会话连接管理</td></tr>
+                    <tr><td><code>hooks/useSSHSession.ts</code></td><td>~中型</td><td>SSH 会话：远程连接状态管理</td></tr>
+                    <tr><td><code>hooks/useRemoteSession.ts</code></td><td>~中型</td><td>远程会话：Teleport 协议</td></tr>
+                    <tr><td><code>hooks/useQueueProcessor.ts</code></td><td>~中型</td><td>命令队列处理：异步命令调度</td></tr>
+                    <tr><td><code>hooks/useTerminalSize.ts</code></td><td>~小型</td><td>终端尺寸：resize 事件订阅</td></tr>
+                    <tr><td><code>hooks/useElapsedTime.ts</code></td><td>~小型</td><td>计时器：会话/请求耗时显示</td></tr>
+                    <tr><td><code>hooks/useAfterFirstRender.ts</code></td><td>~小型</td><td>首帧回调：跳过首次渲染的副作用</td></tr>
+                    <tr><td><code>hooks/useTimeout.ts</code></td><td>~小型</td><td>定时器 Hook：可取消的 setTimeout</td></tr>
+                    <tr><td><code>hooks/useDoublePress.ts</code></td><td>~小型</td><td>双击检测：Esc 双击退出确认</td></tr>
+                    <tr><td><code>hooks/toolPermission/interactiveHandler.ts</code></td><td>~大型</td><td>交互式权限决策：用户确认对话框</td></tr>
+                    <tr><td><code>hooks/toolPermission/coordinatorHandler.ts</code></td><td>~中型</td><td>协调器权限决策：Swarm 模式</td></tr>
+                    <tr><td><code>hooks/toolPermission/swarmWorkerHandler.ts</code></td><td>~中型</td><td>Worker 权限决策：Agent 模式</td></tr>
+                    <tr><td><code>hooks/toolPermission/PermissionContext.ts</code></td><td>~中型</td><td>权限上下文：决策链初始化</td></tr>
+                    <tr><td><code>hooks/notifs/useMcpConnectivityStatus.tsx</code></td><td>~中型</td><td>MCP 连接状态通知</td></tr>
+                    <tr><td><code>hooks/notifs/usePluginAutoupdateNotification.ts</code></td><td>~中型</td><td>插件自动更新通知</td></tr>
+                    <tr><td><code>hooks/notifs/useRateLimitWarningNotification.tsx</code></td><td>~中型</td><td>速率限制警告通知</td></tr>
+                    <tr><td><code>hooks/notifs/useStartupNotification.ts</code></td><td>~小型</td><td>启动消息通知</td></tr>
+                    <tr><td><code>hooks/notifs/useSettingsErrors.tsx</code></td><td>~小型</td><td>设置错误通知</td></tr>
+                </tbody>
+            </table>
+        </section>
+        <footer style="text-align:center; padding:32px 0 20px; margin-top:48px; border-top:1px solid var(--border); color:var(--text-secondary); font-size:13px; line-height:2;">
+        <div style="margin-bottom:4px;">⚠️ 免责声明</div>
+        本文仅用于技术学习和架构分析目的。源码分析基于公开泄漏的代码，所有商标和版权归 <a href="https://www.anthropic.com" style="color:var(--indigo);">Anthropic</a> 所有。未经授权不得用于商业用途。
+    </footer>
+    </main>
+</body>
+</html>

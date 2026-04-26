@@ -1,0 +1,858 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>MCP 体系 - Claude Code 源码分析</title>
+    <link rel="stylesheet" href="shared/styles.css">
+</head>
+<body>
+    <nav class="sidebar">
+<div class="sidebar-header"><div class="logo">CC</div><div><div class="sidebar-title">Claude Code</div><div class="sidebar-subtitle">源码深度分析</div></div></div>
+        <div class="nav-section-title">总览</div>
+        <a href="reading-guide.html" class="nav-link">阅读指南</a>
+        <a href="index.html" class="nav-link">架构全景</a>
+        <a href="dependency-map.html" class="nav-link">模块依赖图</a>
+        <a href="vertical-agent-guide.html" class="nav-link">垂直 Agent 设计指南</a>
+<div class="nav-section-title">核心流程</div>
+<a href="00-startup.html" class="nav-link">启动链路</a>
+<a href="01-query-loop.html" class="nav-link">Query 循环</a>
+<a href="flows/query-lifecycle.html" class="nav-link">查询生命周期</a>
+<div class="nav-section-title">核心机制</div>
+<a href="02-tool-dispatch.html" class="nav-link">工具调度</a>
+<a href="03-permissions.html" class="nav-link">权限系统</a>
+<a href="03b-security-hardening.html" class="nav-link">风控与安全加固</a>
+<a href="04-agent-arch.html" class="nav-link">Agent 架构</a>
+<a href="11-hooks.html" class="nav-link">Hook 机制</a>
+<div class="nav-section-title">扩展体系</div>
+<a href="05-mcp.html" class="nav-link active">MCP 体系</a>
+<a href="07-plugins.html" class="nav-link">插件系统</a>
+<a href="08-commands.html" class="nav-link">命令系统</a>
+<div class="nav-section-title">数据与服务</div>
+<a href="06-context-mgmt.html" class="nav-link">上下文管理</a>
+<a href="10-services.html" class="nav-link">服务层</a>
+<a href="15-cost-limits.html" class="nav-link">成本与限流</a>
+<div class="nav-section-title">界面与配置</div>
+<a href="09-ui.html" class="nav-link">UI 交互层</a>
+<a href="13-config.html" class="nav-link">配置与迁移</a>
+<div class="nav-section-title">外围能力</div>
+<a href="12-external.html" class="nav-link">外部集成</a>
+<a href="14-native.html" class="nav-link">Native 能力</a>
+<div class="nav-section-title">流程图</div>
+<a href="flows/tool-execution.html" class="nav-link">工具执行流程</a>
+<a href="flows/agent-collab.html" class="nav-link">Agent 协作流程</a>
+</nav>
+    <main class="content">
+        <header class="page-header">
+            <span class="breadcrumb"><a href="index.html">源码分析</a></span>
+            <h1>MCP 体系</h1>
+            <p class="subtitle">Model Context Protocol 的完整实现——多传输层客户端、OAuth/XAA 认证、连接生命周期管理、资源发现与 Channel 通知推送</p>
+        </header>
+
+        <nav class="page-toc">
+    <div class="page-toc-title">页面导航</div>
+        <a href="#overview"><span class="toc-dot dot-overview"></span>职责概述</a>
+        <a href="#architecture"><span class="toc-dot dot-arch"></span>架构设计</a>
+        <a href="#dataflow"><span class="toc-dot dot-data"></span>数据流</a>
+        <a href="#interfaces"><span class="toc-dot dot-arch"></span>核心接口</a>
+        <a href="#patterns"><span class="toc-dot dot-arch"></span>设计模式</a>
+        <a href="#dev-guide"><span class="toc-dot dot-code"></span>开发者指南</a>
+        <a href="#arch-guide"><span class="toc-dot dot-arch"></span>架构师指南</a>
+        <a href="#topology"><span class="toc-dot dot-data"></span>处理拓扑图</a>
+        <a href="#core-flow"><span class="toc-dot dot-data"></span>核心流程详解</a>
+        <a href="#design-essence"><span class="toc-dot dot-design"></span>设计精华</a>
+        <a href="#agent-practice"><span class="toc-dot dot-practice"></span>Agent 实践借鉴</a>
+        <a href="#code-index"><span class="toc-dot dot-code"></span>代码索引</a>
+</nav>
+
+        <section id="overview" class="card">
+            <h2>职责概述</h2>
+            <p>MCP（Model Context Protocol）体系是 Claude Code 的核心扩展机制，负责与外部 MCP 服务器建立连接、发现工具/资源/命令、管理认证流程，并将远程工具封装为统一的 Tool 接口供查询循环调用。整个体系横跨 <code>services/mcp/</code>（客户端连接、认证、配置）和 <code>server/</code>（服务端会话管理）两大模块，支持 stdio、SSE、HTTP、WebSocket、SDK 等六种传输方式，实现了 OAuth 2.0 + PKCE 认证流、XAA（Cross-App Access）企业免浏览器认证、Elicitation 交互式确认、Channel 消息推送等高级特性。它是 Claude Code 从单一工具 CLI 演进为可扩展平台的关键基础设施。</p>
+        </section>
+
+        <section id="architecture" class="card">
+            <h2>架构设计</h2>
+            <div class="layer-diagram">
+                <div class="layer layer-entry">
+                    <div class="layer-header">React 编排层</div>
+                    <div class="layer-body">
+                        <div class="layer-component highlight">MCPConnectionManager.tsx</div>
+                        <div class="layer-component">useManageMCPConnections.ts</div>
+                        <div class="layer-component">useMergedTools.ts</div>
+                    </div>
+                </div>
+                <div class="layer-arrow">&#9660;</div>
+                <div class="layer layer-engine">
+                    <div class="layer-header">MCP 客户端引擎</div>
+                    <div class="layer-body">
+                        <div class="layer-component highlight">client.ts（connectToServer）</div>
+                        <div class="layer-component">config.ts（配置加载与策略过滤）</div>
+                        <div class="layer-component">auth.ts（OAuth 2.0 / ClaudeAuthProvider）</div>
+                    </div>
+                </div>
+                <div class="layer-arrow">&#9660;</div>
+                <div class="layer layer-tool">
+                    <div class="layer-header">传输层</div>
+                    <div class="layer-body">
+                        <div class="layer-component">StdioClientTransport</div>
+                        <div class="layer-component">SSEClientTransport</div>
+                        <div class="layer-component">HTTPStreamableTransport</div>
+                        <div class="layer-component">WebSocketTransport</div>
+                        <div class="layer-component highlight">InProcessTransport</div>
+                        <div class="layer-component">SdkControlTransport</div>
+                    </div>
+                </div>
+                <div class="layer-arrow">&#9660;</div>
+                <div class="layer layer-security">
+                    <div class="layer-header">认证与安全</div>
+                    <div class="layer-body">
+                        <div class="layer-component">ClaudeAuthProvider (OAuth 2.0 + PKCE)</div>
+                        <div class="layer-component">xaa.ts（企业 XAA 免浏览器认证）</div>
+                        <div class="layer-component">xaaIdpLogin.ts（IdP OIDC 登录）</div>
+                        <div class="layer-component">headersHelper.ts（动态 Header 注入）</div>
+                    </div>
+                </div>
+                <div class="layer-arrow">&#9660;</div>
+                <div class="layer layer-infra">
+                    <div class="layer-header">通知与交互</div>
+                    <div class="layer-body">
+                        <div class="layer-component">channelNotification.ts（Channel 消息推送）</div>
+                        <div class="layer-component">channelPermissions.ts（权限远程确认）</div>
+                        <div class="layer-component">elicitationHandler.ts（Elicitation 交互）</div>
+                        <div class="layer-component">claudeai.ts（claude.ai 代理服务器）</div>
+                    </div>
+                </div>
+            </div>
+            <h3 style="margin-top:1.5rem">服务端架构</h3>
+            <div class="layer-diagram">
+                <div class="layer layer-data">
+                    <div class="layer-header">Direct Connect 服务端</div>
+                    <div class="layer-body">
+                        <div class="layer-component">server/types.ts（会话状态模型）</div>
+                        <div class="layer-component">server/createDirectConnectSession.ts</div>
+                        <div class="layer-component highlight">server/directConnectManager.ts（WebSocket 会话管理）</div>
+                    </div>
+                </div>
+            </div>
+        </section>
+
+        <section id="dataflow" class="card">
+            <h2>核心数据流</h2>
+
+            <h3>连接生命周期</h3>
+            <div class="flow-chart">
+                <div class="flow-step">
+                    <div class="flow-step-title">1. 配置加载</div>
+                    <div class="flow-step-desc">getClaudeCodeMcpConfigs() 从 .mcp.json、用户设置、企业策略、claude.ai API 加载服务器配置，按策略过滤并去重</div>
+                </div>
+                <div class="flow-arrow">&rarr;</div>
+                <div class="flow-step">
+                    <div class="flow-step-title">2. 初始化 Pending</div>
+                    <div class="flow-step-desc">useManageMCPConnections 将所有服务器标记为 pending 状态，注册到 AppState.mcp.clients</div>
+                </div>
+                <div class="flow-arrow">&rarr;</div>
+                <div class="flow-step">
+                    <div class="flow-step-title">3. 批量连接</div>
+                    <div class="flow-step-desc">getMcpToolsCommandsAndResources() 分 local/remote 两组并发调用 connectToServer()，本地并发度低（进程开销），远程并发度高</div>
+                </div>
+                <div class="flow-arrow">&rarr;</div>
+                <div class="flow-step">
+                    <div class="flow-step-title">4. 传输握手</div>
+                    <div class="flow-step-desc">根据 type 字段选择传输实现（stdio/SSE/HTTP/WS/Sdk/InProcess），完成 OAuth 认证或 XAA 认证</div>
+                </div>
+                <div class="flow-arrow">&rarr;</div>
+                <div class="flow-step">
+                    <div class="flow-step-title">5. 能力发现</div>
+                    <div class="flow-step-desc">并发获取 tools、commands（prompts）、resources、skills，注册 list_changed 通知处理器</div>
+                </div>
+                <div class="flow-arrow">&rarr;</div>
+                <div class="flow-step">
+                    <div class="flow-step-title">6. 状态同步</div>
+                    <div class="flow-step-desc">通过 updateServer() 批量更新 AppState（16ms 窗口合并），触发 UI 刷新与工具池重组</div>
+                </div>
+            </div>
+
+            <h3 style="margin-top:2rem">认证决策流</h3>
+            <div class="flow-chart">
+                <div class="flow-step">
+                    <div class="flow-step-title">认证入口</div>
+                    <div class="flow-step-desc">connectToServer() 根据 config.type 判断传输类型</div>
+                </div>
+                <div class="flow-arrow">&rarr;</div>
+                <div class="flow-step">
+                    <div class="flow-step-title">远程服务器?</div>
+                    <div class="flow-step-desc">sse/http 类型创建 ClaudeAuthProvider，检查 config.oauth.xaa 标志</div>
+                </div>
+                <div class="flow-arrow">&rarr;</div>
+                <div class="flow-step">
+                    <div class="flow-step-title">XAA 路径</div>
+                    <div class="flow-step-desc">performMCPXaaAuth(): PRM 发现 &rarr; AS 元数据 &rarr; id_token 换 ID-JAG &rarr; ID-JAG 换 access_token（无需浏览器）</div>
+                </div>
+                <div class="flow-arrow">&rarr;</div>
+                <div class="flow-step">
+                    <div class="flow-step-title">OAuth 路径</div>
+                    <div class="flow-step-desc">performMCPOAuthFlow(): 发现 &rarr; 注册 &rarr; 授权 URL &rarr; 回调 &rarr; Token 交换，token 持久化到系统 Keychain</div>
+                </div>
+            </div>
+        </section>
+
+        <section id="interfaces" class="card">
+            <h2>关键类型与接口</h2>
+
+            <h3>服务器配置联合类型</h3>
+            <pre><code>// services/mcp/types.ts:23-26
+export const TransportSchema = lazySchema(() =>
+  z.enum(['stdio', 'sse', 'sse-ide', 'http', 'ws', 'sdk']),
+)
+
+// services/mcp/types.ts:124-135 — 七种配置的联合类型
+export const McpServerConfigSchema = lazySchema(() =>
+  z.union([
+    McpStdioServerConfigSchema(),   // 本地进程
+    McpSSEServerConfigSchema(),     // SSE 远程（支持 OAuth）
+    McpSSEIDEServerConfigSchema(),  // IDE 内部 SSE
+    McpWebSocketIDEServerConfigSchema(), // IDE WebSocket
+    McpHTTPServerConfigSchema(),    // HTTP 流式传输
+    McpWebSocketServerConfigSchema(),    // 通用 WebSocket
+    McpSdkServerConfigSchema(),     // SDK 进程内
+    McpClaudeAIProxyServerConfigSchema(), // claude.ai 代理
+  ]),
+)</code></pre>
+
+            <h3>连接状态联合类型</h3>
+            <pre><code>// services/mcp/types.ts:180-227
+export type MCPServerConnection =
+  | ConnectedMCPServer   // { type: 'connected', client, capabilities, tools... }
+  | FailedMCPServer      // { type: 'failed', error? }
+  | NeedsAuthMCPServer   // { type: 'needs-auth' }
+  | PendingMCPServer     // { type: 'pending', reconnectAttempt? }
+  | DisabledMCPServer    // { type: 'disabled' }</code></pre>
+
+            <h3>InProcessTransport（进程内传输）</h3>
+            <pre><code>// services/mcp/InProcessTransport.ts:11-49
+class InProcessTransport implements Transport {
+  private peer: InProcessTransport | undefined
+  async send(message: JSONRPCMessage): Promise&lt;void&gt; {
+    if (this.closed) throw new Error('Transport is closed')
+    queueMicrotask(() => {
+      this.peer?.onmessage?.(message)
+    })
+  }
+}
+
+// 创建成对的传输通道
+export function createLinkedTransportPair(): [Transport, Transport]</code></pre>
+
+            <h3>Channel 权限回调接口</h3>
+            <pre><code>// services/mcp/channelPermissions.ts:46-61
+export type ChannelPermissionCallbacks = {
+  onResponse(requestId: string,
+    handler: (response: ChannelPermissionResponse) => void): () => void
+  resolve(requestId: string, behavior: 'allow' | 'deny',
+    fromServer: string): boolean
+}</code></pre>
+
+            <h3>工具名称规范化</h3>
+            <pre><code>// services/mcp/mcpStringUtils.ts:39-41
+export function getMcpPrefix(serverName: string): string {
+  return `mcp__${normalizeNameForMCP(serverName)}__`
+}
+// 例: "slack" 服务器的工具 "send_message" → "mcp__slack__send_message"</code></pre>
+        </section>
+
+        <section id="patterns" class="card">
+            <h2>设计模式与亮点</h2>
+
+            <div class="two-col">
+                <div>
+                    <h3>多传输层抽象</h3>
+                    <p><code>connectToServer()</code>（client.ts:595）是一个巨大的 <code>memoize</code> 函数，根据 <code>serverRef.type</code> 分发到六种传输实现。每种传输的认证逻辑统一通过 <code>ClaudeAuthProvider</code> 处理（SSE/HTTP），或通过专用通道（stdio 无需认证、SDK 通过控制消息桥接）。这种设计让添加新传输类型只需增加一个 else-if 分支。</p>
+                </div>
+                <div>
+                    <h3>批量状态更新 + 微任务合并</h3>
+                    <p><code>updateServer()</code>（useManageMCPConnections.ts:297）将单个服务器的状态变更推入 <code>pendingUpdatesRef</code>，通过 16ms 的 <code>setTimeout</code> 窗口合并多个几乎同时到达的更新为一次 <code>setAppState</code> 调用。这避免了 N 个 MCP 服务器同时连接完成时触发 N 次 React 重渲染。</p>
+                </div>
+            </div>
+
+            <div class="two-col" style="margin-top:1rem">
+                <div>
+                    <h3>两阶段配置加载</h3>
+                    <p>MCP 配置分两阶段加载（useManageMCPConnections.ts:858-1024）：Phase 1 先连接 Claude Code 本地配置的服务器（快速），Phase 2 再异步获取 claude.ai 组织配置的服务器（可能慢），两者并行执行不互相阻塞。还通过 <code>dedupClaudeAiMcpServers()</code> 按签名去重，避免重复连接。</p>
+                </div>
+                <div>
+                    <h3>XAA 企业免浏览器认证</h3>
+                    <p>xaa.ts 实现了三层 OAuth 链：PRM 发现（RFC 9728）&rarr; Token Exchange（RFC 8693: id_token 换 ID-JAG）&rarr; JWT Bearer Grant（RFC 7523: ID-JAG 换 access_token）。企业用户只需一次 IdP 浏览器登录，后续所有 MCP 服务器认证均为静默完成。</p>
+                </div>
+            </div>
+
+            <div class="two-col" style="margin-top:1rem">
+                <div>
+                    <h3>指数退避重连</h3>
+                    <p>远程传输（SSE/HTTP/WS）断开后，<code>onclose</code> 处理器（useManageMCPConnections.ts:333）启动最多 5 次的重连尝试，退避时间从 1s 到 30s 指数增长。重连前检查服务器是否被禁用，支持中途取消。</p>
+                </div>
+                <div>
+                    <h3>Channel 消息推送</h3>
+                    <p>通过 <code>notifications/claude/channel</code> 通知机制，MCP 服务器可以主动向 Claude 推送消息（如 Telegram/iMessage/Discord 入站消息）。五层门控（capability &rarr; runtime &rarr; auth &rarr; policy &rarr; allowlist）确保安全性。</p>
+                </div>
+            </div>
+
+            <div class="info-box tip" style="margin-top:1rem">
+                <strong>认证缓存策略：</strong>MCP 认证结果通过 <code>mcpAuthCache</code> 和 <code>isMcpAuthCached()</code> 缓存到磁盘。对于返回 401 的服务器有 15 分钟的 TTL，避免反复探测不可用的认证端点。<code>ClaudeAuthProvider</code> 将 token 持久化到系统 Keychain（macOS）或加密存储，跨 CLI 会话复用。
+            </div>
+        </section>
+
+        <section id="dev-guide" class="card developer">
+            <h2>开发者实践指南</h2>
+
+            <h3>添加新的 MCP 传输类型</h3>
+            <p>在 <code>services/mcp/types.ts</code> 中定义新的配置 Schema，在 <code>client.ts</code> 的 <code>connectToServer()</code> 函数中添加新的 else-if 分支创建传输实例。注意：</p>
+            <ul>
+                <li>传输必须实现 <code>@modelcontextprotocol/sdk</code> 的 <code>Transport</code> 接口</li>
+                <li>如需认证，在 <code>auth.ts</code> 的 <code>ClaudeAuthProvider</code> 中处理 token 存储/刷新</li>
+                <li>参考 <code>InProcessTransport.ts</code>（63 行）作为最简传输实现</li>
+            </ul>
+
+            <h3>理解 MCP 工具调用链</h3>
+            <p>MCP 工具调用流程：Tool.call() &rarr; ensureConnectedClient() &rarr; callMCPToolWithUrlElicitationRetry() &rarr; callMCPTool() &rarr; client.request()。如果遇到 <code>McpSessionExpiredError</code>，自动清除连接缓存并重试一次。</p>
+
+            <h3>调试 MCP 连接问题</h3>
+            <div class="info-box tip">
+                使用 <code>--debug</code> 标志启动 Claude Code，所有 MCP 操作会通过 <code>logMCPDebug()</code> 输出详细日志。关注 "SSE transport initialized"、"Received tools/list_changed"、"reconnection attempt" 等关键消息。
+            </div>
+        </section>
+
+        <section id="arch-guide" class="card architect">
+            <h2>架构师决策指南</h2>
+
+            <div class="two-col">
+                <div>
+                    <h3>连接管理的性能权衡</h3>
+                    <p><code>connectToServer</code> 使用 <code>memoize</code> 缓存连接（client.ts:595），避免重复建立连接。代价是缓存失效策略复杂：服务器配置变更时需要通过 <code>clearServerCache()</code> 显式清除。当前通过 <code>getServerCacheKey()</code> 生成 <code>name-jsonStringify(config)</code> 作为缓存键，配置变更会导致新键值、旧连接泄漏直到进程退出。</p>
+                </div>
+                <div>
+                    <h3>本地 vs 远程并发度</h3>
+                    <p>服务器连接分为 local（stdio/sdk）和 remote（SSE/HTTP/WS）两组独立并发控制。本地受 <code>getMcpServerConnectionBatchSize()</code> 限制（进程创建开销），远程受 <code>getRemoteMcpServerConnectionBatchSize()</code> 限制。两组通过 <code>Promise.all</code> 并行执行，互不阻塞。</p>
+                </div>
+            </div>
+
+            <h3 style="margin-top:1rem">Channel 安全模型</h3>
+            <p>Channel 推送是 MCP 体系中最复杂的安全边界。五层门控链在 <code>gateChannelServer()</code>（channelNotification.ts:191）中实现：</p>
+            <ol>
+                <li><strong>capability</strong> — 服务器必须声明 <code>experimental['claude/channel']</code></li>
+                <li><strong>runtime</strong> — GrowthBook 特性开关 <code>tengu_harbor</code> 必须为 true</li>
+                <li><strong>auth</strong> — 必须有 claude.ai OAuth token（API key 用户被阻断）</li>
+                <li><strong>policy</strong> — Teams/Enterprise 必须在 managed settings 中启用 <code>channelsEnabled: true</code></li>
+                <li><strong>allowlist</strong> — 插件必须在 GrowthBook <code>tengu_harbor_ledger</code> 白名单中</li>
+            </ol>
+            <div class="info-box warning">
+                <strong>已知风险：</strong>被攻陷的 Channel 服务器可以通过 <code>notifications/claude/channel/permission</code> 事件伪造权限确认。这是可接受的风险——被攻陷的服务器本身已有无限对话注入能力，权限确认只是加速了攻击而非扩展了攻击面。
+            </div>
+
+            <h3 style="margin-top:1rem">Elicitation 交互架构</h3>
+            <p>Elicitation 是 MCP 协议的交互式确认机制，允许服务器向用户弹出表单或 URL 确认。通过 <code>registerElicitationHandler()</code>（elicitationHandler.ts:68）注册到 MCP Client。请求先经过 hook 链（可程序化响应），未处理的请求排队到 <code>AppState.elicitation.queue</code> 供 UI 渲染。URL 模式的 Elicitation 支持"等待完成"通知（<code>ElicitationCompleteNotificationSchema</code>），用于 OAuth 回调等异步场景。</p>
+        </section>
+
+        <section id="topology" class="card">
+            <h2><span class="icon" style="background:rgba(139,92,246,.15);color:var(--purple);">◈</span> 可视化处理拓扑图</h2>
+            <p>MCP 系统是一个从多源配置发现到运行时工具调用的完整生命周期管理管线。配置从 5 个作用域汇聚、经过策略过滤后并发连接，每条连接根据 Transport 类型走不同的创建路径，最终将远程工具统一封装为 Claude Code 内部的 Tool 对象。</p>
+
+            <!-- Phase 1: Config Loading & Policy -->
+            <div class="fc">
+                <div class="fc-center">
+                    <div class="fn n-start w">多作用域配置加载<span class="sub">getClaudeCodeMcpConfigs() — config.ts:1071</span></div>
+                    <div class="vc s20"></div>
+
+                    <div class="fc-row" style="gap:12px;">
+                        <div class="fn n-process" style="max-width:130px;font-size:11px;">.mcp.json<span class="sub">project scope</span></div>
+                        <div class="fn n-process" style="max-width:130px;font-size:11px;">local 覆盖<span class="sub">.claude/mcp.json</span></div>
+                        <div class="fn n-process" style="max-width:130px;font-size:11px;">用户级<span class="sub">~/.claude/mcp.json</span></div>
+                        <div class="fn n-process" style="max-width:130px;font-size:11px;">企业策略<span class="sub">managed policy</span></div>
+                        <div class="fn n-process" style="max-width:130px;font-size:11px;">插件提供<span class="sub">plugin MCP</span></div>
+                    </div>
+                    <div class="vc s20"></div>
+
+                    <div class="fn n-check w">addScopeToServers + dedupPluginMcpServers<span class="sub">config.ts:69 标记作用域 → config.ts:223 URL签名去重</span></div>
+                    <div class="vc s20"></div>
+
+                    <div class="fn n-immune w">filterMcpServersByPolicy<span class="sub">config.ts:536 — 企业白名单/黑名单过滤 + expandEnvVars()</span></div>
+                    <div class="fc-row">
+                        <div class="hc s20"></div>
+                        <div class="hc-arrow s60 red"><span class="hc-label" style="color:var(--red);">被拒绝</span></div>
+                        <div class="fn n-deny">disabled<span class="sub">不创建网络连接</span></div>
+                    </div>
+                    <div class="vc s20"><span class="vc-label">通过 ↓</span></div>
+
+                    <div class="fn n-process w">合并后的有效服务器列表<span class="sub">Record&lt;name, ScopedMcpServerConfig&gt;</span></div>
+                </div>
+            </div>
+
+            <!-- Phase 2: Transport & Connection -->
+            <h3 style="margin-top:1.5rem;color:var(--text-secondary);">Phase 2 — 并发连接与 Transport 创建</h3>
+            <div class="fc">
+                <div class="fc-center">
+                    <div class="fn n-start w">getMcpToolsCommandsAndResources()<span class="sub">client.ts:2226 — 分组并发连接</span></div>
+                    <div class="vc s20"></div>
+
+                    <div class="fc-row" style="gap:40px;">
+                        <div style="display:flex;flex-direction:column;align-items:center;gap:0;">
+                            <div class="fn n-auto w" style="font-size:11px;">本地服务器组（低并发）<span class="sub">stdio / sdk 类型<br>processBatched(items, localBatch)</span></div>
+                            <div class="vc s16"></div>
+                            <div style="display:flex;align-items:center;gap:0;">
+                                <div class="fn n-process" style="max-width:110px;font-size:10px;">StdioClientTransport</div>
+                                <div class="hc s20"></div>
+                                <div class="fn n-process" style="max-width:110px;font-size:10px;">SdkControlTransport</div>
+                            </div>
+                        </div>
+                        <div style="display:flex;flex-direction:column;align-items:center;gap:0;">
+                            <div class="fn n-process w" style="font-size:11px;">远程服务器组（高并发）<span class="sub">sse / http 类型<br>processBatched(items, remoteBatch)</span></div>
+                            <div class="vc s16"></div>
+                            <div style="display:flex;align-items:center;gap:0;">
+                                <div class="fn n-process" style="max-width:110px;font-size:10px;">SSEClientTransport</div>
+                                <div class="hc s20"></div>
+                                <div class="fn n-process" style="max-width:130px;font-size:10px;">StreamableHTTPClientTransport</div>
+                            </div>
+                        </div>
+                    </div>
+                    <div class="vc s24"></div>
+
+                    <div class="fn n-check ww">connectToServer() — memoized<span class="sub">client.ts:595 — 缓存即连接池，相同参数返回同一 Promise</span></div>
+                    <div class="vc s16"></div>
+
+                    <div class="fc-row">
+                        <div class="fn n-check w" style="font-size:11px;">OAuth 认证<span class="sub">ClaudeAuthProvider<br>auth.ts — token 获取/刷新</span></div>
+                        <div class="hc-arrow s60 amber"><span class="hc-label" style="color:var(--amber);">失败</span></div>
+                        <div class="fn n-deny w">handleRemoteAuthFailure<span class="sub">client.ts:340 → type: 'failed'</span></div>
+                    </div>
+                    <div class="vc s20"><span class="vc-label">成功 ↓</span></div>
+
+                    <div class="fn n-allow w">ConnectedMCPServer<span class="sub">client.listTools() → 发现工具 → Tool 对象封装</span></div>
+                </div>
+            </div>
+
+            <!-- Phase 3: Tool Discovery & Runtime Call -->
+            <h3 style="margin-top:1.5rem;color:var(--text-secondary);">Phase 3 — 工具发现与运行时调用</h3>
+            <div class="fc">
+                <div class="fc-center">
+                    <div class="fn n-start w">工具发现：client.listTools()<span class="sub">每个 MCP 工具 → 封装为 Claude Code Tool 对象</span></div>
+                    <div class="vc s20"></div>
+
+                    <div class="fn n-check ww">Tool 对象封装<span class="sub">client.ts:1786 — 注入 call(), checkPermissions(), isReadOnly()</span></div>
+                    <div class="vc s16"></div>
+
+                    <div class="fn n-check w">isIncludedMcpTool() 过滤<span class="sub">client.ts:569 — include/exclude 配置过滤</span></div>
+                    <div class="vc s20"></div>
+
+                    <div class="fn n-process w">React 批量状态更新<span class="sub">useManageMCPConnections.ts:207 — 16ms 窗口 flush</span></div>
+                    <div class="vc s24"></div>
+
+                    <div class="fn n-start w">运行时工具调用 — Tool.call()<span class="sub">client.ts:1833 — 模型发起 MCP 工具调用</span></div>
+                    <div class="vc s16"></div>
+
+                    <div class="fn n-check w">ensureConnectedClient()<span class="sub">client.ts:1688 — 确认连接活跃</span></div>
+                    <div class="vc s16"></div>
+
+                    <div class="fn n-process w">callMCPToolWithUrlElicitationRetry()<span class="sub">client.ts:2813 — URL 认证重试 + Elicitation</span></div>
+                    <div class="vc s16"></div>
+
+                    <div class="fn n-process w">processMCPResult() + transformResultContent()<span class="sub">client.ts:2720/2478 — MCP 格式 → ContentBlock</span></div>
+                </div>
+            </div>
+
+            <!-- Phase 4: Health Monitoring -->
+            <h3 style="margin-top:1.5rem;color:var(--text-secondary);">Phase 4 — 健康监控与自动重连</h3>
+            <div class="fc">
+                <div class="fc-center">
+                    <div class="loop-box" style="max-width:560px;">
+                        <div class="loop-title">连接健康监控循环 — client.ts:1240-1570</div>
+                        <div class="loop-text">
+                            <strong>onclose / onerror 处理器：</strong><br>
+                            ① 连接断开 → 错误计数 +1<br>
+                            ② 连续错误 &gt; 3 → closeTransportAndRejectPending()<br>
+                            ③ clearServerCache() → 清空 memoize 缓存条目<br>
+                            ④ 下次工具调用 → connectToServer() 自动重建<br>
+                            ⑤ Session 过期 (404 + -32001) → isMcpSessionExpiredError() 检测 → 自动重连<br>
+                            <span style="color:var(--text-muted);font-size:10px;">缓存即状态，清缓存即重连——无需显式连接池状态机</span>
+                        </div>
+                    </div>
+                    <div class="vc s20"></div>
+
+                    <div class="fn n-allow w">reconnectWithBackoff()<span class="sub">useManageMCPConnections.ts:371 — 指数退避重连</span></div>
+                </div>
+            </div>
+
+            <div class="info-box info"><strong>核心设计</strong>：MCP 系统使用 <strong>Memoize-as-Connection-Pool</strong> 模式——<code>connectToServer</code> 被 <code>memoize</code> 包装，缓存存在即已连接，<code>clearServerCache()</code> 即重连。Transport 类型通过工厂分支创建（stdio/sse/http），但上层代码统一通过 <code>ConnectedMCPServer</code> 接口操作，完全屏蔽底层差异。16ms React 批量更新机制确保多服务器并发连接不会造成 UI 抖动。</div>
+        </section>
+
+        <section id="core-flow" class="card">
+            <h2><span class="icon" style="background:rgba(6,182,212,.15);color:var(--cyan);">⇉</span> 核心处理流程详解</h2>
+            <p>MCP（Model Context Protocol）系统是从配置发现到工具调用的完整生命周期管理。其核心链路横跨配置加载（config.ts）、连接管理（client.ts）、React 编排（useManageMCPConnections.ts）和运行时工具调用四大模块。以下是从应用启动到工具执行的完整处理链路：</p>
+            <div class="flow-chart vertical">
+                <div class="flow-step highlight">
+                    <div class="flow-step-title">1. 多作用域配置加载与合并</div>
+                    <div class="flow-step-desc"><code>getClaudeCodeMcpConfigs()</code>（config.ts:1071）从 5 个作用域读取配置：project（<code>.mcp.json</code>）、local（项目本地覆盖）、user（<code>~/.claude/mcp.json</code>）、enterprise（托管策略）和 plugin（插件提供的 MCP 服务器）。通过 <code>addScopeToServers()</code>（config.ts:69）标记每个服务器的来源作用域，再用 <code>dedupPluginMcpServers()</code>（config.ts:223）基于 URL 签名去重，防止同一服务器重复连接 — config.ts:1071-1251</div>
+                </div>
+                <div class="flow-arrow">↓</div>
+                <div class="flow-step">
+                    <div class="flow-step-title">2. 策略过滤与启停管理</div>
+                    <div class="flow-step-desc">合并后的配置经过 <code>filterMcpServersByPolicy()</code>（config.ts:536）过滤。企业策略通过白名单（<code>allowedMcpServers</code>）或黑名单（<code>deniedMcpServers</code>）控制。环境变量通过 <code>expandEnvVars()</code>（config.ts:556）展开。禁用的服务器不生成网络连接，仅标记为 <code>type: 'disabled'</code> — config.ts:536-551</div>
+                </div>
+                <div class="flow-arrow">↓</div>
+                <div class="flow-step highlight">
+                    <div class="flow-step-title">3. 批量并发连接（Transport 层）</div>
+                    <div class="flow-step-desc"><code>getMcpToolsCommandsAndResources()</code>（client.ts:2226）将服务器分为本地（stdio/sdk，低并发）和远程（sse/http，高并发）两组。对每个服务器调用 <code>connectToServer()</code>（client.ts:595，memoized）。根据类型创建不同 Transport：stdio 使用 <code>StdioClientTransport</code>，SSE 使用 <code>SSEClientTransport</code>，HTTP 使用 <code>StreamableHTTPClientTransport</code>，IDE 通过特殊管道通信 — client.ts:2226-2403</div>
+                </div>
+                <div class="flow-arrow">↓</div>
+                <div class="flow-step">
+                    <div class="flow-step-title">4. OAuth 认证与 Token 管理</div>
+                    <div class="flow-step-desc">远程服务器需要 OAuth 认证。<code>ClaudeAuthProvider</code>（auth.ts）实现 <code>OAuthClientProvider</code> 接口，管理 token 的获取、刷新和撤销。认证失败时 <code>handleRemoteAuthFailure()</code>（client.ts:340）返回 failed 状态连接。认证缓存通过 <code>setMcpAuthCacheEntry()</code>（client.ts:293）持久化到磁盘，避免重复认证流程 — client.ts:340-361, auth.ts</div>
+                </div>
+                <div class="flow-arrow">↓</div>
+                <div class="flow-step">
+                    <div class="flow-step-title">5. 工具发现与 Tool 对象封装</div>
+                    <div class="flow-step-desc">连接成功后，通过 MCP 协议的 <code>client.listTools()</code> 发现可用工具。每个 MCP 工具被封装为 Claude Code 的 <code>Tool</code> 对象（client.ts:1786-1832），注入 <code>call()</code>、<code>checkPermissions()</code>、<code>isReadOnly()</code> 等方法。<code>isIncludedMcpTool()</code>（client.ts:569）基于 include/exclude 配置过滤工具 — client.ts:1786-1832</div>
+                </div>
+                <div class="flow-arrow">↓</div>
+                <div class="flow-step highlight">
+                    <div class="flow-step-title">6. React 状态批量更新</div>
+                    <div class="flow-step-desc"><code>useManageMCPConnections</code>（useManageMCPConnections.ts:143）通过 16ms 时间窗口的批量更新机制（<code>MCP_BATCH_FLUSH_MS = 16</code>），将多个服务器的连接结果合并为单次 <code>setAppState()</code> 调用。每个服务器的连接回调（<code>onConnectionAttempt</code>）进入 pending 队列，通过 <code>setTimeout(flush, 16)</code> 延迟刷入状态 — useManageMCPConnections.ts:207-270</div>
+                </div>
+                <div class="flow-arrow">↓</div>
+                <div class="flow-step">
+                    <div class="flow-step-title">7. 运行时工具调用与结果转换</div>
+                    <div class="flow-step-desc">模型调用 MCP 工具时，封装的 Tool 对象执行 <code>call()</code>（client.ts:1833）。先通过 <code>ensureConnectedClient()</code>（client.ts:1688）确认连接活跃，再调用 <code>callMCPToolWithUrlElicitationRetry()</code>（client.ts:2813）处理 URL 认证重试。结果通过 <code>processMCPResult()</code>（client.ts:2720）和 <code>transformResultContent()</code>（client.ts:2478）将 MCP 格式转换为 Claude API 的 ContentBlock 格式 — client.ts:1833-1971</div>
+                </div>
+                <div class="flow-arrow">↓</div>
+                <div class="flow-step">
+                    <div class="flow-step-title">8. 连接健康监控与自动重连</div>
+                    <div class="flow-step-desc">每个连接注册增强的 <code>onerror</code> 和 <code>onclose</code> 处理器（client.ts:1266-1570）。连续错误超过 3 次触发 <code>closeTransportAndRejectPending()</code>，清空 memoize 缓存使下次调用自动重连。HTTP 传输层的 session 过期（404 + JSON-RPC -32001）由 <code>isMcpSessionExpiredError()</code>（client.ts:193）检测，自动清除缓存重建连接 — client.ts:1240-1570</div>
+                </div>
+            </div>
+            <div class="info-box info">
+                <strong>关键处理逻辑：</strong>整个 MCP 系统最核心的设计是"<strong>连接缓存 + 延迟重连</strong>"模式。<code>connectToServer</code> 被 <code>memoize</code> 包装（client.ts:595），相同参数返回同一个 Promise。当连接断开时，<code>onclose</code> 处理器调用 <code>clearServerCache()</code>（client.ts:1648）清空特定服务器的缓存条目，使下一次工具调用自动触发重连。这种设计避免了维护复杂的连接池状态机——缓存即状态，清缓存即重连。
+            </div>
+        </section>
+        <section id="design-essence" class="card">
+            <h2><span class="icon" style="background:rgba(245,158,11,.15);color:var(--amber);">★</span> 设计精华</h2>
+
+            <h3>1. Memoize-as-Connection-Pool 模式</h3>
+            <p>不维护显式的连接池，而是利用 <code>memoize</code> 的缓存特性作为隐式连接池。key 由服务器名和配置对象计算（<code>getServerCacheKey()</code>，client.ts:581），值是连接 Promise。连接断开时只需 <code>cache.delete(key)</code>，下次调用自然重建。这消除了连接状态机（connecting/connected/disconnected/reconnecting）的复杂性——缓存存在即已连接，不存在即需连接。</p>
+            <div class="component-box">
+                <div class="name">Memoized 连接函数（client.ts:595-607）</div>
+                <div class="desc">connectToServer 通过 memoize 包装，相同参数返回相同 Promise</div>
+                <pre><code>export const connectToServer = memoize(
+  async (name: string, serverRef: ScopedMcpServerConfig, ...): Promise&lt;MCPServerConnection&gt; => {
+    // 创建 transport、执行 OAuth、发现工具...
+    // 返回 ConnectedMCPServer 或 FailedMCPServerConnection
+  }
+)
+// 断开时清空缓存 → 下次调用自动重连
+clearServerCache(name, serverRef)</code></pre>
+            </div>
+            <div class="info-box tip">设计洞察：这种模式将连接生命周期管理从"命令式状态机"简化为"声明式缓存失效"。不亚于 React Query 的 <code>staleTime</code> 思想——用缓存策略替代状态管理。全局 <code>clearPluginCache()</code>（pluginLoader.ts:3225）也使用了相同模式管理插件加载。</div>
+
+            <h3>2. 分层去重：签名 + URL 双重保障</h3>
+            <p>MCP 配置来自 5 个不同作用域，同一个服务器可能被多处配置。<code>getMcpServerSignature()</code>（config.ts:202）为每个配置计算签名（基于 URL 或 command 数组）。在插件层，<code>dedupPluginMcpServers()</code>（config.ts:223）阻止插件注册已存在的 MCP 服务器；在 claude.ai 层，<code>dedupClaudeAiMcpServers()</code>（config.ts:281）阻止 claude.ai connector 与手动配置冲突。两层去重确保同一后端服务只有一个活跃连接。</p>
+            <div class="info-box tip">设计洞察：去重的关键不是"名称相同"而是"签名相同"。用户可能在 <code>.mcp.json</code> 中把 GitHub MCP 命名为 <code>gh</code>，在 claude.ai 中命名为 <code>GitHub</code>，但只要 URL 相同就会被识别为重复。这种内容语义去重比名称去重更健壮。</div>
+
+            <h3>3. SSE 长连接的超时分离策略</h3>
+            <p>SSE 传输层有两个 fetch：EventSource 的长连接 fetch 和普通 API 请求的 fetch。<code>wrapFetchWithTimeout()</code>（client.ts:492）仅包装 API 请求 fetch（60 秒超时），EventSource 的 fetch 保持无超时。如果错误地给 EventSource 也加了超时，SSE 流会在 60 秒后断开，导致推送通知丢失。这个分离通过 <code>transportOptions.eventSourceInit</code> 和 <code>transportOptions.fetch</code> 分别配置实现 — client.ts:630-671</p>
+            <div class="component-box">
+                <div class="name">超时分离（client.ts:627-671）</div>
+                <div class="desc">API 请求使用带超时的 fetch，EventSource 连接使用无限期 fetch</div>
+                <pre><code>// API 请求：带超时
+transportOptions.fetch = wrapFetchWithTimeout(
+  wrapFetchWithStepUpDetection(createFetchWithInit(), authProvider),
+)
+// EventSource 长连接：不设超时
+transportOptions.eventSourceInit = {
+  fetch: async (url, init) => fetch(url, { ...init, ...proxyOptions })
+}</code></pre>
+            </div>
+
+            <h3>4. 批量更新的时间窗口合并</h3>
+            <p>React 的状态更新是同步的——每个 <code>setAppState</code> 触发一次渲染。当 10 个 MCP 服务器同时连接完成时，不加控制会产生 10 次渲染。<code>useManageMCPConnections</code> 用 <code>MCP_BATCH_FLUSH_MS = 16</code>（一帧时间）的时间窗口收集所有更新，在单次 <code>setAppState</code> 中批量应用（useManageMCPConnections.ts:216-270）。16ms 足够收集同一"事件循环 tick"中的多个回调，又短到用户感知不到延迟。</p>
+            <div class="info-box tip">设计洞察：16ms 是 requestAnimationFrame 的一帧。这不是巧合——它将 React 渲染节奏对齐到浏览器/终端的刷新率，既保证了视觉流畅性，又避免了不必要的中间状态渲染。批量更新还通过新旧 state 引用相等性检查（<code>if (newState === prevState) return prevState</code>）跳过无变化的更新。</div>
+        </section>
+
+        <section id="agent-practice" class="card">
+            <h2><span class="icon" style="background:rgba(34,197,94,.15);color:var(--green);">◈</span> Agent 实践借鉴 — 客服 Agent 外部系统集成设计</h2>
+
+            <h3>场景映射：客服 agent 在外部系统集成上的真实问题</h3>
+            <p>客服 agent 需要连接 6+ 外部系统，每个系统协议不同、稳定性不同、接入方式也不同。典型痛点包括：</p>
+            <ul>
+                <li><strong>多系统多协议</strong>：CRM（REST API 客户信息）、ERP（gRPC 订单/库存）、支付网关（REST 退款）、物流系统（消息队列查件）、知识库（REST FAQ）、短信平台（REST 通知）。甚至还有老系统走 SOAP 协议。</li>
+                <li><strong>第三方系统不稳定</strong>：物流系统每周二凌晨维护、CRM 偶尔超时、支付网关在月底高峰期限流。断线后客服 agent 不能直接挂掉，需要自动重连或降级处理。</li>
+                <li><strong>新系统接入怕影响老系统</strong>：新增一个短信平台连接，不能因为短信平台的 bug 导致已有的 CRM 查询和订单查询挂掉。连接之间必须隔离。</li>
+                <li><strong>配置分散难管理</strong>：6 个系统的连接配置散落在不同地方，改一个配置要改三个文件，还容易改漏。</li>
+            </ul>
+
+            <h3>借鉴 CC + 客服改造</h3>
+
+            <h4>1. Memoize 连接池（CC 的核心模式，客服场景最该抄的）</h4>
+            <p>CC 的 <code>connectToServer</code> 用 <code>memoize</code> 包装，缓存存在=已连接，缓存清除=重连。这个模式在客服场景非常合适——连接 6 个外部系统不需要维护 6 个状态机：</p>
+            <pre><code>// 借鉴 CC 的 Memoize-as-Connection-Pool → 客服系统连接池
+// 核心思想：不维护显式连接池，用缓存特性管理连接
+
+interface ExternalSystem {
+  name: string               // 'crm' | 'erp' | 'payment' | 'logistics' | 'kb' | 'sms'
+  protocol: 'rest' | 'grpc' | 'mq' | 'soap'
+  config: SystemConfig
+}
+
+// 用 memoize 实现隐式连接池——缓存存在=已连接
+const connectToExternalSystem = memoize(
+  async (systemName: string, config: SystemConfig): Promise&lt;SystemConnection&gt; => {
+    const adapter = createTransportAdapter(config)  // 工厂分支
+    const connection = await adapter.connect(config)
+    const health = await connection.healthCheck()
+    if (!health.ok) throw new Error(`${systemName} 健康检查失败`)
+    return { status: 'connected', connection, adapter }
+  }
+)
+
+// 连接断开时：清缓存 = 重连（无需显式状态机）
+function onSystemConnectionLost(systemName: string, config: SystemConfig) {
+  clearConnectionCache(systemName, config)
+  // 下次工具调用 connectToExternalSystem() 自动重建
+  // 借鉴 CC 的 onclose 处理器：连续错误超限则降级
+  logWarning(`外部系统 ${systemName} 断开，下次调用自动重连`)
+}
+
+// 降级策略：连接失败不影响其他系统
+async function callWithFallback(
+  systemName: string,
+  operation: string,
+  params: any,
+  fallbackValue?: any
+): Promise&lt;any&gt; {
+  try {
+    const conn = await connectToExternalSystem(systemName, getConfig(systemName))
+    return await conn.connection.call(operation, params)
+  } catch (error) {
+    logError(`${systemName}.${operation} 调用失败`, error)
+    if (fallbackValue !== undefined) return fallbackValue
+    throw new ServiceUnavailableError(systemName, operation)
+  }
+}</code></pre>
+
+            <h4>2. 统一 Transport 适配器（CC 6 种 → 客服 2-3 种）</h4>
+            <p>CC 的 6 种 Transport（stdio/SSE/HTTP/WS/SDK/InProcess）统一为 <code>Transport</code> 接口。客服场景只需要 REST/gRPC/MQ 三种，但同样需要统一接口：</p>
+            <pre><code>// 借鉴 CC 的 Transport 接口 → 客服场景的统一适配器
+interface ServiceTransport {
+  connect(config: SystemConfig): Promise&lt;Connection&gt;
+  send(request: ServiceRequest): Promise&lt;ServiceResponse&gt;
+  close(): Promise&lt;void&gt;
+  healthCheck(): Promise&lt;HealthStatus&gt;
+}
+
+// REST 适配器——大多数客服系统走 REST
+class RestTransport implements ServiceTransport {
+  private client: HttpClient | undefined
+
+  async connect(config: SystemConfig): Promise&lt;Connection&gt; {
+    this.client = createHttpClient(config.baseUrl, {
+      timeout: config.timeout || 5000,
+      retries: config.retries || 2,
+      headers: { 'Authorization': `Bearer ${config.apiKey}` },
+    })
+    return { type: 'rest', client: this.client }
+  }
+
+  async send(request: ServiceRequest): Promise&lt;ServiceResponse&gt; {
+    return this.client!.request({
+      method: request.method,
+      path: request.path,
+      body: request.params,
+    })
+  }
+
+  async healthCheck(): Promise&lt;HealthStatus&gt; {
+    try {
+      await this.client!.get('/health')
+      return { ok: true }
+    } catch { return { ok: false } }
+  }
+
+  close() { this.client = undefined }
+}
+
+// MQ 适配器——物流系统走消息队列
+class MessageQueueTransport implements ServiceTransport {
+  private consumer: MQConsumer | undefined
+
+  async connect(config: SystemConfig): Promise&lt;Connection&gt; {
+    this.consumer = await createConsumer(config.queueUrl, config.queueName)
+    return { type: 'mq', consumer: this.consumer }
+  }
+
+  async send(request: ServiceRequest): Promise&lt;ServiceResponse&gt; {
+    // 发送查询消息 → 等待响应消息（带超时）
+    const correlationId = generateId()
+    return waitForResponse(this.consumer!, correlationId, config.responseTimeout)
+  }
+  // ... healthCheck, close
+}</code></pre>
+
+            <h4>3. 外部 API → 内部 Tool 封装</h4>
+            <p>CC 把每个 MCP 工具封装为 <code>Tool</code> 对象。客服场景把每个外部系统 API 封装为统一的 Tool：</p>
+            <pre><code>// 借鉴 CC 的 wrapMcpTool → 客服场景的外部 API → Tool 封装
+interface CustomerServiceTool {
+  name: string                 // 如 "query_order"
+  description: string          // 如 "查询订单状态"
+  requiredSystem: string       // 如 "erp"
+  requiredPermission: string   // 如 "order:read"
+  inputSchema: object          // 参数 schema
+  execute(params: any): Promise&lt;ToolResult&gt;
+}
+
+// 封装 CRM 的"查客户"接口为统一 Tool
+function createQueryCustomerTool(crmSystem: string): CustomerServiceTool {
+  return {
+    name: 'query_customer',
+    description: '查询客户信息（CRM系统）',
+    requiredSystem: crmSystem,
+    requiredPermission: 'customer:read',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        phone: { type: 'string', description: '客户手机号' },
+        customerId: { type: 'string', description: '客户ID' },
+      },
+    },
+    async execute(params) {
+      // 连接 + 调用 + 结果转换
+      const conn = await connectToExternalSystem(
+        crmSystem, getConfig(crmSystem)
+      )
+      const raw = await conn.connection.call('getCustomer', {
+        phone: params.phone,
+        customerId: params.customerId,
+      })
+      // 原始 API 返回 → 统一 ToolResult 格式
+      return {
+        success: true,
+        data: {
+          name: raw.customer_name,
+          phone: raw.phone_number,
+          vipLevel: raw.vip_level,
+          tags: raw.tags,
+        },
+        summary: `客户 ${raw.customer_name}，${raw.vip_level}会员`,
+      }
+    },
+  }
+}
+
+// agent 调用时无感知底层是 REST 还是 gRPC
+// const result = await toolRegistry.get('query_customer').execute({ phone: '138xxxx' })</code></pre>
+
+            <h4>4. 连接健康检查 + 自动重连</h4>
+            <pre><code>// 借鉴 CC 的 onclose/onerror + reconnectWithBackoff
+// 健康检查循环——每 30 秒检查所有外部系统连接
+async function startHealthMonitor(systems: ExternalSystem[]): Promise&lt;void&gt; {
+  setInterval(async () => {
+    for (const system of systems) {
+      const cacheKey = getCacheKey(system.name, system.config)
+      const cached = connectionCache.get(cacheKey)
+      if (!cached) continue  // 未连接，跳过
+
+      const health = await cached.adapter.healthCheck().catch(() => ({ ok: false }))
+      if (!health.ok) {
+        // 借鉴 CC：清缓存 → 下次调用自动重建
+        connectionCache.delete(cacheKey)
+        logWarning(`${system.name} 健康检查失败，已清除缓存，下次调用自动重连`)
+        // 通知 agent 该系统暂时不可用
+        notifySystemStatus(system.name, 'degraded')
+      }
+    }
+  }, 30_000)
+}
+
+// 指数退避重连——借鉴 CC 的 reconnectWithBackoff
+async function reconnectWithBackoff(
+  systemName: string,
+  config: SystemConfig,
+  maxAttempts: number = 5,
+): Promise&lt;SystemConnection&gt; {
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    try {
+      clearConnectionCache(systemName, config)
+      const conn = await connectToExternalSystem(systemName, config)
+      notifySystemStatus(systemName, 'healthy')
+      return conn
+    } catch (error) {
+      const delay = Math.min(1000 * Math.pow(2, attempt), 30_000)
+      logWarning(`${systemName} 重连失败（第${attempt}次），${delay}ms后重试`)
+      await sleep(delay)
+    }
+  }
+  throw new Error(`${systemName} 重连${maxAttempts}次后仍然失败`)
+}</code></pre>
+
+            <h3>落地清单</h3>
+            <div class="two-col">
+                <div class="info-box tip">
+                    <strong>必须抄的：</strong><br>
+                    1. <strong>Memoize 连接池</strong>——这个太实用了，不维护状态机，用缓存特性管理连接。连接 6 个外部系统完全够用。<br>
+                    2. <strong>统一 Transport 接口</strong>——REST/gRPC/MQ 统一为 <code>ServiceTransport</code> 接口，新增协议只需加适配器。<br>
+                    3. <strong>Tool 封装</strong>——外部 API 封装为 <code>CustomerServiceTool</code>，agent 调用时不感知底层协议差异。<br>
+                    4. <strong>连接隔离</strong>——单个系统连接失败不影响其他系统，降级而非报错。
+                </div>
+                <div class="info-box warning">
+                    <strong>不需要抄的：</strong><br>
+                    1. <strong>OAuth PKCE 认证</strong>——客服系统用内部认证（API Key / 内网 Token），不需要 OAuth 浏览器授权流程。<br>
+                    2. <strong>6 种传输方式</strong>——客服场景 REST + gRPC + MQ 三种覆盖 95% 场景，不需要 SSE/WebSocket/InProcess。<br>
+                    3. <strong>Elicitation 交互确认</strong>——不需要外部系统弹确认框，客服操作确认走内部审批流程。<br>
+                    4. <strong>Channel 消息推送</strong>——客服场景不需要外部系统主动推送消息到 agent。
+                </div>
+            </div>
+
+            <div class="info-box warning">
+                <strong>常见坑：</strong>
+                <strong>1. 自建连接池状态机</strong>——不要为每个外部系统维护 connecting/connected/disconnected/reconnecting 状态机。6 个系统就是 6 个状态机，状态组合爆炸。用 Memoize + clearCache 模式，"缓存存在=已连接，不存在=需连接"，零状态管理。
+                <strong>2. 没有降级策略</strong>——物流系统挂了，整个客服 agent 也挂了？必须有降级：连接失败时返回缓存数据或提示"物流系统暂不可用，请稍后查询"，而不是直接报错中断服务。
+                <strong>3. 新系统接入影响老系统</strong>——新增短信平台连接时，初始化代码异常导致整个 agent 启动失败。所有外部系统连接必须并行初始化、独立错误处理，一个失败不影响其他。
+            </div>
+        </section>
+
+        <section id="code-index" class="card">
+            <h2>代码索引</h2>
+            <table>
+                <thead><tr><th>文件</th><th>行数</th><th>说明</th></tr></thead>
+                <tbody>
+                    <tr><td><code>services/mcp/client.ts</code></td><td>~3349</td><td>MCP 客户端核心：connectToServer、callMCPTool、工具封装、连接缓存</td></tr>
+                    <tr><td><code>services/mcp/auth.ts</code></td><td>~2466</td><td>OAuth 2.0 认证：ClaudeAuthProvider、Token 持久化/刷新/撤销</td></tr>
+                    <tr><td><code>services/mcp/config.ts</code></td><td>~1579</td><td>配置加载：多作用域读取、策略过滤、签名去重、启停管理</td></tr>
+                    <tr><td><code>services/mcp/useManageMCPConnections.ts</code></td><td>~1142</td><td>React Hook：连接生命周期、批量更新、重连、Channel 注册</td></tr>
+                    <tr><td><code>services/mcp/MCPConnectionManager.tsx</code></td><td>~73</td><td>React Context：提供 reconnectMcpServer / toggleMcpServer 给子组件</td></tr>
+                    <tr><td><code>services/mcp/types.ts</code></td><td>~258</td><td>所有 MCP 类型定义：配置 Schema、连接状态、CLI 状态</td></tr>
+                    <tr><td><code>services/mcp/InProcessTransport.ts</code></td><td>~64</td><td>进程内传输对：linked pair，用于无子进程的 MCP 通信</td></tr>
+                    <tr><td><code>services/mcp/SdkControlTransport.ts</code></td><td>~137</td><td>SDK 传输桥：CLI &harr; SDK 进程的控制消息转发</td></tr>
+                    <tr><td><code>services/mcp/channelNotification.ts</code></td><td>~317</td><td>Channel 通知：五层门控、消息包装、会话匹配</td></tr>
+                    <tr><td><code>services/mcp/channelPermissions.ts</code></td><td>~241</td><td>Channel 权限：短 ID 生成、远程确认回调、allowlist 过滤</td></tr>
+                    <tr><td><code>services/mcp/elicitationHandler.ts</code></td><td>~314</td><td>Elicitation 处理：表单/URL 模式、hook 集成、完成通知</td></tr>
+                    <tr><td><code>services/mcp/claudeai.ts</code></td><td>~165</td><td>claude.ai 代理：从组织 API 获取 MCP 服务器配置</td></tr>
+                    <tr><td><code>services/mcp/xaa.ts</code></td><td>~512</td><td>XAA 认证：PRM 发现、Token Exchange、JWT Bearer Grant</td></tr>
+                    <tr><td><code>services/mcp/xaaIdpLogin.ts</code></td><td>~488</td><td>XAA IdP 登录：OIDC 授权码 + PKCE、id_token 缓存</td></tr>
+                    <tr><td><code>services/mcp/oauthPort.ts</code></td><td>~79</td><td>OAuth 回调端口：动态端口分配、redirect URI 构建</td></tr>
+                    <tr><td><code>services/mcp/headersHelper.ts</code></td><td>~139</td><td>动态 Header：通过外部脚本获取认证 Header</td></tr>
+                    <tr><td><code>services/mcp/officialRegistry.ts</code></td><td>~73</td><td>官方 MCP 注册表：预取白名单 URL</td></tr>
+                    <tr><td><code>services/mcp/vscodeSdkMcp.ts</code></td><td>~113</td><td>VSCode MCP 双向通信：文件变更通知、实验门控同步</td></tr>
+                    <tr><td><code>services/mcp/normalization.ts</code></td><td>~23</td><td>名称规范化：MCP 工具名 &harr; API 兼容格式</td></tr>
+                    <tr><td><code>services/mcp/mcpStringUtils.ts</code></td><td>~107</td><td>字符串工具：工具名解析、前缀生成、权限匹配</td></tr>
+                    <tr><td><code>services/mcp/envExpansion.ts</code></td><td>~39</td><td>环境变量展开：${VAR} 和 ${VAR:-default} 语法</td></tr>
+                    <tr><td><code>services/mcp/channelAllowlist.ts</code></td><td>~77</td><td>Channel 白名单：GrowthBook 驱动的插件许可列表</td></tr>
+                    <tr><td><code>services/mcp/utils.ts</code></td><td>~575</td><td>工具函数：过期客户端检测、Agent frontmatter 提取</td></tr>
+                    <tr><td><code>server/types.ts</code></td><td>~58</td><td>服务端类型：ServerConfig、SessionState、SessionIndex</td></tr>
+                    <tr><td><code>server/directConnectManager.ts</code></td><td>~214</td><td>WebSocket 会话管理：消息收发、权限请求/响应、中断</td></tr>
+                    <tr><td><code>server/createDirectConnectSession.ts</code></td><td>~89</td><td>创建 Direct Connect 会话：POST /sessions、响应验证</td></tr>
+                </tbody>
+            </table>
+        </section>
+        <footer style="text-align:center; padding:32px 0 20px; margin-top:48px; border-top:1px solid var(--border); color:var(--text-secondary); font-size:13px; line-height:2;">
+        <div style="margin-bottom:4px;">⚠️ 免责声明</div>
+        本文仅用于技术学习和架构分析目的。源码分析基于公开泄漏的代码，所有商标和版权归 <a href="https://www.anthropic.com" style="color:var(--indigo);">Anthropic</a> 所有。未经授权不得用于商业用途。
+    </footer>
+    </main>
+</body>
+</html>

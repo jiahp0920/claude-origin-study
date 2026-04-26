@@ -1,0 +1,465 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>模块依赖全景图 - Claude Code 源码分析</title>
+    <link rel="stylesheet" href="shared/styles.css">
+</head>
+<body>
+    <nav class="sidebar">
+<div class="sidebar-header"><div class="logo">CC</div><div><div class="sidebar-title">Claude Code</div><div class="sidebar-subtitle">源码深度分析</div></div></div>
+        <div class="nav-section-title">总览</div>
+        <a href="reading-guide.html" class="nav-link">阅读指南</a>
+        <a href="index.html" class="nav-link">架构全景</a>
+        <a href="dependency-map.html" class="nav-link active">模块依赖图</a>
+        <a href="vertical-agent-guide.html" class="nav-link">垂直 Agent 设计指南</a>
+<div class="nav-section-title">核心流程</div>
+<a href="00-startup.html" class="nav-link">启动链路</a>
+<a href="01-query-loop.html" class="nav-link">Query 循环</a>
+<a href="flows/query-lifecycle.html" class="nav-link">查询生命周期</a>
+<div class="nav-section-title">核心机制</div>
+<a href="02-tool-dispatch.html" class="nav-link">工具调度</a>
+<a href="03-permissions.html" class="nav-link">权限系统</a>
+<a href="03b-security-hardening.html" class="nav-link">风控与安全加固</a>
+<a href="04-agent-arch.html" class="nav-link">Agent 架构</a>
+<a href="11-hooks.html" class="nav-link">Hook 机制</a>
+<div class="nav-section-title">扩展体系</div>
+<a href="05-mcp.html" class="nav-link">MCP 体系</a>
+<a href="07-plugins.html" class="nav-link">插件系统</a>
+<a href="08-commands.html" class="nav-link">命令系统</a>
+<div class="nav-section-title">数据与服务</div>
+<a href="06-context-mgmt.html" class="nav-link">上下文管理</a>
+<a href="10-services.html" class="nav-link">服务层</a>
+<a href="15-cost-limits.html" class="nav-link">成本与限流</a>
+<div class="nav-section-title">界面与配置</div>
+<a href="09-ui.html" class="nav-link">UI 交互层</a>
+<a href="13-config.html" class="nav-link">配置与迁移</a>
+<div class="nav-section-title">外围能力</div>
+<a href="12-external.html" class="nav-link">外部集成</a>
+<a href="14-native.html" class="nav-link">Native 能力</a>
+<div class="nav-section-title">流程图</div>
+<a href="flows/tool-execution.html" class="nav-link">工具执行流程</a>
+<a href="flows/agent-collab.html" class="nav-link">Agent 协作流程</a>
+</nav>
+    <main class="content">
+        <header class="page-header">
+            <span class="breadcrumb"><a href="index.html">源码分析</a></span>
+            <h1>模块依赖全景图</h1>
+            <p class="subtitle">完整的模块依赖关系、分层架构与跨层调用分析</p>
+        </header>
+
+        <section id="overview" class="card">
+            <h2>职责概述</h2>
+            <p>本页呈现 Claude Code 的完整模块依赖关系。通过对顶层 .ts/.tsx 文件的 import 语句和各子目录的交叉引用分析，构建出从入口到底层的全栈依赖图。系统按六层架构组织：<strong>入口层</strong>（main.tsx / setup.ts）、<strong>编排层</strong>（QueryEngine.ts / query.ts）、<strong>工具层</strong>（tools/）、<strong>服务层</strong>（services/）、<strong>工具库层</strong>（utils/）、<strong>原生层</strong>（native-ts/）。依赖方向严格自上而下，跨层调用通过明确接口解耦。</p>
+        </section>
+
+        <section id="architecture" class="card">
+            <h2>分层依赖架构</h2>
+            <div class="layer-diagram">
+                <div class="layer layer-entry">
+                    <div class="layer-header">L1 入口层 (entrypoints/)</div>
+                    <div class="layer-body">
+                        <div class="layer-component highlight">main.tsx</div>
+                        <div class="layer-component">cli.tsx</div>
+                        <div class="layer-component">init.ts</div>
+                        <div class="layer-component">mcp.ts</div>
+                        <div class="layer-component">sdk/coreTypes.ts</div>
+                    </div>
+                </div>
+                <div class="layer-arrow">&#9660;</div>
+                <div class="layer layer-orchestration">
+                    <div class="layer-header">L2 编排层</div>
+                    <div class="layer-body">
+                        <div class="layer-component highlight">QueryEngine.ts</div>
+                        <div class="layer-component">query.ts</div>
+                        <div class="layer-component">setup.ts</div>
+                        <div class="layer-component">cost-tracker.ts</div>
+                    </div>
+                </div>
+                <div class="layer-arrow">&#9660;</div>
+                <div class="layer layer-tool">
+                    <div class="layer-header">L3 工具 + 命令层</div>
+                    <div class="layer-body">
+                        <div class="layer-component highlight">tools.ts → Tool.ts</div>
+                        <div class="layer-component">Task.ts → tasks.ts</div>
+                        <div class="layer-component">commands.ts</div>
+                        <div class="layer-component">context.ts</div>
+                    </div>
+                </div>
+                <div class="layer-arrow">&#9660;</div>
+                <div class="layer layer-engine">
+                    <div class="layer-header">L4 服务层 (services/)</div>
+                    <div class="layer-body">
+                        <div class="layer-component highlight">services/api/ — API 客户端</div>
+                        <div class="layer-component">services/mcp/ — MCP 协议</div>
+                        <div class="layer-component">services/compact/ — 上下文压缩</div>
+                        <div class="layer-component">services/analytics/ — 分析上报</div>
+                        <div class="layer-component">services/SessionMemory/</div>
+                    </div>
+                </div>
+                <div class="layer-arrow">&#9660;</div>
+                <div class="layer layer-infra">
+                    <div class="layer-header">L5 工具库层 (utils/)</div>
+                    <div class="layer-body">
+                        <div class="layer-component highlight">utils/telemetry/</div>
+                        <div class="layer-component">utils/git/ · utils/shell/ · utils/bash/</div>
+                        <div class="layer-component">utils/hooks/ · utils/swarm/</div>
+                        <div class="layer-component">utils/computerUse/ · utils/claudeInChrome/</div>
+                        <div class="layer-component">utils/deepLink/ · utils/secureStorage/</div>
+                        <div class="layer-component">utils/model/ · utils/task/ · utils/background/</div>
+                    </div>
+                </div>
+                <div class="layer-arrow">&#9660;</div>
+                <div class="layer layer-data">
+                    <div class="layer-header">L6 原生与桥接层</div>
+                    <div class="layer-body">
+                        <div class="layer-component highlight">native-ts/ (yoga-layout · color-diff · file-index)</div>
+                        <div class="layer-component">upstreamproxy/ · bridge/</div>
+                        <div class="layer-component">bootstrap/state.ts — 全局状态单例</div>
+                    </div>
+                </div>
+            </div>
+        </section>
+
+        <section id="dataflow" class="card">
+            <h2>模块依赖网格</h2>
+            <p>以下网格展示了主要模块之间的直接依赖关系。每行是一个模块，<code>deps</code> 列出其直接依赖。</p>
+
+            <div class="dep-grid">
+                <div class="dep-node">
+                    <div class="name">main.tsx</div>
+                    <div class="deps">
+                        <span class="tag tag-blue">setup.ts</span>
+                        <span class="tag tag-blue">commands.ts</span>
+                        <span class="tag tag-green">bootstrap/state.ts</span>
+                        <span class="tag tag-orange">utils/startupProfiler</span>
+                        <span class="tag tag-orange">utils/secureStorage</span>
+                        <span class="tag tag-orange">utils/settings/mdm</span>
+                        <span class="tag tag-purple">utils/auth</span>
+                    </div>
+                </div>
+                <div class="dep-node">
+                    <div class="name">setup.ts</div>
+                    <div class="deps">
+                        <span class="tag tag-blue">QueryEngine.ts</span>
+                        <span class="tag tag-blue">utils/cwd</span>
+                        <span class="tag tag-green">utils/releaseNotes</span>
+                        <span class="tag tag-green">utils/Shell</span>
+                        <span class="tag tag-orange">utils/sinks</span>
+                        <span class="tag tag-orange">services/SessionMemory</span>
+                        <span class="tag tag-purple">utils/auth</span>
+                    </div>
+                </div>
+                <div class="dep-node">
+                    <div class="name">QueryEngine.ts</div>
+                    <div class="deps">
+                        <span class="tag tag-blue">query.ts</span>
+                        <span class="tag tag-blue">tools.ts</span>
+                        <span class="tag tag-blue">context.ts</span>
+                        <span class="tag tag-green">services/api/claude</span>
+                        <span class="tag tag-green">services/compact</span>
+                        <span class="tag tag-green">services/contextCollapse</span>
+                        <span class="tag tag-orange">utils/systemPromptType</span>
+                        <span class="tag tag-purple">Tool.ts</span>
+                    </div>
+                </div>
+                <div class="dep-node">
+                    <div class="name">query.ts</div>
+                    <div class="deps">
+                        <span class="tag tag-blue">tools.ts</span>
+                        <span class="tag tag-blue">Tool.ts</span>
+                        <span class="tag tag-green">services/api</span>
+                        <span class="tag tag-green">services/compact</span>
+                        <span class="tag tag-orange">utils/telemetry/sessionTracing</span>
+                        <span class="tag tag-orange">utils/hooks</span>
+                        <span class="tag tag-red">commands.ts</span>
+                        <span class="tag tag-purple">context.ts</span>
+                        <span class="tag tag-cyan">cost-tracker.ts</span>
+                    </div>
+                </div>
+                <div class="dep-node">
+                    <div class="name">tools.ts</div>
+                    <div class="deps">
+                        <span class="tag tag-blue">Tool.ts</span>
+                        <span class="tag tag-green">tools/AgentTool</span>
+                        <span class="tag tag-green">tools/BashTool</span>
+                        <span class="tag tag-green">tools/FileEditTool</span>
+                        <span class="tag tag-green">tools/FileReadTool</span>
+                        <span class="tag tag-green">tools/FileWriteTool</span>
+                        <span class="tag tag-green">tools/GlobTool</span>
+                        <span class="tag tag-green">tools/WebFetchTool</span>
+                        <span class="tag tag-green">tools/SkillTool</span>
+                        <span class="tag tag-orange">tools/REPLTool (ant)</span>
+                    </div>
+                </div>
+                <div class="dep-node">
+                    <div class="name">Tool.ts</div>
+                    <div class="deps">
+                        <span class="tag tag-blue">services/mcp/types</span>
+                        <span class="tag tag-green">hooks/useCanUseTool</span>
+                        <span class="tag tag-orange">services/api/withRetry</span>
+                    </div>
+                </div>
+                <div class="dep-node">
+                    <div class="name">Task.ts / tasks.ts</div>
+                    <div class="deps">
+                        <span class="tag tag-blue">tasks/LocalAgentTask</span>
+                        <span class="tag tag-blue">tasks/LocalShellTask</span>
+                        <span class="tag tag-blue">tasks/RemoteAgentTask</span>
+                        <span class="tag tag-blue">tasks/DreamTask</span>
+                        <span class="tag tag-green">utils/task/diskOutput</span>
+                        <span class="tag tag-orange">tasks/LocalWorkflowTask (feature)</span>
+                    </div>
+                </div>
+                <div class="dep-node">
+                    <div class="name">commands.ts</div>
+                    <div class="deps">
+                        <span class="tag tag-green">commands/commit</span>
+                        <span class="tag tag-green">commands/compact</span>
+                        <span class="tag tag-green">commands/config</span>
+                        <span class="tag tag-green">commands/doctor</span>
+                        <span class="tag tag-green">commands/login</span>
+                        <span class="tag tag-green">commands/memory</span>
+                        <span class="tag tag-green">commands/init</span>
+                        <span class="tag tag-orange">~30+ 命令模块</span>
+                    </div>
+                </div>
+                <div class="dep-node">
+                    <div class="name">context.ts</div>
+                    <div class="deps">
+                        <span class="tag tag-blue">utils/claudemd</span>
+                        <span class="tag tag-green">bootstrap/state</span>
+                        <span class="tag tag-orange">utils/git</span>
+                        <span class="tag tag-orange">utils/envUtils</span>
+                    </div>
+                </div>
+                <div class="dep-node">
+                    <div class="name">utils/telemetry/</div>
+                    <div class="deps">
+                        <span class="tag tag-blue">services/analytics</span>
+                        <span class="tag tag-green">utils/envUtils</span>
+                        <span class="tag tag-orange">bootstrap/state</span>
+                        <span class="tag tag-orange">utils/teammate</span>
+                        <span class="tag tag-purple">@opentelemetry/* (6 个包)</span>
+                    </div>
+                </div>
+                <div class="dep-node">
+                    <div class="name">utils/computerUse/</div>
+                    <div class="deps">
+                        <span class="tag tag-blue">@ant/computer-use-mcp</span>
+                        <span class="tag tag-green">@ant/computer-use-input</span>
+                        <span class="tag tag-green">@ant/computer-use-swift</span>
+                        <span class="tag tag-orange">services/mcp/normalization</span>
+                        <span class="tag tag-orange">services/analytics</span>
+                    </div>
+                </div>
+                <div class="dep-node">
+                    <div class="name">utils/swarm/</div>
+                    <div class="deps">
+                        <span class="tag tag-blue">bootstrap/state</span>
+                        <span class="tag tag-green">utils/bash/shellQuote</span>
+                        <span class="tag tag-orange">utils/bundledMode</span>
+                        <span class="tag tag-orange">utils/permissions</span>
+                        <span class="tag tag-purple">utils/swarm/backends/</span>
+                    </div>
+                </div>
+                <div class="dep-node">
+                    <div class="name">bridge/</div>
+                    <div class="deps">
+                        <span class="tag tag-blue">utils/auth</span>
+                        <span class="tag tag-green">utils/config</span>
+                        <span class="tag tag-orange">bootstrap/state</span>
+                        <span class="tag tag-purple">axios</span>
+                    </div>
+                </div>
+            </div>
+
+            <h3 style="margin-top:2em;">跨层依赖关系图</h3>
+            <div class="diagram-container">
+                <div class="diagram-row">
+                    <div class="diagram-node" style="background:#dbeafe;border:2px solid #3b82f6;min-width:100px">
+                        <strong>L1 入口</strong>
+                    </div>
+                    <div class="diagram-connector">&#8595;</div>
+                    <div class="diagram-node" style="background:#e9d5ff;border:2px solid #a855f7;min-width:100px">
+                        <strong>L2 编排</strong>
+                    </div>
+                    <div class="diagram-connector">&#8595;</div>
+                    <div class="diagram-node" style="background:#dcfce7;border:2px solid #22c55e;min-width:100px">
+                        <strong>L3 工具</strong>
+                    </div>
+                </div>
+                <div class="diagram-row" style="margin-top:0.5em">
+                    <div class="diagram-node" style="background:#fef3c7;border:2px solid #f59e0b;min-width:100px">
+                        <strong>L4 服务</strong>
+                    </div>
+                    <div class="diagram-connector">&#8595;</div>
+                    <div class="diagram-node" style="background:#f1f5f9;border:2px solid #64748b;min-width:100px">
+                        <strong>L5 工具库</strong>
+                    </div>
+                    <div class="diagram-connector">&#8595;</div>
+                    <div class="diagram-node" style="background:#cffafe;border:2px solid #06b6d4;min-width:100px">
+                        <strong>L6 原生</strong>
+                    </div>
+                </div>
+                <div class="diagram-row" style="margin-top:1em;">
+                    <div class="info-box info" style="flex:1">
+                        <strong>跨层调用说明：</strong><br>
+                        L1 → L3: main.tsx 直接 import tools.ts（工具注册）<br>
+                        L2 → L4: QueryEngine 调用 services/api（API 客户端）<br>
+                        L3 → L5: 工具实现使用 utils/bash、utils/shell、utils/git 等<br>
+                        L4 → L6: services/compact 使用 native-ts/yoga-layout；services/api 使用 upstreamproxy<br>
+                        L5 → L6: utils/shell 使用 native-ts/color-diff；UI 使用 native-ts/file-index<br>
+                        <strong>bootstrap/state.ts</strong> 是全局状态单例，被 L2-L5 所有层依赖（依赖方向标记为垂直贯穿）
+                    </div>
+                </div>
+            </div>
+
+            <h3 style="margin-top:2em;">循环依赖</h3>
+            <div class="info-box warning">
+                <strong>已知的循环依赖路径：</strong><br>
+                <code>query.ts</code> &#8594; <code>commands.ts</code> &#8594; <code>query.ts</code>（query 调用 slash command，slash command 可能触发新 query）<br>
+                <strong>缓解策略：</strong> 通过动态 import 和 <code>getAllTasks()</code> / <code>getCommands()</code> 工厂函数延迟求值，避免模块加载时循环。TypeScript 的 <code>import type</code> 也用于打断循环——只导入类型不导入值。
+            </div>
+        </section>
+
+        <section id="interfaces" class="card">
+            <h2>关键类型与接口</h2>
+
+            <h3>全局状态单例 (<code>bootstrap/state.ts</code>)</h3>
+            <pre><code>// bootstrap/state.ts 被所有层依赖的核心状态
+// 以下是被广泛 import 的函数签名：
+export function getSessionId(): string
+export function getCwd(): string
+export function setCwd(cwd: string): void
+export function getProjectRoot(): string | undefined
+export function getModelUsage(): ModelUsage
+export function getTokenCounter(): number
+export function getCostCounter(): number
+export function getMainLoopModelOverride(): string | undefined
+export function getInlinePlugins(): string[]
+export function getSessionBypassPermissionsMode(): boolean
+export function isSessionPersistenceDisabled(): boolean
+// ... 40+ getter/setter 函数</code></pre>
+
+            <h3>Feature Gate 模式 (<code>bun:bundle</code>)</h3>
+            <pre><code>// 死代码消除模式 — 外部构建时 feature() 返回 false，整个代码块被移除
+import { feature } from 'bun:bundle'
+
+const REPLTool = process.env.USER_TYPE === 'ant'
+  ? require('./tools/REPLTool/REPLTool.js').REPLTool
+  : null
+
+// 或使用 feature() gate：
+const reactiveCompact = feature('REACTIVE_COMPACT')
+  ? require('./services/compact/reactiveCompact.js')
+  : null</code></pre>
+        </section>
+
+        <section id="patterns" class="card">
+            <h2>设计模式与亮点</h2>
+
+            <div class="two-col">
+                <div>
+                    <h3>1. 工厂函数打破循环</h3>
+                    <p><code>tools.ts</code> 导出的 <code>getAllTools()</code>、<code>tasks.ts</code> 的 <code>getAllTasks()</code>、<code>commands.ts</code> 的 <code>getCommands()</code> 都使用函数而非顶层常量。这避免了模块加载时的循环求值问题——调用者只在需要时才调用工厂函数获取列表。</p>
+
+                    <h3>2. Feature Gate 二进制剔除</h3>
+                    <p>通过 <code>bun:bundle</code> 的 <code>feature()</code> 函数和 <code>process.env.USER_TYPE === 'ant'</code> 条件，外部构建可以从二进制中完全移除 Ant 专用代码（REPLTool、Perfetto、reactiveCompact 等）。这是一种编译时多态——同一份源码产出不同功能的二进制。</p>
+                </div>
+                <div>
+                    <h3>3. 懒加载重模块</h3>
+                    <p>OTLP 导出器（<code>@opentelemetry/exporter-*-otlp-*</code>）、<code>@grpc/grpc-js</code>、highlight.js 等重型依赖都使用动态 <code>import()</code> 按需加载。<code>instrumentation.ts</code> 中的注释明确指出："静态导入会加载全部 6 个导出器 (~1.2MB) 到每次启动"。</p>
+
+                    <h3>4. bootstrap/state.ts 作为依赖注入容器</h3>
+                    <p>全局状态不使用 class 单例或全局变量，而是通过 <code>bootstrap/state.ts</code> 导出的 40+ getter/setter 函数。这个文件充当轻量级 DI 容器——所有层都通过这些函数访问共享状态，而非直接引用变量。这使得测试时可以通过 setter 替换状态。</p>
+                </div>
+            </div>
+        </section>
+
+        <section id="dev-guide" class="card developer">
+            <h2>开发者实践指南</h2>
+
+            <h3>添加新工具的依赖路径</h3>
+            <ol>
+                <li>在 <code>tools/</code> 下创建新工具文件（如 <code>tools/MyTool/MyTool.ts</code>）</li>
+                <li>实现 <code>Tool</code> 接口（<code>Tool.ts</code> 中的 type）</li>
+                <li>在 <code>tools.ts</code> 的 <code>getAllTools()</code> 中添加 import 和注册</li>
+                <li>如果工具依赖 utils/ 中的模块，确保依赖方向向下（L3 → L5）</li>
+                <li>如果工具是 Ant 专用，使用 <code>feature()</code> 或 <code>USER_TYPE</code> 门控</li>
+            </ol>
+
+            <h3>添加新命令的依赖路径</h3>
+            <ol>
+                <li>在 <code>commands/</code> 下创建命令文件</li>
+                <li>在 <code>commands.ts</code> 中 import 并注册</li>
+                <li>命令可直接调用 L2（query.ts）或 L4（services/）的函数</li>
+            </ol>
+
+            <div class="info-box tip">
+                <strong>依赖方向检查规则：</strong> 确保 import 箭头始终指向更低的层。L1 可以依赖 L2-L6，L2 可以依赖 L3-L6，以此类推。向上依赖（如 L5 直接 import L2）是架构违规的信号。
+            </div>
+        </section>
+
+        <section id="arch-guide" class="card architect">
+            <h2>架构师决策指南</h2>
+
+            <h3>依赖管理策略</h3>
+            <p>Claude Code 采用<strong>扁平模块结构</strong>（无深层嵌套的 namespace），依赖方向通过约定而非编译器强制。关键保障机制：</p>
+            <ul>
+                <li><code>bootstrap/state.ts</code> 作为唯一的全局状态汇聚点，避免了模块间的直接耦合</li>
+                <li>工厂函数（<code>getAllTools()</code>）和动态 import 打断循环</li>
+                <li>TypeScript 的 <code>import type</code> 在类型层面允许"向上"引用而不引入运行时依赖</li>
+            </ul>
+
+            <h3>包体积优化</h3>
+            <p>通过 Bun 的 <code>feature()</code> 死代码消除 + 动态 <code>import()</code> 懒加载，外部构建的二进制体积显著小于 Ant 构建。最重的依赖链路是 OTel（<code>@opentelemetry/*</code> 6 个包），仅在 <code>CLAUDE_CODE_ENABLE_TELEMETRY=1</code> 时激活导出器。</p>
+
+            <h3>可扩展性评估</h3>
+            <ul>
+                <li><strong>新工具类型：</strong> 容易——实现 Tool 接口，在 tools.ts 注册。无需修改核心逻辑。</li>
+                <li><strong>新服务后端：</strong> 中等——需要实现对应 API 客户端，修改 services/api/ 层。</li>
+                <li><strong>新 UI 框架：</strong> 困难——Ink + React 深度集成在多个层中，替换需要重写 UI 层和 layout 引擎。</li>
+            </ul>
+        </section>
+
+        <section id="code-index" class="card">
+            <h2>代码索引</h2>
+            <table>
+                <thead><tr><th>文件/目录</th><th>层</th><th>说明</th></tr></thead>
+                <tbody>
+                    <tr><td><code>main.tsx</code></td><td>L1</td><td>CLI 入口：参数解析、命令注册、启动初始化</td></tr>
+                    <tr><td><code>entrypoints/cli.tsx</code></td><td>L1</td><td>CLI 入口点配置</td></tr>
+                    <tr><td><code>entrypoints/init.ts</code></td><td>L1</td><td>运行时初始化：遥测、配置、MDM</td></tr>
+                    <tr><td><code>entrypoints/mcp.ts</code></td><td>L1</td><td>MCP 子进程入口</td></tr>
+                    <tr><td><code>setup.ts</code></td><td>L2</td><td>会话设置：CWD、项目根、内存初始化</td></tr>
+                    <tr><td><code>QueryEngine.ts</code></td><td>L2</td><td>查询编排：API 调用、工具调度、上下文压缩</td></tr>
+                    <tr><td><code>query.ts</code></td><td>L2</td><td>查询核心循环：消息构建、API 请求、工具调用</td></tr>
+                    <tr><td><code>tools.ts</code></td><td>L3</td><td>工具注册表：getAllTools() 工厂</td></tr>
+                    <tr><td><code>Tool.ts</code></td><td>L3</td><td>Tool 接口定义与 findToolByName</td></tr>
+                    <tr><td><code>Task.ts / tasks.ts</code></td><td>L3</td><td>任务类型与注册表</td></tr>
+                    <tr><td><code>commands.ts</code></td><td>L3</td><td>斜杠命令注册表（30+ 命令）</td></tr>
+                    <tr><td><code>context.ts</code></td><td>L3</td><td>系统提示词构建：claudemd、git 状态</td></tr>
+                    <tr><td><code>cost-tracker.ts</code></td><td>L2</td><td>成本追踪与统计</td></tr>
+                    <tr><td><code>services/</code></td><td>L4</td><td>API 客户端、MCP、压缩、分析、会话记忆</td></tr>
+                    <tr><td><code>utils/</code></td><td>L5</td><td>20+ 工具库模块（见外部集成页）</td></tr>
+                    <tr><td><code>native-ts/</code></td><td>L6</td><td>yoga-layout、color-diff、file-index</td></tr>
+                    <tr><td><code>upstreamproxy/</code></td><td>L6</td><td>CCR 代理中继</td></tr>
+                    <tr><td><code>bridge/</code></td><td>L6</td><td>远程会话桥接（20+ 文件）</td></tr>
+                    <tr><td><code>bootstrap/state.ts</code></td><td>L6</td><td>全局状态单例（40+ getter/setter）</td></tr>
+                    <tr><td><code>vim/</code></td><td>L5</td><td>Vim 模式状态机（5 文件）</td></tr>
+                    <tr><td><code>buddy/</code></td><td>L5</td><td>Companion 陪伴角色</td></tr>
+                    <tr><td><code>assistant/</code></td><td>L5</td><td>助手会话历史</td></tr>
+                    <tr><td><code>memdir/</code></td><td>L5</td><td>内存文件目录管理</td></tr>
+                    <tr><td><code>moreright/</code></td><td>L5</td><td>useMoreRight hook</td></tr>
+                </tbody>
+            </table>
+        </section>
+        <footer style="text-align:center; padding:32px 0 20px; margin-top:48px; border-top:1px solid var(--border); color:var(--text-secondary); font-size:13px; line-height:2;">
+        <div style="margin-bottom:4px;">⚠️ 免责声明</div>
+        本文仅用于技术学习和架构分析目的。源码分析基于公开泄漏的代码，所有商标和版权归 <a href="https://www.anthropic.com" style="color:var(--indigo);">Anthropic</a> 所有。未经授权不得用于商业用途。
+    </footer>
+    </main>
+</body>
+</html>

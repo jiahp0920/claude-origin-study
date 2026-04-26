@@ -1,0 +1,830 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>外部集成能力 - Claude Code 源码分析</title>
+    <link rel="stylesheet" href="shared/styles.css">
+</head>
+<body>
+    <nav class="sidebar">
+<div class="sidebar-header"><div class="logo">CC</div><div><div class="sidebar-title">Claude Code</div><div class="sidebar-subtitle">源码深度分析</div></div></div>
+        <div class="nav-section-title">总览</div>
+        <a href="reading-guide.html" class="nav-link">阅读指南</a>
+        <a href="index.html" class="nav-link">架构全景</a>
+        <a href="dependency-map.html" class="nav-link">模块依赖图</a>
+        <a href="vertical-agent-guide.html" class="nav-link">垂直 Agent 设计指南</a>
+<div class="nav-section-title">核心流程</div>
+<a href="00-startup.html" class="nav-link">启动链路</a>
+<a href="01-query-loop.html" class="nav-link">Query 循环</a>
+<a href="flows/query-lifecycle.html" class="nav-link">查询生命周期</a>
+<div class="nav-section-title">核心机制</div>
+<a href="02-tool-dispatch.html" class="nav-link">工具调度</a>
+<a href="03-permissions.html" class="nav-link">权限系统</a>
+<a href="03b-security-hardening.html" class="nav-link">风控与安全加固</a>
+<a href="04-agent-arch.html" class="nav-link">Agent 架构</a>
+<a href="11-hooks.html" class="nav-link">Hook 机制</a>
+<div class="nav-section-title">扩展体系</div>
+<a href="05-mcp.html" class="nav-link">MCP 体系</a>
+<a href="07-plugins.html" class="nav-link">插件系统</a>
+<a href="08-commands.html" class="nav-link">命令系统</a>
+<div class="nav-section-title">数据与服务</div>
+<a href="06-context-mgmt.html" class="nav-link">上下文管理</a>
+<a href="10-services.html" class="nav-link">服务层</a>
+<a href="15-cost-limits.html" class="nav-link">成本与限流</a>
+<div class="nav-section-title">界面与配置</div>
+<a href="09-ui.html" class="nav-link">UI 交互层</a>
+<a href="13-config.html" class="nav-link">配置与迁移</a>
+<div class="nav-section-title">外围能力</div>
+<a href="12-external.html" class="nav-link active">外部集成</a>
+<a href="14-native.html" class="nav-link">Native 能力</a>
+<div class="nav-section-title">流程图</div>
+<a href="flows/tool-execution.html" class="nav-link">工具执行流程</a>
+<a href="flows/agent-collab.html" class="nav-link">Agent 协作流程</a>
+</nav>
+    <main class="content">
+        <header class="page-header">
+            <span class="breadcrumb"><a href="index.html">源码分析</a></span>
+            <h1>外部集成能力</h1>
+            <p class="subtitle">Vim 模式、语音输入、GitHub 集成、遥测系统、Git 操作、Shell 工具链、深链协议、Chrome 集成、Computer Use 等外部接口的总成</p>
+        </header>
+
+        <nav class="page-toc">
+    <div class="page-toc-title">页面导航</div>
+        <a href="#overview"><span class="toc-dot dot-overview"></span>职责概述</a>
+        <a href="#architecture"><span class="toc-dot dot-arch"></span>架构设计</a>
+        <a href="#dataflow"><span class="toc-dot dot-data"></span>数据流</a>
+        <a href="#interfaces"><span class="toc-dot dot-arch"></span>核心接口</a>
+        <a href="#patterns"><span class="toc-dot dot-arch"></span>设计模式</a>
+        <a href="#dev-guide"><span class="toc-dot dot-code"></span>开发者指南</a>
+        <a href="#arch-guide"><span class="toc-dot dot-arch"></span>架构师指南</a>
+        <a href="#topology"><span class="toc-dot dot-data"></span>处理拓扑图</a>
+        <a href="#core-flow"><span class="toc-dot dot-data"></span>核心流程详解</a>
+        <a href="#design-essence"><span class="toc-dot dot-design"></span>设计精华</a>
+        <a href="#agent-practice"><span class="toc-dot dot-practice"></span>Agent 实践借鉴</a>
+        <a href="#code-index"><span class="toc-dot dot-code"></span>代码索引</a>
+</nav>
+
+        <section id="overview" class="card">
+            <h2>职责概述</h2>
+            <p>Claude Code 的外部集成层是连接 CLI 与外部世界的桥梁。它覆盖了从底层 Shell 执行到高层 GUI 自动化的完整栈：<strong>vim/</strong> 提供类 Vim 编辑体验的状态机；<strong>voice/</strong> 管理语音输入的认证与功能开关；<strong>utils/github/</strong> 检测 gh CLI 认证状态；<strong>utils/telemetry/</strong> 实现基于 OpenTelemetry 的完整可观测性（指标、日志、链路追踪、Perfetto 性能分析）；<strong>utils/git/</strong> 通过纯文件系统读取实现零子进程的 Git 状态缓存；<strong>utils/shell/</strong> 和 <strong>utils/bash/</strong> 构建 Shell 命令解析与执行基础设施；<strong>utils/deepLink/</strong> 实现 <code>claude-cli://</code> 自定义 URI 协议；<strong>utils/claudeInChrome/</strong> 通过 Native Messaging / WebSocket Bridge 将 Claude Code 能力扩展到浏览器；<strong>utils/computerUse/</strong> 通过 macOS 原生模块实现屏幕截图、键盘鼠标控制等 GUI 自动化。</p>
+        </section>
+
+        <section id="architecture" class="card">
+            <h2>架构设计</h2>
+            <div class="layer-diagram">
+                <div class="layer layer-ui">
+                    <div class="layer-header">用户界面层</div>
+                    <div class="layer-body">
+                        <div class="layer-component highlight">vim/ — Vim 模式状态机</div>
+                        <div class="layer-component">voice/ — 语音模式开关</div>
+                        <div class="layer-component">buddy/ — Companion 陪伴角色</div>
+                    </div>
+                </div>
+                <div class="layer-arrow">&#9660;</div>
+                <div class="layer layer-tool">
+                    <div class="layer-header">工具集成层</div>
+                    <div class="layer-body">
+                        <div class="layer-component highlight">utils/computerUse/ — GUI 自动化</div>
+                        <div class="layer-component highlight">utils/claudeInChrome/ — 浏览器集成</div>
+                        <div class="layer-component">utils/github/ — GitHub CLI 集成</div>
+                    </div>
+                </div>
+                <div class="layer-arrow">&#9660;</div>
+                <div class="layer layer-engine">
+                    <div class="layer-header">Shell 执行引擎</div>
+                    <div class="layer-body">
+                        <div class="layer-component highlight">utils/bash/ — 命令解析 AST</div>
+                        <div class="layer-component">utils/shell/ — Shell Provider 抽象</div>
+                        <div class="layer-component">utils/powershell/ — PowerShell 支持</div>
+                    </div>
+                </div>
+                <div class="layer-arrow">&#9660;</div>
+                <div class="layer layer-infra">
+                    <div class="layer-header">基础设施层</div>
+                    <div class="layer-body">
+                        <div class="layer-component highlight">utils/telemetry/ — 遥测与追踪</div>
+                        <div class="layer-component">utils/git/ — Git 文件系统缓存</div>
+                        <div class="layer-component">utils/deepLink/ — 深链协议</div>
+                        <div class="layer-component">utils/secureStorage/ — 安全存储</div>
+                    </div>
+                </div>
+            </div>
+
+            <h3 style="margin-top:2em;">外部接口全景图</h3>
+            <div class="diagram-container">
+                <div class="diagram-row">
+                    <div class="diagram-node" style="background:#fef3c7;border:2px solid #f59e0b;min-width:120px">
+                        <strong>Vim Mode</strong><br><small>vim/types.ts<br>vim/transitions.ts</small>
+                    </div>
+                    <div class="diagram-connector">&#8594;</div>
+                    <div class="diagram-node" style="background:#dbeafe;border:2px solid #3b82f6;min-width:120px">
+                        <strong>Input Box</strong><br><small>用户输入框<br>Vim 键绑定</small>
+                    </div>
+                    <div class="diagram-connector">&#8594;</div>
+                    <div class="diagram-node" style="background:#dcfce7;border:2px solid #22c55e;min-width:120px">
+                        <strong>Process Input</strong><br><small>processUserInput/</small>
+                    </div>
+                </div>
+                <div class="diagram-row" style="margin-top:1em;">
+                    <div class="diagram-node" style="background:#fce7f3;border:2px solid #ec4899;min-width:120px">
+                        <strong>Computer Use</strong><br><small>Rust enigo<br>Swift SCContent</small>
+                    </div>
+                    <div class="diagram-connector">&#8596;</div>
+                    <div class="diagram-node" style="background:#e0e7ff;border:2px solid #6366f1;min-width:140px">
+                        <strong>macOS System</strong><br><small>截图 / 键鼠 / App 管理</small>
+                    </div>
+                    <div class="diagram-connector">&#8596;</div>
+                    <div class="diagram-node" style="background:#fef3c7;border:2px solid #f59e0b;min-width:120px">
+                        <strong>MCP Server</strong><br><small>computerUse/<br>mcpServer.ts</small>
+                    </div>
+                </div>
+                <div class="diagram-row" style="margin-top:1em;">
+                    <div class="diagram-node" style="background:#f0fdf4;border:2px solid #16a34a;min-width:120px">
+                        <strong>Chrome 集成</strong><br><small>claudeInChrome/<br>Native Messaging</small>
+                    </div>
+                    <div class="diagram-connector">&#8596;</div>
+                    <div class="diagram-node" style="background:#eff6ff;border:2px solid #2563eb;min-width:140px">
+                        <strong>Browser Extension</strong><br><small>WebSocket Bridge<br>或 Unix Socket</small>
+                    </div>
+                    <div class="diagram-connector">&#8596;</div>
+                    <div class="diagram-node" style="background:#fef9c3;border:2px solid #ca8a04;min-width:120px">
+                        <strong>Deep Link</strong><br><small>claude-cli://<br>协议注册</small>
+                    </div>
+                </div>
+            </div>
+        </section>
+
+        <section id="dataflow" class="card">
+            <h2>核心数据流</h2>
+
+            <h3>1. Vim 模式按键处理流程</h3>
+            <div class="flow-chart">
+                <div class="flow-step">
+                    <div class="flow-step-title">按键输入</div>
+                    <div class="flow-step-desc">用户在 NORMAL 模式按下 <code>d</code></div>
+                </div>
+                <div class="flow-arrow">&#8594;</div>
+                <div class="flow-step">
+                    <div class="flow-step-title">transition() 分发</div>
+                    <div class="flow-step-desc"><code>transitions.ts:59</code> — 根据 <code>CommandState.type</code> 路由到 <code>fromIdle()</code></div>
+                </div>
+                <div class="flow-arrow">&#8594;</div>
+                <div class="flow-step">
+                    <div class="flow-step-title">状态转移</div>
+                    <div class="flow-step-desc"><code>fromIdle()</code> 识别 <code>d</code> 为 operator，返回 <code>{ next: { type: 'operator', op: 'delete', count: 1 } }</code></div>
+                </div>
+                <div class="flow-arrow">&#8594;</div>
+                <div class="flow-step">
+                    <div class="flow-step-title">等待 motion</div>
+                    <div class="flow-step-desc">用户按下 <code>w</code>，进入 <code>fromOperator()</code></div>
+                </div>
+                <div class="flow-arrow">&#8594;</div>
+                <div class="flow-step">
+                    <div class="flow-step-title">执行操作</div>
+                    <div class="flow-step-desc"><code>executeOperatorMotion('delete', 'w', 1, ctx)</code> — 计算范围，删除文本，记录变更</div>
+                </div>
+            </div>
+
+            <h3 style="margin-top:1.5em;">2. 遥测数据流</h3>
+            <div class="flow-chart">
+                <div class="flow-step">
+                    <div class="flow-step-title">用户交互</div>
+                    <div class="flow-step-desc"><code>startInteractionSpan(prompt)</code></div>
+                </div>
+                <div class="flow-arrow">&#8594;</div>
+                <div class="flow-step">
+                    <div class="flow-step-title">LLM 请求</div>
+                    <div class="flow-step-desc"><code>startLLMRequestSpan()</code> / <code>endLLMRequestSpan()</code> 记录 TTFT、token 用量</div>
+                </div>
+                <div class="flow-arrow">&#8594;</div>
+                <div class="flow-step">
+                    <div class="flow-step-title">工具调用</div>
+                    <div class="flow-step-desc"><code>startToolSpan()</code> / <code>endToolSpan()</code></div>
+                </div>
+                <div class="flow-arrow">&#8594;</div>
+                <div class="flow-step">
+                    <div class="flow-step-title">双通道导出</div>
+                    <div class="flow-step-desc">OTel (OTLP/Console) + Perfetto (Chrome Trace JSON) 并行写入</div>
+                </div>
+            </div>
+
+            <h3 style="margin-top:1.5em;">3. Git 文件系统缓存流程</h3>
+            <div class="flow-chart">
+                <div class="flow-step">
+                    <div class="flow-step-title">首次调用</div>
+                    <div class="flow-step-desc"><code>getCachedBranch()</code> → <code>GitFileWatcher.get()</code></div>
+                </div>
+                <div class="flow-arrow">&#8594;</div>
+                <div class="flow-step">
+                    <div class="flow-step-title">解析 .git 目录</div>
+                    <div class="flow-step-desc"><code>resolveGitDir()</code> 处理 worktree/submodule 的 <code>gitdir:</code> 指针</div>
+                </div>
+                <div class="flow-arrow">&#8594;</div>
+                <div class="flow-step">
+                    <div class="flow-step-title">读取 HEAD</div>
+                    <div class="flow-step-desc"><code>readGitHead()</code> 解析 <code>ref: refs/heads/branch</code> 或裸 SHA</div>
+                </div>
+                <div class="flow-arrow">&#8594;</div>
+                <div class="flow-step">
+                    <div class="flow-step-title">缓存 + 文件监听</div>
+                    <div class="flow-step-desc"><code>fs.watchFile</code> 监听 HEAD / config / refs 变化，标记脏数据</div>
+                </div>
+            </div>
+        </section>
+
+        <section id="interfaces" class="card">
+            <h2>关键类型与接口</h2>
+
+            <h3>Vim 状态机核心类型 (<code>vim/types.ts</code>)</h3>
+            <pre><code>// vim/types.ts:49-76 — Vim 状态联合类型
+export type VimState =
+  | { mode: 'INSERT'; insertedText: string }
+  | { mode: 'NORMAL'; command: CommandState }
+
+// NORMAL 模式下的命令状态机
+export type CommandState =
+  | { type: 'idle' }
+  | { type: 'count'; digits: string }
+  | { type: 'operator'; op: Operator; count: number }
+  | { type: 'operatorCount'; op: Operator; count: number; digits: string }
+  | { type: 'operatorFind'; op: Operator; count: number; find: FindType }
+  | { type: 'operatorTextObj'; op: Operator; count: number; scope: TextObjScope }
+  | { type: 'find'; find: FindType; count: number }
+  | { type: 'g'; count: number }
+  | { type: 'operatorG'; op: Operator; count: number }
+  | { type: 'replace'; count: number }
+  | { type: 'indent'; dir: '>' | '&lt;'; count: number }</code></pre>
+
+            <h3>Shell Provider 接口 (<code>utils/shell/shellProvider.ts</code>)</h3>
+            <pre><code>// utils/shell/shellProvider.ts:1-33
+export type ShellProvider = {
+  type: ShellType
+  shellPath: string
+  detached: boolean
+  buildExecCommand(command: string, opts: {
+    id: number | string
+    sandboxTmpDir?: string
+    useSandbox: boolean
+  }): Promise&lt;{ commandString: string; cwdFilePath: string }&gt;
+  getSpawnArgs(commandString: string): string[]
+  getEnvironmentOverrides(command: string): Promise&lt;Record&lt;string, string&gt;&gt;
+}</code></pre>
+
+            <h3>遥测 Span 类型 (<code>utils/telemetry/sessionTracing.ts</code>)</h3>
+            <pre><code>// utils/telemetry/sessionTracing.ts:49-56
+type SpanType =
+  | 'interaction'       // 用户请求 → Claude 响应的完整周期
+  | 'llm_request'       // API 调用
+  | 'tool'              // 工具调用
+  | 'tool.blocked_on_user' // 等待用户权限决策
+  | 'tool.execution'    // 工具实际执行
+  | 'hook'              // Hook 执行</code></pre>
+
+            <h3>Computer Use 执行器接口 (<code>utils/computerUse/executor.ts</code>)</h3>
+            <pre><code>// utils/computerUse/executor.ts:259-262
+export function createCliExecutor(opts: {
+  getMouseAnimationEnabled: () => boolean
+  getHideBeforeActionEnabled: () => boolean
+}): ComputerExecutor
+// 返回的对象实现截图、键鼠控制、App 管理、剪贴板等能力</code></pre>
+
+            <h3>Deep Link 解析结果 (<code>utils/deepLink/parseDeepLink.ts</code>)</h3>
+            <pre><code>// utils/deepLink/parseDeepLink.ts:25-29
+export type DeepLinkAction = {
+  query?: string    // 预填充提示词（不自动提交）
+  cwd?: string      // 工作目录（绝对路径）
+  repo?: string     // GitHub owner/name slug
+}</code></pre>
+        </section>
+
+        <section id="patterns" class="card">
+            <h2>设计模式与亮点</h2>
+
+            <div class="two-col">
+                <div>
+                    <h3>1. 类型驱动状态机（Vim）</h3>
+                    <p>Vim 模式的核心是 <strong>TypeScript 联合类型编码的状态机</strong>。<code>CommandState</code> 的每个变体精确描述该状态下可用的数据，<code>transition()</code> 的 switch 必须穷尽所有分支——编译器保证了不会遗漏状态。这是"类型即文档"的典范实践。</p>
+
+                    <h3>2. 零子进程 Git 状态读取</h3>
+                    <p><code>utils/git/gitFilesystem.ts</code> 完全通过文件系统操作（<code>readFile</code>、<code>stat</code>、<code>watchFile</code>）读取 Git 状态，避免为每个状态查询启动 <code>git</code> 子进程。<code>GitFileWatcher</code> 类使用脏标记 + 延迟重算模式：<code>fs.watchFile</code> 回调仅标记脏数据，下次 <code>get()</code> 调用时才真正重读。这对高频轮询场景（如终端状态栏显示当前分支）至关重要。</p>
+
+                    <h3>3. 双通道遥测架构</h3>
+                    <p>遥测系统同时维护两条独立通道：OpenTelemetry（用于生产环境指标/日志/链路追踪导出）和 Perfetto（用于内部性能分析，生成 Chrome Trace JSON 可视化）。两者共享同一个 <code>SpanContext</code> 管理器，但 Perfetto 不依赖 OTel 初始化——即使 OTel 未配置，Perfetto 追踪仍可工作。</p>
+                </div>
+                <div>
+                    <h3>4. 深链安全纵深防御</h3>
+                    <p><code>parseDeepLink.ts</code> 对深链参数实施多层安全检查：URL 解码 → Unicode 净化 → 控制字符拒绝（<code>containsControlChars</code>）→ 长度上限（query 5000 字符、cwd 4096 字符）→ 路径遍历检测 → repo slug 正则白名单。最终在 <code>terminalLauncher.ts</code> 使用单引号 Shell 转义，将注入边界推到终端层。</p>
+
+                    <h3>5. Computer Use 的终端代理模式</h3>
+                    <p>CLI 模式下的 Computer Use 没有 Electron 窗口，因此引入了<strong>终端代理</strong>概念：<code>getTerminalBundleId()</code> 检测运行的终端模拟器（通过 <code>__CFBundleIdentifier</code> 或 fallback 表），将其从截图排除列表、隐藏操作、激活顺序中剥离——确保终端窗口不会"自拍"到截图中，也不会被意外隐藏。</p>
+
+                    <h3>6. Chrome 集成的双传输路径</h3>
+                    <p>Claude in Chrome 支持两种通信方式：<strong>Native Messaging</strong>（通过 Unix Socket / Windows Named Pipe，适用于本地安装）和 <strong>WebSocket Bridge</strong>（通过 <code>wss://bridge.claudeusercontent.com</code>，适用于远程和 CCR 会话）。Bridge URL 的选择由 feature flag + 用户类型决定，ant 用户始终走 Bridge。</p>
+                </div>
+            </div>
+
+            <div class="info-box tip">
+                <strong>Vim 状态机的设计哲学：</strong> <code>types.ts</code> 文件头注释即为完整的状态转移图——类型定义就是活的架构文档。这种模式在大型项目中可大幅降低沟通成本。
+            </div>
+        </section>
+
+        <section id="dev-guide" class="card developer">
+            <h2>开发者实践指南</h2>
+
+            <h3>如何添加新的 Vim 操作符</h3>
+            <ol>
+                <li>在 <code>vim/types.ts</code> 的 <code>Operator</code> 类型中添加新变体</li>
+                <li>在 <code>vim/operators.ts</code> 中实现 <code>executeXxx()</code> 函数，遵循 <code>OperatorContext</code> 接口</li>
+                <li>在 <code>vim/transitions.ts</code> 的 <code>handleNormalInput()</code> 或对应状态处理函数中添加路由</li>
+                <li>在 <code>RecordedChange</code> 类型中添加对应的 dot-repeat 记录</li>
+            </ol>
+
+            <h3>如何扩展遥测数据</h3>
+            <ol>
+                <li>在 <code>utils/telemetry/events.ts</code> 中通过 <code>logOTelEvent()</code> 记录自定义事件</li>
+                <li>如需新的 Span 类型，在 <code>sessionTracing.ts</code> 的 <code>SpanType</code> 联合中添加</li>
+                <li>确保所有 string 属性通过 <code>redactIfDisabled()</code> 处理敏感内容</li>
+            </ol>
+
+            <h3>如何添加新的浏览器支持（Chrome 集成）</h3>
+            <ol>
+                <li>在 <code>utils/claudeInChrome/common.ts</code> 的 <code>CHROMIUM_BROWSERS</code> 中添加新浏览器配置</li>
+                <li>配置三平台路径：macOS (.app bundle)、Linux (二进制名)、Windows (注册表键)</li>
+                <li>将浏览器 ID 加入 <code>BROWSER_DETECTION_ORDER</code> 数组</li>
+            </ol>
+
+            <div class="info-box warning">
+                <strong>安全提醒：</strong> <code>utils/git/gitFilesystem.ts</code> 中的 <code>isSafeRefName()</code> 是安全边界——所有从 .git 文件读取的分支名必须通过此验证才能用于 Shell 命令拼接。新增 Git 操作时切勿跳过此检查。
+            </div>
+        </section>
+
+        <section id="arch-guide" class="card architect">
+            <h2>架构师决策指南</h2>
+
+            <h3>设计权衡</h3>
+            <div class="two-col">
+                <div>
+                    <h4>零子进程 vs 功能完整性</h4>
+                    <p><code>gitFilesystem.ts</code> 牺牲了对某些 Git 特性的支持（如 shallow clone 信息需要额外检查、不支持 worktree 的 per-worktree config），换取了零延迟和零 CPU 开销。对于需要完整 Git 功能的场景，仍需回退到 <code>git</code> 子进程。</p>
+                </div>
+                <div>
+                    <h4>Perfetto vs OTel 的职责划分</h4>
+                    <p>Perfetto 用于 Ant 内部的详细性能调试（sub-span 嵌套、agent 层级、retry 可视化），OTel 用于面向客户的标准化可观测性。Perfetto 的事件上限为 100K 条（约 30MB），通过 <code>evictOldestEvents()</code> 半批量淘汰，适合长时间运行的 cron 会话。</p>
+                </div>
+            </div>
+
+            <h3>扩展性考量</h3>
+            <ul>
+                <li><strong>Shell Provider 抽象：</strong> <code>ShellProvider</code> 接口统一了 Bash 和 PowerShell，新增 Shell 类型只需实现该接口。但当前 <code>ShellType</code> 是硬编码的 <code>'bash' | 'powershell'</code>，添加 zsh/fish 需扩展此联合类型。</li>
+                <li><strong>Computer Use 跨平台：</strong> <code>createCliExecutor()</code> 目前仅支持 macOS（依赖 <code>@ant/computer-use-input</code> 的 Rust/enigo 和 Swift 模块）。Linux/Windows 支持需要平台特定的 input 模块。</li>
+                <li><strong>遥测的 WeakRef 策略：</strong> <code>sessionTracing.ts</code> 使用 <code>WeakRef&lt;SpanContext&gt;</code> 管理 active spans，配合 <code>strongSpans</code> Map 为非 ALS 管理的 span 保留强引用。这避免了 span 泄漏，但需要 30 分钟 TTL 的清理间隔作为安全网。</li>
+            </ul>
+
+            <h3>性能关键路径</h3>
+            <p><code>GitFileWatcher</code> 的 <code>WATCH_INTERVAL_MS</code> 在生产环境为 1000ms（测试环境 10ms），<code>watchFile</code> 轮询间隔是 Git 状态栏更新的主要延迟来源。<code>resolveGitDir()</code> 的缓存是永久的（不设 TTL），因为 .git 路径在会话生命周期内不会变化。</p>
+        </section>
+
+        <section id="topology" class="card">
+            <h2><span class="icon" style="background:rgba(139,92,246,.15);color:var(--purple);">◈</span> 可视化处理拓扑图</h2>
+
+            <!-- Phase 1: Shell 执行管线 -->
+            <h3 style="margin-top:8px;">Phase 1 — Shell 命令执行管线</h3>
+            <p>每次 Bash 工具调用都会走这条管线：Shell Provider 选择 → 环境快照恢复 → 命令构建 → 子进程执行。</p>
+            <div class="fc">
+                <div class="fc-center">
+                    <div class="fn n-start">Bash 工具调用<span class="sub">tool: bash / command</span></div>
+                    <div class="vc s20"></div>
+
+                    <div class="fn n-check w">Shell Provider 选择<span class="sub">resolveDefaultShell() → bashProvider / powershellProvider</span><span class="sub">shellProvider.ts:5-33</span></div>
+                    <div class="vc s20"></div>
+
+                    <div class="fc-row">
+                        <div class="fn n-process w">Bash Provider<span class="sub">bashProvider.ts:58</span></div>
+                        <div class="hc s20"></div>
+                        <div class="fn n-process w">PowerShell Provider<span class="sub">powershellProvider.ts</span></div>
+                    </div>
+                    <div class="vc s20"><span class="vc-label">以 Bash 为例 ↓</span></div>
+
+                    <div class="fn n-check ww">环境快照恢复<span class="sub">检查 env snapshot 文件存活 → source 恢复 / -l login shell 回退</span><span class="sub">bashProvider.ts:77-198</span></div>
+                    <div class="vc s20"></div>
+
+                    <div class="fn n-process w">命令构建<span class="sub">写入 cwd 临时文件 → 构建 cd + command + pwd 脚本</span><span class="sub">bashProvider.ts:123-126</span></div>
+                    <div class="vc s20"></div>
+
+                    <div class="fn n-process w">环境变量注入<span class="sub">getEnvironmentOverrides() → sandbox TMPDIR 等</span></div>
+                    <div class="vc s20"></div>
+
+                    <div class="fn n-allow">子进程执行<span class="sub">getSpawnArgs() → child_process.spawn</span></div>
+                </div>
+            </div>
+
+            <!-- Phase 2: 外部能力分支 -->
+            <h3 style="margin-top:1.5em;">Phase 2 — 外部能力并行分支</h3>
+            <p>Git 状态监控、遥测 Span、深链协议、Vim 状态机是四条并行的外部能力路径。</p>
+            <div class="fc">
+                <div class="fc-center">
+                    <div class="fn n-start">外部事件触发<span class="sub">用户操作 / 系统事件 / URI 点击</span></div>
+                    <div class="vc s24"></div>
+
+                    <div class="fc-row" style="gap:16px;">
+                        <!-- Git 分支 -->
+                        <div style="display:flex;flex-direction:column;align-items:center;gap:0;">
+                            <div class="fn n-check" style="max-width:150px;">Git 状态监控<span class="sub">gitFilesystem.ts:333</span></div>
+                            <div class="vc s16"></div>
+                            <div class="fn n-process" style="max-width:150px;">fs.watchFile 监听<span class="sub">.git/HEAD / config / refs</span></div>
+                            <div class="vc s16"></div>
+                            <div class="fn n-auto" style="max-width:150px;">脏标记 + 延迟重算<span class="sub">invalidate() → dirty=true</span><span class="sub">gitFilesystem.ts:440-444</span></div>
+                            <div class="vc s16"></div>
+                            <div class="fn n-process" style="max-width:150px;">get() 懒重算<span class="sub">dirty 时才 readFile</span></div>
+                        </div>
+
+                        <!-- 遥测分支 -->
+                        <div style="display:flex;flex-direction:column;align-items:center;gap:0;">
+                            <div class="fn n-check" style="max-width:150px;">遥测 Span<span class="sub">sessionTracing.ts:100</span></div>
+                            <div class="vc s16"></div>
+                            <div class="fn n-process" style="max-width:150px;">Span 层级管理<span class="sub">AsyncLocalStorage</span></div>
+                            <div class="vc s16"></div>
+                            <div class="fc-row" style="gap:6px;">
+                                <div class="fn n-process" style="max-width:100px;font-size:11px;">OTel<span class="sub">OTLP 导出</span></div>
+                                <div class="fn n-process" style="max-width:100px;font-size:11px;">Perfetto<span class="sub">Chrome Trace</span></div>
+                            </div>
+                            <div class="vc s16"></div>
+                            <div class="fn n-auto" style="max-width:150px;">WeakRef 防泄漏<span class="sub">30min TTL 清理</span></div>
+                        </div>
+
+                        <!-- 深链分支 -->
+                        <div style="display:flex;flex-direction:column;align-items:center;gap:0;">
+                            <div class="fn n-check" style="max-width:150px;">深链协议解析<span class="sub">parseDeepLink.ts:84</span></div>
+                            <div class="vc s16"></div>
+                            <div class="fn n-immune" style="max-width:150px;">六层安全检查<span class="sub">协议→URL→白名单→控制字符→长度→正则</span></div>
+                            <div class="vc s16"></div>
+                            <div class="fc-row">
+                                <div class="fn n-deny" style="font-size:11px;">拒绝<span class="sub">任一层失败</span></div>
+                                <div class="hc s20"></div>
+                                <div class="fn n-allow" style="font-size:11px;">通过<span class="sub">terminalLauncher</span></div>
+                            </div>
+                        </div>
+
+                        <!-- Vim 分支 -->
+                        <div style="display:flex;flex-direction:column;align-items:center;gap:0;">
+                            <div class="fn n-check" style="max-width:150px;">Vim 状态机<span class="sub">transitions.ts:59</span></div>
+                            <div class="vc s16"></div>
+                            <div class="fn n-process" style="max-width:150px;">状态路由<span class="sub">idle → operator → motion</span></div>
+                            <div class="vc s16"></div>
+                            <div class="fn n-auto" style="max-width:150px;">类型驱动执行<span class="sub">CommandState 联合类型</span><span class="sub">vim/types.ts:8-26</span></div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Phase 3: Computer Use & Chrome -->
+            <h3 style="margin-top:1.5em;">Phase 3 — GUI 自动化与浏览器集成</h3>
+            <div class="fc">
+                <div class="fc-center">
+                    <div class="fc-row" style="gap:40px;">
+                        <!-- Computer Use 路径 -->
+                        <div style="display:flex;flex-direction:column;align-items:center;gap:0;">
+                            <div class="fn n-start" style="font-size:11px;">Computer Use 调用<span class="sub">executor.ts:259</span></div>
+                            <div class="vc s16"></div>
+                            <div class="fn n-check" style="max-width:150px;">终端代理检测<span class="sub">__CFBundleIdentifier</span></div>
+                            <div class="vc s16"></div>
+                            <div class="fn n-process" style="max-width:150px;">截图 → 分析<span class="sub">排除终端窗口</span></div>
+                            <div class="vc s16"></div>
+                            <div class="fn n-process" style="max-width:150px;">鼠标动画移动<span class="sub">ease-out-cubic L217</span></div>
+                            <div class="vc s16"></div>
+                            <div class="fn n-process" style="max-width:150px;">点击/输入/验证<span class="sub">GUI 操作循环</span></div>
+                            <div class="vc s16"></div>
+                            <div class="loop-box" style="max-width:200px;">
+                                <div class="loop-title">操作循环</div>
+                                <div class="loop-text" style="font-size:10px;">截图→操作→截图验证<br>直到任务完成</div>
+                            </div>
+                        </div>
+
+                        <!-- Chrome 集成路径 -->
+                        <div style="display:flex;flex-direction:column;align-items:center;gap:0;">
+                            <div class="fn n-start" style="font-size:11px;">Chrome 集成<span class="sub">claudeInChrome/</span></div>
+                            <div class="vc s16"></div>
+                            <div class="fn n-check" style="max-width:160px;">通信路径选择<span class="sub">feature flag + 用户类型</span></div>
+                            <div class="vc s16"></div>
+                            <div class="fc-row" style="gap:12px;">
+                                <div style="display:flex;flex-direction:column;align-items:center;gap:0;">
+                                    <div class="fn n-auto" style="max-width:130px;font-size:11px;">Native Messaging<span class="sub">Unix Socket / Named Pipe</span><span class="sub">本地安装</span></div>
+                                </div>
+                                <div style="display:flex;flex-direction:column;align-items:center;gap:0;">
+                                    <div class="fn n-process" style="max-width:130px;font-size:11px;">WebSocket Bridge<span class="sub">wss://bridge.claudeusercontent.com</span><span class="sub">远程/CCR 会话</span></div>
+                                </div>
+                            </div>
+                            <div class="vc s16"></div>
+                            <div class="fn n-process" style="max-width:160px;">chromeNativeHost 注册<span class="sub">chromeNativeHost.ts</span></div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <div class="info-box info"><strong>拓扑总结</strong>：外部集成层以 Shell Provider 为命令执行的核心管线，Git/遥测/深链/Vim 四条并行能力分支各自独立运行，Computer Use 和 Chrome 集成提供 GUI 级别的双向交互。所有路径共享"安全纵深防御"设计哲学。</div>
+        </section>
+
+        <section id="core-flow" class="card">
+            <h2><span class="icon" style="background:rgba(6,182,212,.15);color:var(--cyan);">⇉</span> 核心处理流程详解</h2>
+            <p>Claude Code 的外部集成层涵盖了从用户输入捕获到 Shell 命令执行的完整链路。以 <strong>Shell 命令执行</strong> 为例，这是最高频的外部交互路径——每次 Bash 工具调用都会完整走一遍以下流程。同时以 <strong>深链协议解析</strong> 和 <strong>Git 状态监控</strong> 展示外部集成的安全纵深与零开销设计。</p>
+            <div class="flow-chart vertical">
+                <div class="flow-step highlight">
+                    <div class="flow-step-title">1. Shell Provider 选择与初始化</div>
+                    <div class="flow-step-desc">系统通过 <code>resolveDefaultShell()</code> 检测当前平台的默认 Shell，然后创建对应的 ShellProvider 实例。Bash 走 <code>bashProvider.ts:58</code> 的 <code>createBashShellProvider()</code>，PowerShell 走 <code>powershellProvider.ts</code>。Provider 接口定义了 <code>buildExecCommand</code>、<code>getSpawnArgs</code>、<code>getEnvironmentOverrides</code> 三个核心方法 — <code>shellProvider.ts:5-33</code></div>
+                </div>
+                <div class="flow-arrow">↓</div>
+                <div class="flow-step highlight">
+                    <div class="flow-step-title">2. 环境快照与命令构建</div>
+                    <div class="flow-step-desc"><code>bashProvider.ts:77-198</code> 的 <code>buildExecCommand()</code> 先检查环境快照文件是否存活（快照在 tmpdir 清理时可能丢失），存活则 <code>source</code> 恢复环境变量；否则回退到 login shell 的 <code>-l</code> 模式。然后将命令写入临时 cwd 文件，构建包含 <code>cd + command + pwd</code> 的完整执行脚本。防御性改写 Windows CMD 风格的 <code>2>nul</code> 为 POSIX 兼容形式 — <code>bashProvider.ts:123-126</code></div>
+                </div>
+                <div class="flow-arrow">↓</div>
+                <div class="flow-step">
+                    <div class="flow-step-title">3. 深链协议解析（安全纵深）</div>
+                    <div class="flow-step-desc">当用户点击 <code>claude-cli://</code> URI 时，<code>parseDeepLink.ts:84-153</code> 执行六层安全检查：协议归一化 → URL 解析 → 主机名白名单（仅允许 <code>open</code>）→ 控制字符拒绝（L121-123）→ 长度上限（query 5000/L70, cwd 4096/L77）→ repo slug 正则白名单（L132）。拒绝而非截断，防止语义篡改 — <code>parseDeepLink.ts:84-153</code></div>
+                </div>
+                <div class="flow-arrow">↓</div>
+                <div class="flow-step">
+                    <div class="flow-step-title">4. Vim 状态机按键分发</div>
+                    <div class="flow-step-desc">用户按键首先进入 <code>transitions.ts</code> 的状态转移表。根据 <code>CommandState</code> 的当前变体（idle/operator/count/find/g/replace/indent 等），将按键路由到对应的处理函数。类型定义本身就是状态转移图 — <code>vim/types.ts:8-26</code>。操作符（d/c/y）等待后续 motion 或 text-object，构成双键组合 — <code>vim/transitions.ts:1-7</code></div>
+                </div>
+                <div class="flow-arrow">↓</div>
+                <div class="flow-step">
+                    <div class="flow-step-title">5. Git 状态监控（零子进程）</div>
+                    <div class="flow-step-desc"><code>GitFileWatcher</code> 在 <code>gitFilesystem.ts:333</code> 启动时通过 <code>fs.watchFile</code> 监控 <code>.git/HEAD</code>、<code>.git/config</code> 和当前分支的 ref 文件。文件变更仅标记脏数据（L440-444 的 <code>invalidate()</code>），延迟到下次 <code>get()</code> 调用时才真正重读。支持 worktree：分支 ref 和 config 在 <code>commonDir</code> 而非 <code>gitDir</code> — <code>gitFilesystem.ts:353-380</code></div>
+                </div>
+                <div class="flow-arrow">↓</div>
+                <div class="flow-step">
+                    <div class="flow-step-title">6. 遥测 Span 生命周期</div>
+                    <div class="flow-step-desc"><code>sessionTracing.ts</code> 管理 Span 的完整生命周期：<code>startInteractionSpan</code>(L176) → <code>startLLMRequestSpan</code>(L274) → <code>startToolSpan</code>(L466) → <code>startToolExecutionSpan</code>(L626) → 逐级 end。使用 <code>AsyncLocalStorage</code> 维护 Span 层级关系，<code>WeakRef&lt;SpanContext&gt;</code> 防止 span 泄漏，配合 30 分钟 TTL 清理间隔作为安全网 — <code>sessionTracing.ts:100-120</code></div>
+                </div>
+                <div class="flow-arrow">↓</div>
+                <div class="flow-step highlight">
+                    <div class="flow-step-title">7. Computer Use 终端代理模式</div>
+                    <div class="flow-step-desc"><code>executor.ts:259</code> 的 <code>createCliExecutor()</code> 构建 GUI 自动化执行器。关键设计：CLI 模式没有 Electron 窗口，需要检测终端模拟器（通过 <code>__CFBundleIdentifier</code>）将其从截图排除。截图 → 鼠标动画移动（ease-out-cubic L217-255）→ 点击/输入 → 截图验证，构成完整的 GUI 操作循环 — <code>executor.ts:259-645</code></div>
+                </div>
+                <div class="flow-arrow">↓</div>
+                <div class="flow-step">
+                    <div class="flow-step-title">8. Chrome 双通道通信</div>
+                    <div class="flow-step-desc">Claude in Chrome 通过两种方式与 CLI 通信：Native Messaging（本地安装，Unix Socket / Named Pipe）和 WebSocket Bridge（远程/CCR 会话，<code>wss://bridge.claudeusercontent.com</code>）。Bridge URL 由 feature flag + 用户类型决定。Chrome 扩展通过 <code>chromeNativeHost.ts</code> 注册原生消息主机 — <code>chromeNativeHost.ts</code></div>
+                </div>
+            </div>
+            <div class="info-box info">上述流程体现了外部集成的三层防御哲学：Shell Provider 统一了不同 Shell 的差异，让上层只需调用 <code>buildExecCommand</code>；深链解析器用六层检查实现纵深防御；Git 监控用脏标记 + 延迟重算将文件系统轮询的开销降到最低。三者共同确保了外部交互的安全性、一致性和性能。</div>
+        </section>
+        <section id="design-essence" class="card">
+            <h2><span class="icon" style="background:rgba(245,158,11,.15);color:var(--amber);">★</span> 设计精华</h2>
+
+            <h3>1. 类型驱动状态机——编译器即测试</h3>
+            <p>Vim 模式的 <code>CommandState</code> 使用 TypeScript 联合类型精确编码每个状态可用的数据。<code>transitions.ts</code> 中的 switch 必须穷尽所有分支，TypeScript 编译器保证了不会遗漏状态。这意味着添加新的 Vim 操作符或状态时，编译错误会立即指出遗漏的地方。</p>
+            <div class="component-box">
+                <div class="name">联合类型状态编码</div>
+                <div class="desc">每个状态变体只携带该状态需要的数据，非法状态转换在编译期被拒绝</div>
+                <pre><code>// vim/types.ts:8-26 — 状态转移图即是类型定义
+// idle ──[d/c/y]──► operator ──[motion]──► execute
+//       ──[1-9]────► count     ──[ia]────► operatorTextObj
+//       ──[fFtT]───► find      ──[fFtT]──► operatorFind</code></pre>
+            </div>
+            <div class="info-box tip">这是"让非法状态不可表示"（make illegal states unrepresentable）的教科书实践。在大型 CLI 应用中，这种模式将运行时状态错误降为零——代价是类型定义本身要写得足够精确。</div>
+
+            <h3>2. 零子进程 Git 状态——文件系统即数据库</h3>
+            <p><code>GitFileWatcher</code> 完全通过 <code>fs.watchFile</code> + <code>readFile</code> 读取 Git 状态，避免了每次查询启动 <code>git</code> 子进程。脏标记 + 延迟重算模式（dirty flag + lazy recomputation）使得高频轮询（1000ms 间隔）的实际 I/O 仅在状态真正变化时发生。</p>
+            <div class="component-box">
+                <div class="name">脏标记延迟重算模式</div>
+                <div class="desc">文件变更只标记脏，不立即读取；下次 get() 时才真正计算，避免 watcher 回调中的文件 I/O</div>
+                <pre><code>// gitFilesystem.ts:440-444 + 463-485
+private invalidate(): void {
+  for (const entry of this.cache.values()) {
+    entry.dirty = true  // 仅标记，不重读
+  }
+}
+async get&lt;T&gt;(key: string, compute: () =&gt; Promise&lt;T&gt;): Promise&lt;T&gt; {
+  // dirty 在 compute 前清除；如果 compute 期间再次变更，dirty 会被重设
+  if (existing) { existing.dirty = false }
+  const value = await compute()
+  if (entry &amp;&amp; !entry.dirty) { entry.value = value }  // 防止覆盖新脏数据
+}</code></pre>
+            </div>
+            <div class="info-box tip">这种模式的关键洞察是：将"感知变更"和"处理变更"解耦。watcher 回调必须轻量（仅设脏标记），否则会在高频变更场景下产生事件积压。计算只在数据被消费时触发，天然实现了背压（backpressure）。</div>
+
+            <h3>3. 深链六层安全纵深——拒绝优于截断</h3>
+            <p><code>parseDeepLink.ts</code> 对深链参数实施六层检查。设计原则是"拒绝而非截断"——一个 5001 字符的 query 被整体拒绝，而不是截断到 5000 字符，因为截断会改变语义（可能将恶意指令从 prompt 末尾移到可见区域外）。</p>
+            <div class="component-box">
+                <div class="name">安全纵深防御链</div>
+                <div class="desc">每层检查独立防御一类攻击，任一层被绕过不会影响其他层的保护</div>
+                <pre><code>// parseDeepLink.ts:84-153 — 六层检查
+// L86-96:  协议归一化（claude-cli: → claude-cli://）
+// L98-107: URL 解析 + hostname 白名单
+// L114-118: cwd 绝对路径校验
+// L121-123: 控制字符拒绝（containsControlChars）
+// L124-128: 长度上限（query 5000, cwd 4096）
+// L132:    repo slug 正则白名单</code></pre>
+            </div>
+            <div class="info-box tip">深链是 CLI 应用中最危险的攻击面之一——恶意 URI 可以通过邮件、网页、社交工程传播。这里的每个检查层都独立有效：即使 URL 解析层被绕过，长度限制和控制字符检查仍然有效。最终在 <code>terminalLauncher.ts</code> 使用单引号 Shell 转义，将注入边界推到终端层。</div>
+
+            <h3>4. Computer Use 终端代理——自反性排除</h3>
+            <p>CLI 模式的 Computer Use 面临一个独特问题：终端窗口本身会出现在截图中（"自拍"问题）。<code>withoutTerminal()</code> 函数（L283-286）从截图允许列表中排除终端 Bundle ID，确保 Claude 看到的是目标应用而非自己的终端窗口。</p>
+            <div class="component-box">
+                <div class="name">终端自反性排除</div>
+                <div class="desc">检测当前运行的终端模拟器，将其从截图、隐藏、激活操作中排除</div>
+                <pre><code>// executor.ts:283-286
+const withoutTerminal = (allowed: readonly string[]): string[] =>
+  allowed.filter(id => id !== terminalBundleId)
+// terminalBundleId 通过 __CFBundleIdentifier 或 fallback 表检测</code></pre>
+            </div>
+            <div class="info-box tip">这个设计揭示了一个更深层的原则：GUI 自动化工具必须处理"观察者效应"——截图行为本身会改变被观察的屏幕状态。终端代理模式通过排除自身来消除这种干扰，是递归自引用问题的优雅解决方案。</div>
+        </section>
+
+        <section id="agent-practice" class="card">
+            <h2><span class="icon" style="background:rgba(34,197,94,.15);color:var(--green);">◈</span> Agent 实践借鉴 — 客服 Agent 外部集成设计</h2>
+
+            <h3>一、场景映射：客服 agent 的真实外部集成挑战</h3>
+            <p>客服 agent 对接的外部渠道比 Claude Code 的开发者工具更碎片化：电话（语音 IVR）需要 ASR/TTS 实时转写，在线聊天通过 WebSocket 长连接推送，邮件走 IMAP/SMTP 且正文是 HTML，微信/钉钉走开放 API 且消息类型五花八门（图片/语音/位置/小程序卡片），短信则是简单的 HTTP API。Claude Code 的 Vim 状态机对应的是"多轮对话状态机"，Git 状态缓存对应的是"CRM 系统在线状态检测"，OTel 遥测对应的是"SLA 监控与全链路追踪"。</p>
+
+            <h3>二、借鉴 CC + 客服改造</h3>
+
+            <h4>实践 1：多渠道消息适配器（借鉴 Shell Provider 抽象）</h4>
+            <p>CC 的 ShellProvider 用统一接口屏蔽 Bash/PowerShell 差异。客服场景同理——用统一的消息适配器屏蔽渠道差异，上层只处理标准化消息。</p>
+            <pre><code>// 借鉴 shellProvider.ts 的 Provider 抽象模式
+interface ChannelAdapter {
+  channelType: 'phone' | 'chat' | 'email' | 'wechat' | 'sms'
+  // 接收渠道原始消息，转换为统一格式
+  normalizeMessage(raw: unknown): Promise&lt;NormalizedMessage&gt;
+  // 将 agent 回复转换为渠道特定格式并发送
+  sendMessage(reply: AgentReply): Promise&lt;SendResult&gt;
+  // 检测渠道是否在线（类似 GitFileWatcher 的状态检测）
+  healthCheck(): Promise&lt;ChannelHealth&gt;
+}
+
+interface NormalizedMessage {
+  sessionId: string
+  tenantId: string
+  contentType: 'text' | 'image' | 'voice_url' | 'rich_card'
+  content: string            // 文本内容或 URL
+  metadata: Record&lt;string, unknown&gt;  // 渠道特有字段（如邮件的 subject）
+  timestamp: number
+}
+
+// 微信适配器示例：处理图片/语音/文本等不同消息类型
+class WeChatAdapter implements ChannelAdapter {
+  channelType = 'wechat' as const
+
+  async normalizeMessage(raw: WeChatMessage): Promise&lt;NormalizedMessage&gt; {
+    switch (raw.MsgType) {
+      case 'text':
+        return { contentType: 'text', content: raw.Content, ... }
+      case 'image':
+        return { contentType: 'image', content: raw.PicUrl, ... }
+      case 'voice':
+        // 需要调用微信的语音转文字 API
+        const text = await this.asrConvert(raw.Recognition)
+        return { contentType: 'text', content: text, ... }
+      default:
+        return { contentType: 'text', content: '[不支持的消息类型]', ... }
+    }
+  }
+}</code></pre>
+
+            <h4>实践 2：多轮对话状态机（借鉴 Vim 类型驱动状态机）</h4>
+            <p>CC 用联合类型编码 Vim 的每个命令状态，编译器保证不遗漏分支。客服的多轮对话也可以用同样方式建模——等待客户输入、确认意图、执行操作、等待结果，每个状态携带不同的上下文数据。</p>
+            <pre><code>// 借鉴 vim/types.ts 的联合类型状态机
+type ConversationPhase =
+  | { phase: 'waiting_input'; lastReply: string }
+  | { phase: 'clarifying'; intent: string; questions: string[] }
+  | { phase: 'confirming'; intent: string; action: PendingAction }
+  | { phase: 'executing'; action: PendingAction; startTime: number }
+  | { phase: 'waiting_result'; action: PendingAction; estimatedWait: number }
+  | { phase: 'completed'; action: PendingAction; result: ActionResult }
+
+function handleCustomerMessage(
+  state: ConversationPhase, msg: NormalizedMessage,
+): ConversationPhase {
+  switch (state.phase) {
+    case 'waiting_input':
+      return classifyIntent(msg) // → clarifying 或 confirming
+    case 'clarifying':
+      // 编译器强制处理所有分支，不会遗漏
+      return resolveClarification(state, msg)
+    case 'confirming':
+      if (msg.content === 'yes' || msg.content === '确认')
+        return { phase: 'executing', action: state.action, startTime: Date.now() }
+      if (msg.content === 'no' || msg.content === '取消')
+        return { phase: 'waiting_input', lastReply: '好的，已取消操作' }
+      return { ...state, phase: 'confirming' } // 未识别，重新确认
+    case 'executing':
+      return state // 执行中不接受新输入
+    // ... 编译器保证每个 phase 都被处理
+  }
+}</code></pre>
+
+            <h4>实践 3：渠道健康检测 + 自动降级（借鉴 GitFileWatcher 脏标记模式）</h4>
+            <p>CC 的 GitFileWatcher 用脏标记 + 延迟重算避免频繁 I/O。客服场景也需要高效检测渠道状态——微信 API 挂了切短信，语音服务不可用降级为纯文字。</p>
+            <pre><code>// 借鉴 GitFileWatcher 的脏标记 + 延迟检测模式
+class ChannelHealthMonitor {
+  private channelStatus = new Map&lt;string, { healthy: boolean; lastCheck: number; dirty: boolean }&gt;()
+
+  // 定时标记脏（类似 fs.watchFile 回调），不立即检测
+  scheduleCheck(channelType: string): void {
+    const entry = this.channelStatus.get(channelType)
+    if (entry) entry.dirty = true
+  }
+
+  // 实际发送前才检测（类似 get() 的延迟重算）
+  async ensureHealthy(channelType: string): Promise&lt;boolean&gt; {
+    const entry = this.channelStatus.get(channelType)
+    if (!entry) return false
+
+    if (!entry.dirty &amp;&amp; Date.now() - entry.lastCheck &lt; 30000) {
+      return entry.healthy // 30 秒内复用缓存
+    }
+
+    const adapter = this.getAdapter(channelType)
+    entry.healthy = await adapter.healthCheck()
+    entry.lastCheck = Date.now()
+    entry.dirty = false
+    return entry.healthy
+  }
+
+  // 发送消息时自动降级
+  async sendWithFallback(reply: AgentReply, channels: string[]): Promise&lt;SendResult&gt; {
+    for (const channel of channels) {
+      if (await this.ensureHealthy(channel)) {
+        return this.getAdapter(channel).sendMessage(reply)
+      }
+      console.warn(`渠道 ${channel} 不可用，尝试下一个`)
+    }
+    // 全部降级后走短信兜底
+    return this.getAdapter('sms').sendMessage(reply)
+  }
+}</code></pre>
+
+            <h3>三、落地清单</h3>
+            <div class="two-col">
+                <div class="component-box">
+                    <div class="name" style="color:var(--green);">必须抄的</div>
+                    <div class="desc">
+                        <ul>
+                            <li><strong>类型驱动状态机</strong>——多轮对话状态用联合类型编码，编译器防遗漏分支（Vim 的核心收益在客服场景同样适用）</li>
+                            <li><strong>多渠道统一适配器</strong>——Shell Provider 的 Provider 抽象模式，屏蔽渠道差异，上层只处理 NormalizedMessage</li>
+                            <li><strong>渠道健康检测 + 降级</strong>——脏标记延迟检测模式，避免每次发送前都做 HTTP 健康检查</li>
+                        </ul>
+                    </div>
+                </div>
+                <div class="component-box">
+                    <div class="name" style="color:var(--text-muted);">不需要抄的</div>
+                    <div class="desc">
+                        <ul>
+                            <li><strong>零子进程优化</strong>——客服场景通过 HTTP API 检测系统状态，不需要本地文件系统读取</li>
+                            <li><strong>Vim 状态机本身</strong>——客服不需要编辑器操作，只需借鉴"联合类型编码状态"的思路</li>
+                            <li><strong>Chrome Native Messaging</strong>——客服场景不需要浏览器扩展集成</li>
+                        </ul>
+                    </div>
+                </div>
+            </div>
+
+            <h3>四、常见坑</h3>
+            <div class="info-box warning">
+                <ol>
+                    <li><strong>微信/钉钉消息格式差异大</strong>——同一条回复在不同渠道需要不同的渲染方式（微信不支持 HTML 表格，钉钉不支持 Markdown），适配器的 <code>sendMessage</code> 必须做内容降级，而非只改传输协议。</li>
+                    <li><strong>对话状态机遗漏"客户中途取消"分支</strong>——CC 用穷尽类型检查防遗漏，客服场景最容易被忽略的分支是"客户在执行阶段突然说'算了'"。必须为每个非终态都处理 cancel 事件。</li>
+                    <li><strong>渠道降级策略不一致</strong>——微信挂了切短信，但短信没有图片能力；邮件挂了切在线客服，但客服可能不在线。降级策略必须考虑目标渠道的能力边界，而不能简单转发。</li>
+                    <li><strong>ASR 转写延迟导致状态超时</strong>——电话渠道的语音识别可能耗时 2-5 秒，状态机的超时阈值必须按渠道设置，不能用统一值。</li>
+                </ol>
+            </div>
+        </section>
+
+        <section id="code-index" class="card">
+            <h2>代码索引</h2>
+            <table>
+                <thead><tr><th>文件</th><th>行数</th><th>说明</th></tr></thead>
+                <tbody>
+                    <tr><td><code>vim/types.ts</code></td><td>~200</td><td>Vim 状态机类型定义、常量、工厂函数</td></tr>
+                    <tr><td><code>vim/motions.ts</code></td><td>~83</td><td>光标移动纯函数（h/j/k/w/b/e/$ 等）</td></tr>
+                    <tr><td><code>vim/operators.ts</code></td><td>~557</td><td>操作符执行（d/c/y/x/r/J/p/&gt;&gt; 等）</td></tr>
+                    <tr><td><code>vim/transitions.ts</code></td><td>~491</td><td>状态转移表——按键到状态变更/操作的映射</td></tr>
+                    <tr><td><code>vim/textObjects.ts</code></td><td>~187</td><td>文本对象查找（iw/aw/i"/a( 等）</td></tr>
+                    <tr><td><code>voice/voiceModeEnabled.ts</code></td><td>~55</td><td>语音模式功能开关（GrowthBook + OAuth 双重门控）</td></tr>
+                    <tr><td><code>utils/github/ghAuthStatus.ts</code></td><td>~30</td><td>gh CLI 安装与认证状态检测</td></tr>
+                    <tr><td><code>utils/telemetry/instrumentation.ts</code></td><td>~826</td><td>OTel 初始化：Tracer/Meter/Logger Provider 配置、导出器选择</td></tr>
+                    <tr><td><code>utils/telemetry/sessionTracing.ts</code></td><td>~928</td><td>会话级 Span 管理：interaction/LLM/tool/hook 生命周期</td></tr>
+                    <tr><td><code>utils/telemetry/perfettoTracing.ts</code></td><td>~1121</td><td>Perfetto Chrome Trace 事件生成与文件写入</td></tr>
+                    <tr><td><code>utils/telemetry/events.ts</code></td><td>~76</td><td>OTel Log Record 事件发射器</td></tr>
+                    <tr><td><code>utils/git/gitFilesystem.ts</code></td><td>~700</td><td>零子进程 Git 状态读取 + GitFileWatcher 缓存</td></tr>
+                    <tr><td><code>utils/shell/shellProvider.ts</code></td><td>~33</td><td>Shell Provider 接口定义</td></tr>
+                    <tr><td><code>utils/bash/parser.ts</code></td><td>~大文件</td><td>Bash 命令 AST 解析器</td></tr>
+                    <tr><td><code>utils/computerUse/executor.ts</code></td><td>~659</td><td>CLI Computer Use 执行器（截图/键鼠/App/剪贴板）</td></tr>
+                    <tr><td><code>utils/computerUse/mcpServer.ts</code></td><td>~107</td><td>Computer Use MCP Server 入口</td></tr>
+                    <tr><td><code>utils/deepLink/parseDeepLink.ts</code></td><td>~171</td><td>深链 URI 解析与安全校验</td></tr>
+                    <tr><td><code>utils/deepLink/registerProtocol.ts</code></td><td>~349</td><td>跨平台 URI 协议注册（macOS/Linux/Windows）</td></tr>
+                    <tr><td><code>utils/claudeInChrome/mcpServer.ts</code></td><td>~294</td><td>Chrome 集成 MCP Server + Bridge 配置</td></tr>
+                    <tr><td><code>utils/claudeInChrome/common.ts</code></td><td>~541</td><td>7 种 Chromium 浏览器配置与检测</td></tr>
+                    <tr><td><code>utils/swarm/spawnUtils.ts</code></td><td>~80+</td><td>Agent 协作中 teammate 进程生成与 CLI flag 继承</td></tr>
+                </tbody>
+            </table>
+        </section>
+        <footer style="text-align:center; padding:32px 0 20px; margin-top:48px; border-top:1px solid var(--border); color:var(--text-secondary); font-size:13px; line-height:2;">
+        <div style="margin-bottom:4px;">⚠️ 免责声明</div>
+        本文仅用于技术学习和架构分析目的。源码分析基于公开泄漏的代码，所有商标和版权归 <a href="https://www.anthropic.com" style="color:var(--indigo);">Anthropic</a> 所有。未经授权不得用于商业用途。
+    </footer>
+    </main>
+</body>
+</html>

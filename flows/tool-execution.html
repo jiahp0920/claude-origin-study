@@ -1,0 +1,415 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>工具执行完整流程 - Claude Code 源码分析</title>
+    <link rel="stylesheet" href="../shared/styles.css">
+</head>
+<body>
+    <nav class="sidebar">
+    <div class="sidebar-header"><div class="logo">CC</div><div><div class="sidebar-title">Claude Code</div><div class="sidebar-subtitle">源码深度分析</div></div></div>
+            <div class="nav-section-title">总览</div>
+        <a href="../reading-guide.html" class="nav-link">阅读指南</a>
+        <a href="../index.html" class="nav-link">架构全景</a>
+        <a href="../dependency-map.html" class="nav-link">模块依赖图</a>
+        <a href="../vertical-agent-guide.html" class="nav-link">垂直 Agent 设计指南</a>
+<div class="nav-section-title">核心流程</div>
+    <a href="../00-startup.html" class="nav-link">启动链路</a>
+    <a href="../01-query-loop.html" class="nav-link">Query 循环</a>
+    <a href="query-lifecycle.html" class="nav-link">查询生命周期</a>
+    <div class="nav-section-title">核心机制</div>
+    <a href="../02-tool-dispatch.html" class="nav-link">工具调度</a>
+    <a href="../03-permissions.html" class="nav-link">权限系统</a>
+    <a href="../04-agent-arch.html" class="nav-link">Agent 架构</a>
+    <a href="../11-hooks.html" class="nav-link">Hook 机制</a>
+    <div class="nav-section-title">扩展体系</div>
+    <a href="../05-mcp.html" class="nav-link">MCP 体系</a>
+    <a href="../07-plugins.html" class="nav-link">插件系统</a>
+    <a href="../08-commands.html" class="nav-link">命令系统</a>
+    <div class="nav-section-title">数据与服务</div>
+    <a href="../06-context-mgmt.html" class="nav-link">上下文管理</a>
+    <a href="../10-services.html" class="nav-link">服务层</a>
+    <a href="../15-cost-limits.html" class="nav-link">成本与限流</a>
+    <div class="nav-section-title">界面与配置</div>
+    <a href="../09-ui.html" class="nav-link">UI 交互层</a>
+    <a href="../13-config.html" class="nav-link">配置与迁移</a>
+    <div class="nav-section-title">外围能力</div>
+    <a href="../12-external.html" class="nav-link">外部集成</a>
+    <a href="../14-native.html" class="nav-link">Native 能力</a>
+    <div class="nav-section-title">流程图</div>
+    <a href="tool-execution.html" class="nav-link active">工具执行流程</a>
+    <a href="agent-collab.html" class="nav-link">Agent 协作流程</a>
+    </nav>
+    <main class="content">
+        <header class="page-header">
+            <span class="breadcrumb"><a href="../index.html">源码分析</a> / <a href="tool-execution.html">流程图</a></span>
+            <h1>工具执行完整流程</h1>
+            <p class="subtitle">从 API 响应中提取 tool_use 到执行完毕返回结果的端到端链路</p>
+        </header>
+
+        <section id="overview" class="card">
+            <h2>职责概述</h2>
+            <p>工具执行是 Claude Code 的核心能力通道。当模型返回 <code>tool_use</code> block 后，系统需要完成工具匹配、参数校验、权限检查、Hook 前置/后置处理、并发控制、结果处理等一系列步骤。本页完整追踪这一端到端流程，涵盖正常路径、错误路径、重试逻辑和并发安全机制。</p>
+        </section>
+
+        <section id="architecture" class="card">
+            <h2>架构设计</h2>
+            <p>工具执行涉及五个层级，自上而下协作完成一次调用：</p>
+            <div class="layer-diagram">
+                <div class="layer layer-entry">
+                    <div class="layer-header">API 响应层</div>
+                    <div class="layer-body">
+                        <div class="layer-component highlight">query.ts — 主循环</div>
+                        <div class="layer-component">QueryEngine.ts — 引擎</div>
+                    </div>
+                </div>
+                <div class="layer-arrow">▼</div>
+                <div class="layer layer-orchestration">
+                    <div class="layer-header">调度层</div>
+                    <div class="layer-body">
+                        <div class="layer-component highlight">tools.ts — 工具注册表</div>
+                        <div class="layer-component">Tool.ts — 工具匹配</div>
+                        <div class="layer-component">findToolByName()</div>
+                    </div>
+                </div>
+                <div class="layer-arrow">▼</div>
+                <div class="layer layer-security">
+                    <div class="layer-header">安全层</div>
+                    <div class="layer-body">
+                        <div class="layer-component highlight">permissions.ts — 权限判定</div>
+                        <div class="layer-component">canUseTool() — 交互确认</div>
+                        <div class="layer-component">PermissionRequest Hook</div>
+                    </div>
+                </div>
+                <div class="layer-arrow">▼</div>
+                <div class="layer layer-tool">
+                    <div class="layer-header">Hook 层</div>
+                    <div class="layer-body">
+                        <div class="layer-component highlight">PreToolUse / PostToolUse</div>
+                        <div class="layer-component">execHttpHook / execAgentHook</div>
+                        <div class="layer-component">execPromptHook</div>
+                    </div>
+                </div>
+                <div class="layer-arrow">▼</div>
+                <div class="layer layer-engine">
+                    <div class="layer-header">执行层</div>
+                    <div class="layer-body">
+                        <div class="layer-component highlight">tool.call() — 实际调用</div>
+                        <div class="layer-component">result → API 返回</div>
+                    </div>
+                </div>
+            </div>
+        </section>
+
+        <section id="dataflow" class="card">
+            <h2>核心数据流</h2>
+            <p>以下是工具执行的完整流程，包含决策点和错误路径：</p>
+            <div class="flow-chart vertical">
+                <div class="flow-step">
+                    <div class="flow-step-title">Step 1: API 响应解析</div>
+                    <div class="flow-step-desc">模型返回 stop_reason='tool_use'，响应中包含一个或多个 <code>tool_use</code> ContentBlock。query.ts 主循环提取所有 tool_use blocks。</div>
+                </div>
+                <div class="flow-arrow">&darr;</div>
+                <div class="flow-step">
+                    <div class="flow-step-title">Step 2: 工具匹配</div>
+                    <div class="flow-step-desc">调用 <code>findToolByName(tools, name)</code> 在注册表中查找。支持别名匹配（<code>tool.aliases</code>），未找到则返回错误消息。</div>
+                </div>
+                <div class="flow-arrow">&darr;</div>
+                <div class="flow-step">
+                    <div class="flow-step-title">Step 3: 并发安全检查</div>
+                    <div class="flow-step-desc">调用 <code>tool.isConcurrencySafe(input)</code>。并发不安全的工具（如 FileEdit）在 plan 模式下串行执行；安全的工具（如 Read、Glob）可并行执行。</div>
+                </div>
+                <div class="flow-arrow">&darr;</div>
+                <div class="flow-step">
+                    <div class="flow-step-title">Step 4: 权限检查</div>
+                    <div class="flow-step-desc"><code>canUseTool(tool, input, context)</code> 检查 ToolPermissionContext。结果为 <span class="tag tag-green">allow</span> → 继续；<span class="tag tag-red">deny</span> → 返回错误；<span class="tag tag-orange">ask</span> → 弹出用户确认对话框。</div>
+                </div>
+                <div class="flow-arrow">&darr;</div>
+                <div class="flow-step">
+                    <div class="flow-step-title">Step 5: PreToolUse Hook</div>
+                    <div class="flow-step-desc">执行所有匹配的 PreToolUse Hook。支持 4 种 Hook 类型：<code>command</code>（子进程）、<code>http</code>（HTTP POST）、<code>prompt</code>（LLM 单次调用）、<code>agent</code>（多轮 LLM）。exit_code=2 阻止执行。</div>
+                </div>
+                <div class="flow-arrow">&darr;</div>
+                <div class="flow-step">
+                    <div class="flow-step-title">Step 6: 工具执行</div>
+                    <div class="flow-step-desc">调用 <code>tool.call(args, context, canUseTool, parentMessage, onProgress)</code>。执行过程中通过 <code>ToolCallProgress</code> 回调报告进度。支持 AbortSignal 取消。</div>
+                </div>
+                <div class="flow-arrow">&darr;</div>
+                <div class="flow-step">
+                    <div class="flow-step-title">Step 7: 结果处理</div>
+                    <div class="flow-step-desc">结果经过 <code>maxResultSizeChars</code> 限制检查。超大结果持久化到磁盘（<code>diskOutput</code>），仅向模型返回摘要预览。正常结果直接作为 <code>tool_result</code> 返回。</div>
+                </div>
+                <div class="flow-arrow">&darr;</div>
+                <div class="flow-step">
+                    <div class="flow-step-title">Step 8: PostToolUse Hook</div>
+                    <div class="flow-step-desc">执行 PostToolUse / PostToolUseFailure Hook。exit_code=2 将 stderr 注入模型上下文。失败时触发 PostToolUseFailure Hook，携带 error_type 信息。</div>
+                </div>
+                <div class="flow-arrow">&darr;</div>
+                <div class="flow-step">
+                    <div class="flow-step-title">Step 9: 返回 API</div>
+                    <div class="flow-step-desc">所有 tool_result 组装为 UserMessage，发送给 API 开始下一轮对话。主循环继续直到模型返回 stop_reason='end_turn'。</div>
+                </div>
+            </div>
+
+            <h3>错误与重试路径</h3>
+            <div class="flow-chart vertical">
+                <div class="flow-step">
+                    <div class="flow-step-title">权限被拒 → PermissionDenied Hook</div>
+                    <div class="flow-step-desc">当自动模式分类器拒绝工具调用时，触发 PermissionDenied Hook。Hook 可返回 <code>{"retry": true}</code> 让模型重试。</div>
+                </div>
+                <div class="flow-arrow">&darr;</div>
+                <div class="flow-step">
+                    <div class="flow-step-title">PreToolUse 阻止 → 返回错误给模型</div>
+                    <div class="flow-step-desc">Hook exit_code=2 时，stderr 内容作为错误消息返回给模型，模型可调整策略。</div>
+                </div>
+                <div class="flow-arrow">&darr;</div>
+                <div class="flow-step">
+                    <div class="flow-step-title">执行超时 → AbortSignal 取消</div>
+                    <div class="flow-step-desc">每个工具调用绑定 AbortSignal。用户按 Escape 或 hook 超时均触发取消，返回 interrupted 错误。</div>
+                </div>
+                <div class="flow-arrow">&darr;</div>
+                <div class="flow-step">
+                    <div class="flow-step-title">API 错误 → StopFailure Hook</div>
+                    <div class="flow-step-desc">rate_limit / authentication_failed / server_error 等错误触发 StopFailure Hook。该 Hook 为 fire-and-forget，输出和退出码被忽略。</div>
+                </div>
+            </div>
+        </section>
+
+        <section id="interfaces" class="card">
+            <h2>关键类型与接口</h2>
+
+            <h3>Tool 核心接口</h3>
+            <pre><code>// Tool.ts:362 — 工具类型定义
+export type Tool&lt;
+  Input extends AnyObject = AnyObject,
+  Output = unknown,
+  P extends ToolProgressData = ToolProgressData,
+&gt; = {
+  readonly name: string
+  aliases?: string[]
+  call(
+    args: z.infer&lt;Input&gt;,
+    context: ToolUseContext,
+    canUseTool: CanUseToolFn,
+    parentMessage: AssistantMessage,
+    onProgress?: ToolCallProgress&lt;P&gt;,
+  ): Promise&lt;ToolResult&lt;Output&gt;&gt;
+  isConcurrencySafe(input: z.infer&lt;Input&gt;): boolean
+  isReadOnly(input: z.infer&lt;Input&gt;): boolean
+  isDestructive?(input: z.infer&lt;Input&gt;): boolean
+  maxResultSizeChars: number
+  interruptBehavior?(): 'cancel' | 'block'
+}</code></pre>
+
+            <h3>工具匹配函数</h3>
+            <pre><code>// Tool.ts:348-360 — 工具查找
+export function toolMatchesName(
+  tool: Tool, name: string,
+): boolean {
+  return tool.name === name ||
+    tool.aliases?.includes(name) === true
+}
+
+export function findToolByName(
+  tools: Tools, name: string,
+): Tool | undefined {
+  return tools.find(t => toolMatchesName(t, name))
+}</code></pre>
+
+            <h3>ToolUseContext 执行上下文</h3>
+            <pre><code>// Tool.ts:158-300 — 工具执行上下文
+export type ToolUseContext = {
+  options: {
+    tools: Tools
+    mainLoopModel: string
+    isNonInteractiveSession: boolean
+    thinkingConfig: ThinkingConfig
+    mcpClients: Map&lt;string, MCPServerConnection&gt;
+    // ...更多选项
+  }
+  agentId?: string
+  abortController: AbortController
+  setAppState: (updater: (prev: AppState) =&gt; AppState) =&gt; void
+  getAppState: () =&gt; AppState
+  readFileState: FileStateCache
+  contentReplacementState?: ContentReplacementState
+  setResponseLength: (updater: (prev: number) =&gt; number) =&gt; void
+  // ...更多字段
+}</code></pre>
+
+            <h3>Hook 结果类型</h3>
+            <pre><code>// hooks.ts — Hook 执行结果
+export type HookResult = {
+  hook: HookCommand
+  outcome: 'success' | 'blocking' | 'cancelled'
+      | 'non_blocking_error'
+  message?: AttachmentMessage
+  blockingError?: { blockingError: string; command: string }
+  preventContinuation?: boolean
+  stopReason?: string
+}</code></pre>
+
+            <h3>Hook 事件元数据（部分）</h3>
+            <pre><code>// hookEvents.ts:27-99 — Hook 事件定义
+PreToolUse: {
+  summary: 'Before tool execution',
+  matcherMetadata: {
+    fieldToMatch: 'tool_name',
+    values: toolNames,  // 动态填充所有注册工具名
+  },
+},
+PostToolUse: {
+  summary: 'After tool execution',
+  matcherMetadata: { fieldToMatch: 'tool_name', values: toolNames },
+},
+PostToolUseFailure: {
+  summary: 'After tool execution fails',
+  matcherMetadata: { fieldToMatch: 'tool_name', values: toolNames },
+},
+PermissionDenied: {
+  summary: 'After auto mode classifier denies a tool call',
+  // 可返回 {"retry": true} 让模型重试
+},
+PermissionRequest: {
+  summary: 'When a permission dialog is displayed',
+  // 可返回 decision: allow/deny 覆盖用户选择
+}</code></pre>
+        </section>
+
+        <section id="patterns" class="card">
+            <h2>设计模式与亮点</h2>
+
+            <div class="two-col">
+                <div>
+                    <h3>1. 四种 Hook 执行策略</h3>
+                    <p>Hook 系统支持四种执行模式，每种适用于不同场景：</p>
+                    <ul>
+                        <li><strong>command</strong> — 子进程执行，支持超时和流式输出</li>
+                        <li><strong>http</strong> — HTTP POST，支持 SSRF 防护、环境变量插值、sandbox 代理</li>
+                        <li><strong>prompt</strong> — 单轮 LLM 调用（Haiku 模型），返回结构化 JSON</li>
+                        <li><strong>agent</strong> — 多轮 LLM 查询，支持工具调用，最多 50 轮</li>
+                    </ul>
+                    <pre><code>// 四种 Hook 类型
+type HookCommand =
+  | { type: 'command'; command: string; timeout?: number }
+  | { type: 'http'; url: string; headers?: Record&lt;string, string&gt; }
+  | { type: 'prompt'; prompt: string; model?: string }
+  | { type: 'agent'; prompt: string; model?: string; timeout?: number }</code></pre>
+
+                    <h3>2. 异步 Hook 注册表</h3>
+                    <p><code>AsyncHookRegistry</code> 管理长时间运行的 Hook 进程。Hook 可返回 <code>{"async": true}</code> 进入异步模式，系统每 500ms 轮询 stdout 检查 JSON 响应。最多缓存 100 个待处理事件。</p>
+
+                    <h3>3. 结果持久化策略</h3>
+                    <p>工具输出超过 <code>maxResultSizeChars</code> 时自动持久化到磁盘，模型仅收到预览摘要。Read 工具设为 <code>Infinity</code> 避免循环（Read 文件 → 持久化 → 又要 Read 持久化文件）。</p>
+                </div>
+                <div>
+                    <h3>4. 安全分层防护</h3>
+                    <p>HTTP Hook 执行经过多层安全检查：</p>
+                    <ul>
+                        <li>URL 白名单（<code>allowedHttpHookUrls</code> 通配符匹配）</li>
+                        <li>环境变量白名单（防止密钥泄露）</li>
+                        <li>SSRF 防护（<code>ssrfGuardedLookup</code> 屏蔽私有 IP）</li>
+                        <li>Header 注入防护（剥离 CR/LF/NUL 字节）</li>
+                        <li>Sandbox 代理强制域名白名单</li>
+                    </ul>
+
+                    <h3>5. 工具并发控制</h3>
+                    <p>系统根据 <code>isConcurrencySafe()</code> 将工具分为两类：</p>
+                    <ul>
+                        <li><span class="tag tag-green">安全</span> — Read, Glob, Grep, WebSearch 可并行</li>
+                        <li><span class="tag tag-orange">不安全</span> — FileEdit, FileWrite, Bash 串行执行</li>
+                    </ul>
+                    <p>这防止了文件写入冲突，同时最大化只读操作的吞吐量。</p>
+
+                    <h3>6. 工具延迟加载</h3>
+                    <p>通过 <code>shouldDefer</code> 标记，工具 schema 可延迟发送。模型需要先调用 ToolSearch 工具获取完整 schema，减少首次 prompt 的 token 消耗。<code>alwaysLoad</code> 标记确保关键工具始终可见。</p>
+                </div>
+            </div>
+        </section>
+
+        <section id="dev-guide" class="card developer">
+            <h2>开发者实践指南</h2>
+            <div class="info-box tip">新增工具只需实现 Tool 接口，系统自动处理匹配、权限、Hook 和并发。</div>
+
+            <h3>如何新增一个工具</h3>
+            <ol>
+                <li>在 <code>tools/</code> 下创建目录，如 <code>tools/MyTool/MyTool.ts</code></li>
+                <li>使用 <code>buildTool()</code> 工厂函数定义工具，自动填充默认实现</li>
+                <li>实现 <code>call()</code>、<code>description()</code>、<code>inputSchema</code> 三个必填字段</li>
+                <li>在 <code>tools.ts</code> 中注册到工具列表</li>
+                <li>如需自定义权限，实现 <code>isReadOnly()</code> 和 <code>isConcurrencySafe()</code></li>
+            </ol>
+            <pre><code>// buildTool 工厂函数 — 自动填充默认值
+export function buildTool&lt;D extends AnyToolDef&gt;(def: D): BuiltTool&lt;D&gt; {
+  return { ...TOOL_DEFAULTS, ...def }
+}
+
+// 默认值
+const TOOL_DEFAULTS = {
+  isConcurrencySafe: () =&gt; false,   // 默认不安全
+  isReadOnly: () =&gt; false,          // 默认非只读
+  isEnabled: () =&gt; true,            // 默认启用
+  maxResultSizeChars: 50000,         // 50K 字符上限
+}</code></pre>
+
+            <h3>Hook 调试技巧</h3>
+            <ul>
+                <li>所有 Hook 执行日志写入 <code>logForDebugging</code>，开启 verbose 模式可查看</li>
+                <li>PreToolUse exit_code=2 是标准"阻止"语义，不会被当作错误</li>
+                <li>Agent Hook 最多 50 轮，超时默认 60 秒，均可通过 <code>timeout</code> 字段调整</li>
+            </ul>
+        </section>
+
+        <section id="arch-guide" class="card architect">
+            <h2>架构师决策指南</h2>
+
+            <div class="two-col">
+                <div>
+                    <h3>设计权衡</h3>
+                    <p><strong>Hook 同步 vs 异步</strong>：PreToolUse Hook 默认同步执行，会阻塞工具调用。对于耗时操作（如网络请求），可返回 <code>{"async": true}</code> 异步处理，但需要轮询机制增加复杂度。</p>
+                    <p><strong>结果截断策略</strong>：<code>maxResultSizeChars</code> 默认 50K，平衡了上下文窗口利用率和信息完整性。Read 设为 Infinity 是因为其自身已有行数限制，持久化会导致循环读取。</p>
+                    <p><strong>权限模型选择</strong>：<code>PermissionRequest</code> Hook 允许覆盖用户选择，适合企业场景的自动化审批，但也带来安全风险。需要配合 <code>allowedHttpHookUrls</code> 白名单使用。</p>
+                </div>
+                <div>
+                    <h3>扩展性考量</h3>
+                    <ul>
+                        <li>工具注册表是静态数组，运行时不可动态添加（除了 MCP 工具）</li>
+                        <li>Hook 按 matcher 分组查找，<code>sortMatchersByPriority</code> 确保高优先级 Hook 先执行</li>
+                        <li>并发工具数无硬性上限，受 API 并行 tool_use 数量限制</li>
+                        <li>Hook 执行超时独立于工具执行超时，两者通过 <code>createCombinedAbortSignal</code> 组合</li>
+                    </ul>
+                    <h3>性能关键路径</h3>
+                    <ul>
+                        <li>工具匹配：O(n) 线性扫描，n 为工具数量（~40），可接受</li>
+                        <li>Hook 查找：memoized 按 toolNames 排序拼接缓存，避免重复计算</li>
+                        <li>结果持久化：异步写入，不阻塞主循环</li>
+                    </ul>
+                </div>
+            </div>
+        </section>
+
+        <section id="code-index" class="card">
+            <h2>代码索引</h2>
+            <table>
+                <thead><tr><th>文件</th><th>行数</th><th>说明</th></tr></thead>
+                <tbody>
+                    <tr><td><code>Tool.ts</code></td><td>~793</td><td>Tool 接口定义、findToolByName、buildTool 工厂</td></tr>
+                    <tr><td><code>tools.ts</code></td><td>~200</td><td>工具注册表、ALL_AGENT_DISALLOWED_TOOLS</td></tr>
+                    <tr><td><code>query.ts</code></td><td>~800</td><td>主查询循环、tool_use 分发</td></tr>
+                    <tr><td><code>QueryEngine.ts</code></td><td>~300</td><td>查询引擎、compact、contextCollapse</td></tr>
+                    <tr><td><code>utils/hooks/hookEvents.ts</code></td><td>~400</td><td>Hook 事件元数据、分组查找</td></tr>
+                    <tr><td><code>utils/hooks/execHttpHook.ts</code></td><td>~243</td><td>HTTP Hook 执行、SSRF 防护</td></tr>
+                    <tr><td><code>utils/hooks/execAgentHook.ts</code></td><td>~340</td><td>Agent Hook 多轮执行</td></tr>
+                    <tr><td><code>utils/hooks/execPromptHook.ts</code></td><td>~212</td><td>Prompt Hook 单轮 LLM 调用</td></tr>
+                    <tr><td><code>utils/hooks/AsyncHookRegistry.ts</code></td><td>~310</td><td>异步 Hook 注册表、轮询检查</td></tr>
+                    <tr><td><code>utils/hooks/hooksSettings.ts</code></td><td>~200</td><td>Hook 配置解析、优先级排序</td></tr>
+                    <tr><td><code>utils/permissions/permissions.ts</code></td><td>~300</td><td>权限判定、hasPermissionsToUseTool</td></tr>
+                    <tr><td><code>utils/toolResultStorage.ts</code></td><td>~150</td><td>工具结果持久化、预览生成</td></tr>
+                    <tr><td><code>utils/task/diskOutput.ts</code></td><td>~100</td><td>磁盘输出管理、evictTaskOutput</td></tr>
+                </tbody>
+            </table>
+        </section>
+    </main>
+</body>
+</html>

@@ -1,0 +1,975 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>成本与限流 - Claude Code 源码分析</title>
+    <link rel="stylesheet" href="shared/styles.css">
+</head>
+<body>
+    <nav class="sidebar">
+<div class="sidebar-header"><div class="logo">CC</div><div><div class="sidebar-title">Claude Code</div><div class="sidebar-subtitle">源码深度分析</div></div></div>
+        <div class="nav-section-title">总览</div>
+        <a href="reading-guide.html" class="nav-link">阅读指南</a>
+        <a href="index.html" class="nav-link">架构全景</a>
+        <a href="dependency-map.html" class="nav-link">模块依赖图</a>
+        <a href="vertical-agent-guide.html" class="nav-link">垂直 Agent 设计指南</a>
+<div class="nav-section-title">核心流程</div>
+<a href="00-startup.html" class="nav-link">启动链路</a>
+<a href="01-query-loop.html" class="nav-link">Query 循环</a>
+<a href="flows/query-lifecycle.html" class="nav-link">查询生命周期</a>
+<div class="nav-section-title">核心机制</div>
+<a href="02-tool-dispatch.html" class="nav-link">工具调度</a>
+<a href="03-permissions.html" class="nav-link">权限系统</a>
+<a href="03b-security-hardening.html" class="nav-link">风控与安全加固</a>
+<a href="04-agent-arch.html" class="nav-link">Agent 架构</a>
+<a href="11-hooks.html" class="nav-link">Hook 机制</a>
+<div class="nav-section-title">扩展体系</div>
+<a href="05-mcp.html" class="nav-link">MCP 体系</a>
+<a href="07-plugins.html" class="nav-link">插件系统</a>
+<a href="08-commands.html" class="nav-link">命令系统</a>
+<div class="nav-section-title">数据与服务</div>
+<a href="06-context-mgmt.html" class="nav-link">上下文管理</a>
+<a href="10-services.html" class="nav-link">服务层</a>
+<a href="15-cost-limits.html" class="nav-link active">成本与限流</a>
+<div class="nav-section-title">界面与配置</div>
+<a href="09-ui.html" class="nav-link">UI 交互层</a>
+<a href="13-config.html" class="nav-link">配置与迁移</a>
+<div class="nav-section-title">外围能力</div>
+<a href="12-external.html" class="nav-link">外部集成</a>
+<a href="14-native.html" class="nav-link">Native 能力</a>
+<div class="nav-section-title">流程图</div>
+<a href="flows/tool-execution.html" class="nav-link">工具执行流程</a>
+<a href="flows/agent-collab.html" class="nav-link">Agent 协作流程</a>
+</nav>
+    <main class="content">
+        <header class="page-header">
+            <span class="breadcrumb"><a href="index.html">源码分析</a></span>
+            <h1>成本与限流</h1>
+            <p class="subtitle">Token 成本追踪、策略限制执行、用量预算管理与组织级限流机制的完整分析</p>
+        </header>
+
+        <nav class="page-toc">
+    <div class="page-toc-title">页面导航</div>
+        <a href="#overview"><span class="toc-dot dot-overview"></span>职责概述</a>
+        <a href="#architecture"><span class="toc-dot dot-arch"></span>架构设计</a>
+        <a href="#dataflow"><span class="toc-dot dot-data"></span>数据流</a>
+        <a href="#interfaces"><span class="toc-dot dot-arch"></span>核心接口</a>
+        <a href="#patterns"><span class="toc-dot dot-arch"></span>设计模式</a>
+        <a href="#dev-guide"><span class="toc-dot dot-code"></span>开发者指南</a>
+        <a href="#arch-guide"><span class="toc-dot dot-arch"></span>架构师指南</a>
+        <a href="#topology"><span class="toc-dot dot-data"></span>处理拓扑图</a>
+        <a href="#core-flow"><span class="toc-dot dot-data"></span>核心流程详解</a>
+        <a href="#design-essence"><span class="toc-dot dot-design"></span>设计精华</a>
+        <a href="#agent-practice"><span class="toc-dot dot-practice"></span>Agent 实践借鉴</a>
+        <a href="#code-index"><span class="toc-dot dot-code"></span>代码索引</a>
+</nav>
+
+        <section id="overview" class="card">
+            <h2>职责概述</h2>
+            <p>成本与限流子系统负责三个核心关注点：(1) <strong>成本追踪</strong>——实时累计每次 API 调用的 token 用量和美元成本，按模型分类统计；(2) <strong>策略限制</strong>——从服务端获取组织级策略，控制 CLI 功能的启用/禁用；(3) <strong>用量预算</strong>——通过上下文窗口阈值、自动压缩触发点、阻塞限制等多级阈值管理 token 消费。三者协同确保 Claude Code 在成本可控的前提下持续运行。</p>
+        </section>
+
+        <section id="architecture" class="card">
+            <h2>架构设计</h2>
+            <div class="layer-diagram">
+                <div class="layer layer-entry">
+                    <div class="layer-header">成本采集层</div>
+                    <div class="layer-body">
+                        <div class="layer-component highlight">cost-tracker.ts</div>
+                        <div class="layer-component">costHook.ts</div>
+                        <div class="layer-component">addToTotalSessionCost()</div>
+                    </div>
+                </div>
+                <div class="layer-arrow">&#9660;</div>
+                <div class="layer layer-engine">
+                    <div class="layer-header">用量计算层</div>
+                    <div class="layer-body">
+                        <div class="layer-component highlight">calculateUSDCost()</div>
+                        <div class="layer-component">formatTotalCost()</div>
+                        <div class="layer-component">getModelUsage()</div>
+                    </div>
+                </div>
+                <div class="layer-arrow">&#9660;</div>
+                <div class="layer layer-orchestration">
+                    <div class="layer-header">阈值管理层</div>
+                    <div class="layer-body">
+                        <div class="layer-component highlight">calculateTokenWarningState()</div>
+                        <div class="layer-component">getAutoCompactThreshold()</div>
+                        <div class="layer-component">getEffectiveContextWindowSize()</div>
+                    </div>
+                </div>
+                <div class="layer-arrow">&#9660;</div>
+                <div class="layer layer-security">
+                    <div class="layer-header">策略执行层</div>
+                    <div class="layer-body">
+                        <div class="layer-component highlight">services/policyLimits/</div>
+                        <div class="layer-component">isPolicyAllowed()</div>
+                        <div class="layer-component">loadPolicyLimits()</div>
+                    </div>
+                </div>
+                <div class="layer-arrow">&#9660;</div>
+                <div class="layer layer-infra">
+                    <div class="layer-header">持久化层</div>
+                    <div class="layer-body">
+                        <div class="layer-component">saveCurrentSessionCosts()</div>
+                        <div class="layer-component">restoreCostStateForSession()</div>
+                        <div class="layer-component">getStoredSessionCosts()</div>
+                    </div>
+                </div>
+            </div>
+        </section>
+
+        <section id="dataflow" class="card">
+            <h2>核心数据流</h2>
+
+            <h3>成本追踪流程</h3>
+            <div class="flow-chart">
+                <div class="flow-step">
+                    <div class="flow-step-title">API 响应</div>
+                    <div class="flow-step-desc">queryModelWithStreaming() 返回包含 usage 字段的 AssistantMessage</div>
+                </div>
+                <div class="flow-arrow">&rarr;</div>
+                <div class="flow-step">
+                    <div class="flow-step-title">addToTotalSessionCost()</div>
+                    <div class="flow-step-desc">计算 USD 成本（calculateUSDCost），累加到 bootstrap/state.js 的全局状态</div>
+                </div>
+                <div class="flow-arrow">&rarr;</div>
+                <div class="flow-step">
+                    <div class="flow-step-title">按模型分类</div>
+                    <div class="flow-step-desc">addToTotalModelUsage() 维护 per-model 的 input/output/cache token 和 cost 统计</div>
+                </div>
+                <div class="flow-arrow">&rarr;</div>
+                <div class="flow-step">
+                    <div class="flow-step-title">Advisor 用量</div>
+                    <div class="flow-step-desc">getAdvisorUsage() 提取嵌入在主响应中的 advisor（小模型）token 用量</div>
+                </div>
+                <div class="flow-arrow">&rarr;</div>
+                <div class="flow-step">
+                    <div class="flow-step-title">Counter 上报</div>
+                    <div class="flow-step-desc">getCostCounter().add() 和 getTokenCounter().add() 写入 OpenTelemetry metrics</div>
+                </div>
+            </div>
+
+            <h3>策略限制执行流程</h3>
+            <div class="flow-chart vertical">
+                <div class="flow-step">
+                    <div class="flow-step-title">初始化：loadPolicyLimits()</div>
+                    <div class="flow-step-desc">启动时获取策略限制，创建 loadingCompletePromise 供其他系统等待</div>
+                </div>
+                <div class="flow-arrow">&darr;</div>
+                <div class="flow-step">
+                    <div class="flow-step-title">fetchWithRetry()</div>
+                    <div class="flow-step-desc">带指数退避的 5 次重试，支持 ETag 条件请求（304 = 缓存有效）</div>
+                </div>
+                <div class="flow-arrow">&darr;</div>
+                <div class="flow-step">
+                    <div class="flow-step-title">缓存策略</div>
+                    <div class="flow-step-desc">成功获取：写入 policy-limits.json；失败且有缓存：使用过期缓存；失败且无缓存：fail open</div>
+                </div>
+                <div class="flow-arrow">&darr;</div>
+                <div class="flow-step">
+                    <div class="flow-step-title">isPolicyAllowed() 查询</div>
+                    <div class="flow-step-desc">各功能模块在运行时同步查询，返回 boolean；HIPAA 场景 fail closed</div>
+                </div>
+                <div class="flow-arrow">&darr;</div>
+                <div class="flow-step">
+                    <div class="flow-step-title">后台轮询（1h 间隔）</div>
+                    <div class="flow-step-desc">startBackgroundPolling() 定期刷新策略，.unref() 不阻止进程退出</div>
+                </div>
+            </div>
+
+            <h3>Token 预算多级阈值</h3>
+            <div class="diagram-container">
+                <div class="diagram-row">
+                    <div class="diagram-node" style="background: var(--layer-entry); flex: 1;">
+                        <strong>安全区</strong><br>
+                        <small>token &lt; threshold - 20K</small>
+                    </div>
+                    <div class="diagram-connector"></div>
+                    <div class="diagram-node" style="background: #f59e0b; flex: 1;">
+                        <strong>警告区</strong><br>
+                        <small>threshold - 20K ~ threshold - 20K</small>
+                    </div>
+                    <div class="diagram-connector"></div>
+                    <div class="diagram-node" style="background: #f97316; flex: 1;">
+                        <strong>错误区</strong><br>
+                        <small>threshold - 20K ~ threshold</small>
+                    </div>
+                    <div class="diagram-connector"></div>
+                    <div class="diagram-node" style="background: var(--layer-security); flex: 1;">
+                        <strong>自动压缩</strong><br>
+                        <small>threshold = effectiveWindow - 13K</small>
+                    </div>
+                    <div class="diagram-connector"></div>
+                    <div class="diagram-node" style="background: #dc2626; flex: 1;">
+                        <strong>阻塞</strong><br>
+                        <small>token &ge; effectiveWindow - 3K</small>
+                    </div>
+                </div>
+            </div>
+        </section>
+
+        <section id="interfaces" class="card">
+            <h2>关键类型与接口</h2>
+
+            <h3>Token 警告状态</h3>
+            <pre><code>// services/compact/autoCompact.ts:93-145
+export function calculateTokenWarningState(
+  tokenUsage: number,
+  model: string,
+): {
+  percentLeft: number                   // 剩余百分比
+  isAboveWarningThreshold: boolean      // 超过警告阈值 (threshold - 20K)
+  isAboveErrorThreshold: boolean        // 超过错误阈值 (threshold - 20K)
+  isAboveAutoCompactThreshold: boolean  // 超过自动压缩阈值
+  isAtBlockingLimit: boolean            // 达到阻塞限制
+}</code></pre>
+
+            <h3>成本累加核心函数</h3>
+            <pre><code>// cost-tracker.ts:278-323
+export function addToTotalSessionCost(
+  cost: number,
+  usage: Usage,     // BetaUsage from Anthropic SDK
+  model: string,
+): number {
+  const modelUsage = addToTotalModelUsage(cost, usage, model)
+  addToTotalCostState(cost, modelUsage, model)
+
+  // OpenTelemetry counters
+  getCostCounter()?.add(cost, { model })
+  getTokenCounter()?.add(usage.input_tokens, { model, type: 'input' })
+  getTokenCounter()?.add(usage.output_tokens, { model, type: 'output' })
+  getTokenCounter()?.add(usage.cache_read_input_tokens ?? 0,
+    { model, type: 'cacheRead' })
+  getTokenCounter()?.add(usage.cache_creation_input_tokens ?? 0,
+    { model, type: 'cacheCreation' })
+
+  // Advisor（嵌入式小模型）成本
+  for (const advisorUsage of getAdvisorUsage(usage)) {
+    const advisorCost = calculateUSDCost(advisorUsage.model, advisorUsage)
+    totalCost += addToTotalSessionCost(advisorCost, advisorUsage, advisorUsage.model)
+  }
+  return totalCost
+}</code></pre>
+
+            <h3>存储的成本状态</h3>
+            <pre><code>// cost-tracker.ts:71-80
+type StoredCostState = {
+  totalCostUSD: number
+  totalAPIDuration: number
+  totalAPIDurationWithoutRetries: number
+  totalToolDuration: number
+  totalLinesAdded: number
+  totalLinesRemoved: number
+  lastDuration: number | undefined
+  modelUsage: { [modelName: string]: ModelUsage } | undefined
+}</code></pre>
+
+            <h3>策略限制响应 Schema</h3>
+            <pre><code>// services/policyLimits/types.ts:8-16
+export const PolicyLimitsResponseSchema = lazySchema(() =>
+  z.object({
+    restrictions: z.record(
+      z.string(),
+      z.object({ allowed: z.boolean() })
+    ),
+  })
+)
+
+export type PolicyLimitsFetchResult = {
+  success: boolean
+  restrictions?: PolicyLimitsResponse['restrictions'] | null
+  etag?: string
+  error?: string
+  skipRetry?: boolean   // true = 不重试（如认证错误）
+}</code></pre>
+
+            <h3>有效上下文窗口计算</h3>
+            <pre><code>// services/compact/autoCompact.ts:33-49
+export function getEffectiveContextWindowSize(model: string): number {
+  const reservedTokensForSummary = Math.min(
+    getMaxOutputTokensForModel(model),
+    MAX_OUTPUT_TOKENS_FOR_SUMMARY   // 20,000
+  )
+  let contextWindow = getContextWindowForModel(model, getSdkBetas())
+
+  // 支持环境变量覆盖
+  const autoCompactWindow = process.env.CLAUDE_CODE_AUTO_COMPACT_WINDOW
+  if (autoCompactWindow) {
+    const parsed = parseInt(autoCompactWindow, 10)
+    if (!isNaN(parsed) && parsed > 0) {
+      contextWindow = Math.min(contextWindow, parsed)
+    }
+  }
+
+  return contextWindow - reservedTokensForSummary
+}</code></pre>
+        </section>
+
+        <section id="patterns" class="card">
+            <h2>设计模式与亮点</h2>
+
+            <h3>1. 递归成本计算（Advisor 嵌套）</h3>
+            <p><code>addToTotalSessionCost()</code> 中处理 advisor 用量时递归调用自身。一次 API 响应可能包含主模型 + advisor 模型的混合用量，递归确保每层模型的成本都被正确计算和归属。这种设计支持无限嵌套的 advisor 链，虽然实践中通常只有一层。</p>
+
+            <h3>2. 成本持久化与 Session 恢复</h3>
+            <p>成本状态通过 <code>saveCurrentSessionCosts()</code> 写入项目配置文件（<code>.claude/settings.json</code> 的 lastCost/lastModelUsage 字段），在 <code>--resume</code> 恢复会话时通过 <code>restoreCostStateForSession()</code> 读回。Session ID 校验确保不会加载过期会话的成本数据。</p>
+            <pre><code>// cost-tracker.ts:130-137
+export function restoreCostStateForSession(sessionId: string): boolean {
+  const data = getStoredSessionCosts(sessionId)
+  if (!data) return false  // session ID 不匹配
+  setCostStateForRestore(data)
+  return true
+}</code></pre>
+
+            <h3>3. 多级缓冲区设计</h3>
+            <p>系统使用三个不同大小的缓冲区控制上下文使用率：
+            <ul>
+                <li><strong>AUTOCOMPACT_BUFFER_TOKENS (13,000)</strong>：自动压缩触发前的安全余量</li>
+                <li><strong>WARNING_THRESHOLD_BUFFER_TOKENS (20,000)</strong>：警告用户即将耗尽</li>
+                <li><strong>MANUAL_COMPACT_BUFFER_TOKENS (3,000)</strong>：手动压缩时的更小余量</li>
+            </ul>
+            这种分层设计确保自动压缩在 97% 使用率时触发，而手动压缩（用户显式 <code>/compact</code>）可以利用更多空间。</p>
+
+            <h3>4. 策略限制的 Checksum 缓存</h3>
+            <p>Policy Limits 使用 SHA-256 checksum 而非简单 ETag 做缓存验证：<code>computeChecksum()</code> 递归排序所有 key 后计算哈希，确保不同请求顺序产生相同的 checksum。这避免了服务端 ETag 实现差异导致的缓存失效。</p>
+            <pre><code>// services/policyLimits/index.ts:133-159
+function sortKeysDeep(obj: unknown): unknown {
+  if (Array.isArray(obj)) return obj.map(sortKeysDeep)
+  if (obj !== null && typeof obj === 'object') {
+    const sorted: Record&lt;string, unknown&gt; = {}
+    for (const [key, value] of Object.entries(obj).sort(([a], [b]) =>
+      a.localeCompare(b)
+    )) sorted[key] = sortKeysDeep(value)
+    return sorted
+  }
+  return obj
+}
+
+function computeChecksum(restrictions): string {
+  const sorted = sortKeysDeep(restrictions)
+  const hash = createHash('sha256').update(jsonStringify(sorted)).digest('hex')
+  return `sha256:${hash}`
+}</code></pre>
+
+            <h3>5. HIPAA 场景的 Fail Closed</h3>
+            <p>一般策略限制遵循 fail open 原则，但 <code>ESSENTIAL_TRAFFIC_DENY_ON_MISS</code> 集合中的策略（如 <code>allow_product_feedback</code>）在 HIPAA 模式下 fail closed——当缓存不可用时直接拒绝。这是合规要求的硬性约束，优先级高于可用性。</p>
+
+            <h3>6. 进程退出时的成本快照</h3>
+            <p><code>useCostSummary()</code> Hook 在 <code>process.on('exit')</code> 时同时做两件事：输出格式化的成本摘要到 stdout，以及将当前成本状态持久化到项目配置。这确保即使异常退出，下次 session 也能看到准确的累计成本。</p>
+        </section>
+
+        <section id="dev-guide" class="card developer">
+            <h2>开发者实践指南</h2>
+
+            <div class="info-box tip">调试成本问题时，检查 .claude/settings.json 中的 lastCost 和 lastModelUsage 字段——这是 session 间成本传递的桥梁。</div>
+
+            <h3>如何查看当前 session 成本</h3>
+            <p><code>formatTotalCost()</code> 生成完整的成本报告：</p>
+            <pre><code>// cost-tracker.ts:228-244
+export function formatTotalCost(): string {
+  return chalk.dim(
+    `Total cost:            $${getTotalCostUSD()}\n` +
+    `Total duration (API):  ${formatDuration(getTotalAPIDuration())}\n` +
+    `Total duration (wall): ${formatDuration(getTotalDuration())}\n` +
+    `Total code changes:    ${getTotalLinesAdded()} lines added, ` +
+    `${getTotalLinesRemoved()} lines removed\n` +
+    `${formatModelUsage()}`
+  )
+}</code></pre>
+
+            <h3>成本覆盖环境变量</h3>
+            <table>
+                <thead><tr><th>变量</th><th>作用</th><th>默认值</th></tr></thead>
+                <tbody>
+                    <tr><td><code>CLAUDE_CODE_AUTO_COMPACT_WINDOW</code></td><td>覆盖上下文窗口大小（token）</td><td>模型默认值</td></tr>
+                    <tr><td><code>CLAUDE_AUTOCOMPACT_PCT_OVERRIDE</code></td><td>百分比设置自动压缩触发点</td><td>~97%</td></tr>
+                    <tr><td><code>CLAUDE_CODE_BLOCKING_LIMIT_OVERRIDE</code></td><td>覆盖阻塞限制（token）</td><td>effectiveWindow - 3K</td></tr>
+                    <tr><td><code>DISABLE_COMPACT</code></td><td>完全禁用压缩</td><td>false</td></tr>
+                    <tr><td><code>DISABLE_AUTO_COMPACT</code></td><td>仅禁用自动压缩（保留手动 /compact）</td><td>false</td></tr>
+                </tbody>
+            </table>
+
+            <h3>添加新的策略限制检查</h3>
+            <p>在需要检查的地方调用 <code>isPolicyAllowed('policy_name')</code>：</p>
+            <pre><code>import { isPolicyAllowed } from '../services/policyLimits/index.js'
+
+if (!isPolicyAllowed('allow_remote_sessions')) {
+  // 功能被组织策略禁止
+  return { error: 'Remote sessions are disabled by your organization' }
+}</code></pre>
+
+            <h3>Model Usage 数据结构</h3>
+            <p>每个模型的用量通过 <code>getUsageForModel(model)</code> 获取，包含完整的 token 分类：</p>
+            <pre><code>type ModelUsage = {
+  inputTokens: number
+  outputTokens: number
+  cacheReadInputTokens: number
+  cacheCreationInputTokens: number
+  webSearchRequests: number
+  costUSD: number
+  contextWindow: number
+  maxOutputTokens: number
+}</code></pre>
+        </section>
+
+        <section id="arch-guide" class="card architect">
+            <h2>架构师决策指南</h2>
+
+            <h3>成本追踪的精度权衡</h3>
+            <p>系统使用两种 token 计数方式：<code>tokenCountFromLastAPIResponse()</code> 使用 API 返回的精确 usage，<code>tokenCountWithEstimation()</code> 在 API 响应不可用时使用客户端估算（<code>roughTokenCountEstimation</code>，字符数/4 再乘 4/3 的保守系数）。这意味着压缩前的 token 计数是精确的，而压缩后的 token 估算是保守偏高的。</p>
+
+            <h3>Policy Limits 的扩展性</h3>
+            <p>策略限制采用 <code>z.record(string, { allowed: boolean })</code> 的开放 schema——服务端可以添加新策略而不需要客户端更新。客户端通过 <code>isPolicyAllowed()</code> 查询，未知策略默认允许（fail open）。这种设计意味着添加新策略只需要服务端部署，但必须确保 fail open 对新策略是安全的。</p>
+
+            <h3>上下文窗口的预留空间设计</h3>
+            <p>有效上下文窗口从模型最大窗口中预留了 20,000 tokens 给摘要输出（<code>MAX_OUTPUT_TOKENS_FOR_SUMMARY</code>），基于 p99.99 的摘要输出统计。这个值通过 <code>Math.min(maxOutputTokens, 20000)</code> 确保：如果模型的 maxOutputTokens 更小，使用更小的值。这意味着在使用小输出模型时，自动压缩会提前触发。</p>
+
+            <h3>策略限制的认证路径选择</h3>
+            <p>Policy Limits 的认证同时支持 API Key 和 OAuth。优先使用 API Key（Console 用户），回退到 OAuth token（Claude.ai 用户）。对于 OAuth 用户，只有 Team 和 Enterprise 订阅者才被视为 eligible——个人用户不查策略限制。这种分层确保了策略检查的合理范围。</p>
+
+            <div class="info-box warning">策略限制的后台轮询使用 setInterval + .unref()。在 CCR/GHA 等短生命周期环境中，进程可能在首次轮询前就退出。设计上这是可接受的——策略限制在进程启动时已加载，后台轮询只捕获中途变更。</div>
+
+            <h3>成本数据的 Session 隔离</h3>
+            <p><code>saveCurrentSessionCosts()</code> 将 session ID 与成本数据一起写入项目配置。恢复时通过 <code>projectConfig.lastSessionId !== sessionId</code> 校验，防止读取错误 session 的成本。这在多 session 并行场景（多个 Claude Code 实例同时运行）中特别重要。</p>
+        </section>
+
+        <section id="topology" class="card">
+            <h2><span class="icon" style="background:rgba(139,92,246,.15);color:var(--purple);">◈</span> 可视化处理拓扑图</h2>
+
+            <!-- Phase 1: 成本追踪管线 -->
+            <h3 style="margin-top:8px;">Phase 1 — 成本追踪管线</h3>
+            <p>每次 API 响应到达后，成本追踪管线按模型分类累计 token 用量和美元成本，同时递归处理嵌套的 advisor 调用。</p>
+            <div class="fc">
+                <div class="fc-center">
+                    <div class="fn n-start">API 响应到达<span class="sub">queryModelWithStreaming() 返回</span></div>
+                    <div class="vc s20"></div>
+
+                    <div class="fn n-check w">addToTotalSessionCost()<span class="sub">cost-tracker.ts:278-323 — 成本追踪唯一入口</span></div>
+                    <div class="vc s20"></div>
+
+                    <div class="fn n-process w">按模型分类累计<span class="sub">addToTotalModelUsage() — per-model input/output/cache + costUSD</span><span class="sub">cost-tracker.ts:250-276</span></div>
+                    <div class="vc s20"></div>
+
+                    <div class="fc-row" style="gap:12px;">
+                        <div class="fn n-process" style="max-width:110px;font-size:11px;">OTel Counter<span class="sub">costCounter.add()</span></div>
+                        <div class="fn n-process" style="max-width:110px;font-size:11px;">Token Counter<span class="sub">input/output/cache</span></div>
+                        <div class="fn n-process" style="max-width:110px;font-size:11px;">fast mode<span class="sub">speed:'fast' 标记</span></div>
+                    </div>
+                    <div class="vc s20"></div>
+
+                    <div class="fn n-check ww">Advisor 递归计费<span class="sub">getAdvisorUsage(usage) → 提取嵌套 advisor 用量</span><span class="sub">cost-tracker.ts:312-322</span></div>
+                    <div class="vc s20"></div>
+
+                    <div class="fc-row">
+                        <div class="fn n-auto w">有 advisor → 递归调用 addToTotalSessionCost()<span class="sub">支持多级嵌套</span></div>
+                        <div class="hc s20"></div>
+                        <div class="fn n-process">无 advisor → 继续</div>
+                    </div>
+                    <div class="vc s20"></div>
+
+                    <div class="fn n-allow w">会话成本汇总<span class="sub">totalCostUSD + per-model ModelUsage + 持久化</span></div>
+                </div>
+            </div>
+
+            <!-- Phase 2: 策略限制 -->
+            <h3 style="margin-top:1.5em;">Phase 2 — 策略限制：资格检查 + 三级降级</h3>
+            <div class="fc">
+                <div class="fc-center">
+                    <div class="fn n-start">loadPolicyLimits()<span class="sub">policyLimits/index.ts — 启动时入口</span></div>
+                    <div class="vc s20"></div>
+
+                    <div class="fn n-check w">资格检查 — isPolicyLimitsEligible()<span class="sub">第三方 provider? → 自定义 base URL? → API Key / OAuth 分流</span><span class="sub">policyLimits/index.ts:167-211</span></div>
+                    <div class="vc s20"></div>
+
+                    <div class="fc-row">
+                        <div style="display:flex;flex-direction:column;align-items:center;gap:0;">
+                            <div class="fn n-auto" style="max-width:140px;">API Key 用户<span class="sub">直接通过</span></div>
+                        </div>
+                        <div style="display:flex;flex-direction:column;align-items:center;gap:0;">
+                            <div class="fn n-process" style="max-width:140px;">OAuth 用户<span class="sub">需 Claude.ai scope</span></div>
+                            <div class="vc s16"></div>
+                            <div class="fc-row" style="gap:6px;">
+                                <div class="fn n-allow" style="font-size:10px;max-width:80px;">Team/Enterprise<span class="sub">eligible</span></div>
+                                <div class="hc s20"></div>
+                                <div class="fn n-deny" style="font-size:10px;max-width:80px;">个人用户<span class="sub">不查策略</span></div>
+                            </div>
+                        </div>
+                    </div>
+                    <div class="vc s24"><span class="vc-label">eligible ↓</span></div>
+
+                    <div class="fn n-check w">fetchWithRetry() — 带退避获取<span class="sub">3 次重试 + If-None-Match (SHA-256 checksum)</span><span class="sub">policyLimits/index.ts:267-295</span></div>
+                    <div class="vc s20"></div>
+
+                    <div class="fn n-process ww">三级降级策略<span class="sub">服务端最新限制 → 本地文件缓存（即使过期）→ null（不施加限制）</span><span class="sub">policyLimits/index.ts:432-495</span></div>
+                    <div class="vc s20"></div>
+
+                    <div class="fc-row" style="gap:8px;">
+                        <div class="fn n-allow" style="font-size:11px;">获取成功<span class="sub">保存到 policy-limits.json</span></div>
+                        <div class="hc s20"></div>
+                        <div class="fn n-ask" style="font-size:11px;">失败 + 有缓存<span class="sub">使用过期缓存</span></div>
+                        <div class="hc s20"></div>
+                        <div class="fn n-process" style="font-size:11px;">失败 + 无缓存<span class="sub">fail open — 不限制</span></div>
+                    </div>
+                    <div class="vc s20"></div>
+
+                    <div class="fn n-auto w">isPolicyAllowed() 运行时查询<span class="sub">各功能模块同步查询 boolean — 默认允许</span><span class="sub">HIPAA 场景 fail closed</span></div>
+                </div>
+            </div>
+
+            <!-- Phase 3: 自动压缩多层守卫 -->
+            <h3 style="margin-top:1.5em;">Phase 3 — Token 预算与自动压缩多层守卫</h3>
+            <div class="fc">
+                <div class="fc-center">
+                    <div class="fn n-start">Token 用量检查<span class="sub">Query 循环每次迭代后</span></div>
+                    <div class="vc s20"></div>
+
+                    <div class="fn n-check ww">calculateTokenWarningState()<span class="sub">effectiveWindow = contextWindow - maxOutputTokens</span><span class="sub">autoCompact.ts:93-145</span></div>
+                    <div class="vc s20"></div>
+
+                    <div class="tier-row">
+                        <div class="tier-num" style="background:var(--green);">1</div>
+                        <div class="tier-body">
+                            <div class="tier-title">安全区 — token &lt; threshold - 20K</div>
+                            <div class="tier-desc">正常工作，无任何警告或操作</div>
+                        </div>
+                        <div class="tier-result" style="background:rgba(34,197,94,.12);color:var(--green);">正常</div>
+                    </div>
+                    <div style="font-size:10px;color:var(--text-muted);margin:4px 0;text-align:center;">超过 warning threshold ↓</div>
+                    <div class="tier-row" style="border-color:var(--amber);">
+                        <div class="tier-num" style="background:var(--amber);">2</div>
+                        <div class="tier-body">
+                            <div class="tier-title">警告区 — threshold - 20K ~ threshold - 20K</div>
+                            <div class="tier-desc">UI 显示用量警告，提示用户手动 /compact</div>
+                        </div>
+                        <div class="tier-result" style="background:rgba(245,158,11,.12);color:var(--amber);">警告</div>
+                    </div>
+                    <div style="font-size:10px;color:var(--text-muted);margin:4px 0;text-align:center;">超过 auto-compact threshold ↓</div>
+                    <div class="tier-row" style="border-color:var(--orange);">
+                        <div class="tier-num" style="background:var(--orange);">3</div>
+                        <div class="tier-body">
+                            <div class="tier-title">自动压缩 — threshold = effectiveWindow - 13K</div>
+                            <div class="tier-desc">shouldAutoCompact() 执行多层守卫检查</div>
+                        </div>
+                    </div>
+                    <div class="vc s16"></div>
+
+                    <div class="loop-box" style="max-width:580px;">
+                        <div class="loop-title">shouldAutoCompact() 四层守卫</div>
+                        <div class="loop-text">
+                            <strong>autoCompact.ts:160-239</strong><br>
+                            守卫1: session_memory/compact 来源 → <span style="color:var(--red);">跳过</span>（防止死锁）<br>
+                            守卫2: context-collapse 模式 → <span style="color:var(--red);">跳过</span>（collapse 自管上下文）<br>
+                            守卫3: reactive-only 模式 → <span style="color:var(--red);">跳过</span>（等 API 报错再处理）<br>
+                            守卫4: token 用量 &gt; threshold → <span style="color:var(--green);">触发压缩</span>
+                        </div>
+                    </div>
+                    <div class="vc s20"></div>
+
+                    <div class="tier-row" style="border-color:var(--red);">
+                        <div class="tier-num" style="background:var(--red);">4</div>
+                        <div class="tier-body">
+                            <div class="tier-title">阻塞限制 — token &ge; effectiveWindow - 3K</div>
+                            <div class="tier-desc">强制阻止后续 API 调用，必须压缩或停止</div>
+                        </div>
+                        <div class="tier-result" style="background:rgba(239,68,68,.12);color:var(--red);">阻塞</div>
+                    </div>
+                </div>
+            </div>
+
+            <div class="info-box info"><strong>拓扑总结</strong>：成本追踪管线在每次 API 调用后递归累计 token 和美元成本；策略限制通过资格分流和三级降级确保"可用性优先"；自动压缩四层守卫防止在不当上下文中触发压缩。三者协同构成"花了多少→能用多少→还剩多少"的成本控制闭环。</div>
+        </section>
+
+        <section id="core-flow" class="card">
+            <h2><span class="icon" style="background:rgba(6,182,212,.15);color:var(--cyan);">⇉</span> 核心处理流程详解</h2>
+            <p>成本与限流系统由三条独立但协同的流程组成：<strong>成本追踪</strong>（每次 API 调用后累计）、<strong>策略限制</strong>（启动时加载 + 后台轮询）、<strong>自动压缩</strong>（token 用量达到阈值时触发）。三条流程共同确保 Claude Code 在成本可控的前提下持续运行。</p>
+            <div class="flow-chart vertical">
+                <div class="flow-step highlight">
+                    <div class="flow-step-title">1. API 响应到达——成本入口</div>
+                    <div class="flow-step-desc">每次 API 调用返回后，<code>addToTotalSessionCost()</code>（cost-tracker.ts:278-323）被调用，接收本次调用的美元成本、token 用量（Usage）和模型名。这是成本追踪的唯一入口——所有 API 调用（主模型、advisor、fast mode）都汇入此函数 — <code>cost-tracker.ts:278-323</code></div>
+                </div>
+                <div class="flow-arrow">↓</div>
+                <div class="flow-step">
+                    <div class="flow-step-title">2. 按模型分类累计</div>
+                    <div class="flow-step-desc"><code>addToTotalModelUsage()</code>（cost-tracker.ts:250-276）按模型名查找或创建 <code>ModelUsage</code> 记录，累加 inputTokens、outputTokens、cacheReadInputTokens、cacheCreationInputTokens、webSearchRequests 和 costUSD。每个模型的 contextWindow 和 maxOutputTokens 也在此处记录 — <code>cost-tracker.ts:250-276</code></div>
+                </div>
+                <div class="flow-arrow">↓</div>
+                <div class="flow-step">
+                    <div class="flow-step-title">3. OTel 指标上报</div>
+                    <div class="flow-step-desc">累计完成后，通过 OpenTelemetry Counter 上报：<code>getCostCounter()?.add(cost, attrs)</code> 上报美元成本，<code>getTokenCounter()?.add(tokens, {type: 'input'|'output'|'cacheRead'|'cacheCreation'})</code> 上报各类 token 用量。fast mode 的请求额外标记 <code>speed: 'fast'</code> — <code>cost-tracker.ts:290-302</code></div>
+                </div>
+                <div class="flow-arrow">↓</div>
+                <div class="flow-step highlight">
+                    <div class="flow-step-title">4. Advisor 递归计费</div>
+                    <div class="flow-step-desc">如果本次 API 调用涉及 advisor 模型（通过 <code>getAdvisorUsage(usage)</code> 提取），对每个 advisor 的用量递归调用 <code>addToTotalSessionCost()</code>（L315-322），将 advisor 的成本也计入总成本。递归确保了多级 advisor 嵌套场景的完整计费 — <code>cost-tracker.ts:312-322</code></div>
+                </div>
+                <div class="flow-arrow">↓</div>
+                <div class="flow-step highlight">
+                    <div class="flow-step-title">5. 策略限制——资格检查</div>
+                    <div class="flow-step-desc"><code>isPolicyLimitsEligible()</code>（policyLimits/index.ts:167-211）按顺序检查：第三方 provider 不适用 → 自定义 base URL 不适用 → API Key 用户直接通过 → OAuth 用户需要 Claude.ai inference scope + Team/Enterprise 订阅。个人 OAuth 用户不查策略限制 — <code>services/policyLimits/index.ts:167-211</code></div>
+                </div>
+                <div class="flow-arrow">↓</div>
+                <div class="flow-step">
+                    <div class="flow-step-title">6. 策略限制——带重试的获取</div>
+                    <div class="flow-step-desc"><code>fetchWithRetry()</code>（policyLimits/index.ts:267-295）最多重试 3 次，指数退避。<code>fetchPolicyLimits()</code>（L300-386）发送 HTTP 请求，携带 <code>If-None-Match</code> 头（基于缓存 checksum）。304 响应表示缓存仍有效，直接复用。失败时使用文件缓存兜底（L483-485） — <code>services/policyLimits/index.ts:267-495</code></div>
+                </div>
+                <div class="flow-arrow">↓</div>
+                <div class="flow-step">
+                    <div class="flow-step-title">7. 自动压缩阈值计算</div>
+                    <div class="flow-step-desc"><code>calculateTokenWarningState()</code>（autoCompact.ts:93-145）计算四个阈值状态：warning（阈值 - 缓冲）、error（更接近阈值）、autoCompact（达到自动压缩触发点）、blocking（达到阻塞限制）。effectiveWindow = contextWindow - maxOutputTokens，为模型输出预留空间 — <code>services/compact/autoCompact.ts:93-145</code></div>
+                </div>
+                <div class="flow-arrow">↓</div>
+                <div class="flow-step highlight">
+                    <div class="flow-step-title">8. 压缩决策——多层防护</div>
+                    <div class="flow-step-desc"><code>shouldAutoCompact()</code>（autoCompact.ts:160-239）执行多层守卫检查：session_memory/compact 来源不压缩（防止死锁）→ context-collapse 模式下不压缩（collapse 自己管理上下文）→ reactive-only 模式下不主动压缩 → 最终检查 token 用量是否超过阈值。每层守卫都有独立的 feature flag 保护 — <code>services/compact/autoCompact.ts:160-239</code></div>
+                </div>
+            </div>
+            <div class="info-box info">三条流程的协同点在于 Query 循环的每次迭代：API 响应触发成本累计（流程1-4），策略限制的后台轮询在首次加载后以 setInterval 运行（流程5-6），token 用量检查决定是否需要自动压缩（流程7-8）。策略限制控制"哪些功能可用"，成本追踪控制"花了多少钱"，自动压缩控制"还能花多少"——三者共同构成了成本控制的闭环。</div>
+        </section>
+        <section id="design-essence" class="card">
+            <h2><span class="icon" style="background:rgba(245,158,11,.15);color:var(--amber);">★</span> 设计精华</h2>
+
+            <h3>1. Advisor 递归计费——透明成本归属</h3>
+            <p>API 响应中的 usage 字段可能包含主模型和 advisor 模型的混合用量。<code>getAdvisorUsage()</code> 将 advisor 用量从主用量中提取出来，然后递归调用 <code>addToTotalSessionCost()</code> 计费。这意味着 advisor 的成本会出现在模型分类统计和 OTel 指标中，用户可以在 <code>/cost</code> 命令中看到每个 advisor 模型的独立成本。</p>
+            <div class="component-box">
+                <div class="name">递归 advisor 计费</div>
+                <div class="desc">将 advisor 的 token 用量从主调用中拆出，递归计入独立模型统计</div>
+                <pre><code>// cost-tracker.ts:312-322
+for (const advisorUsage of getAdvisorUsage(usage)) {
+  const advisorCost = calculateUSDCost(advisorUsage.model, advisorUsage)
+  logEvent('tengu_advisor_tool_token_usage', {
+    advisor_model: advisorUsage.model,
+    input_tokens: advisorUsage.input_tokens,
+    output_tokens: advisorUsage.output_tokens,
+    cost_usd_micros: Math.round(advisorCost * 1_000_000),
+  })
+  totalCost += addToTotalSessionCost(advisorCost, advisorUsage, advisorUsage.model)
+}</code></pre>
+            </div>
+            <div class="info-box tip">递归计费的设计巧妙之处在于它不需要调用者知道 advisor 的存在——调用者只关心总成本，advisor 的拆分在追踪层自动完成。这使得未来新增 advisor 类型时不需要修改任何调用代码。递归而非循环的处理也自然支持了嵌套 advisor 的场景。</div>
+
+            <h3>2. 策略限制的三级降级——失败开放</h3>
+            <p>策略限制的获取采用 <strong>"fails open"</strong> 策略：<code>fetchAndLoadPolicyLimits()</code>（policyLimits/index.ts:432-495）在获取失败时不会阻止用户使用 CLI。三级降级路径：服务端返回最新限制 → 使用本地文件缓存（即使过期）→ 返回 null（不施加任何限制）。304 Not Modified 复用缓存，404 删除缓存文件。</p>
+            <div class="component-box">
+                <div class="name">三级降级策略</div>
+                <div class="desc">网络失败时依次降级到文件缓存和无限制，确保 CLI 始终可用</div>
+                <pre><code>// services/policyLimits/index.ts:432-495
+async function fetchAndLoadPolicyLimits() {
+  const cachedRestrictions = loadCachedRestrictions()
+  const cachedChecksum = cachedRestrictions ? computeChecksum(cachedRestrictions) : undefined
+  try {
+    const result = await fetchWithRetry(cachedChecksum)
+    if (!result.success) {
+      if (cachedRestrictions) { return cachedRestrictions }  // 降级到缓存
+      return null  // 无限制
+    }
+    if (result.restrictions === null && cachedRestrictions) {
+      return cachedRestrictions  // 304: 缓存仍有效
+    }
+    // 成功: 保存并使用新限制
+    await saveCachedRestrictions(newRestrictions)
+    return newRestrictions
+  } catch {
+    return cachedRestrictions ?? null  // 异常降级
+  }
+}</code></pre>
+            </div>
+            <div class="info-box tip">"Fails open" 是企业级 CLI 工具的关键设计决策。想象一个场景：组织管理员配置了"禁止远程会话"策略，但 Anthropic 的策略服务临时不可用。如果 CLI fails closed（失败时施加最严格限制），用户完全无法使用 CLI，这比"临时绕过策略"的后果更严重。三级降级确保了可用性优先，同时通过后台轮询（startBackgroundPolling L635）尽快恢复策略执行。</div>
+
+            <h3>3. 自动压缩的多层守卫——防止自毁式压缩</h3>
+            <p><code>shouldAutoCompact()</code>（autoCompact.ts:160-239）的设计目标是防止压缩在不恰当的上下文中触发。四层守卫：(1) session_memory/compact 来源不压缩（否则会死锁——压缩本身就是一次 API 调用）；(2) context-collapse 模式下不压缩（collapse 有自己的 90%/95% 阈值）；(3) reactive-only 模式下不主动压缩（等 API 返回 prompt-too-long 再处理）；(4) 只有 token 用量真正超过阈值才触发。</p>
+            <div class="component-box">
+                <div class="name">多层守卫压缩决策</div>
+                <div class="desc">每层守卫防止一类不恰当的压缩触发，最终只有通过所有守卫才真正执行压缩</div>
+                <pre><code>// services/compact/autoCompact.ts:160-239
+export async function shouldAutoCompact(messages, model, querySource?, snipTokensFreed = 0) {
+  // 守卫1: 压缩来源不触发压缩（防止死锁）
+  if (querySource === 'session_memory' || querySource === 'compact') return false
+  // 守卫2: context-collapse 模式自己管理上下文
+  if (feature('CONTEXT_COLLAPSE') && isContextCollapseEnabled()) return false
+  // 守卫3: reactive-only 模式等 API 报错再处理
+  if (feature('REACTIVE_COMPACT') && getFeatureValue_CACHED_MAY_BE_STALE('tengu_cobalt_raccoon', false)) return false
+  // 守卫4: 真正检查 token 用量
+  const { isAboveAutoCompactThreshold } = calculateTokenWarningState(tokenCount, model)
+  return isAboveAutoCompactThreshold
+}</code></pre>
+            </div>
+            <div class="info-box tip">多层守卫模式的核心洞察是：压缩是一个"破坏性"操作（丢弃历史上下文以换取空间），必须比"放任"更谨慎。每层守卫都对应一个真实的生产事故场景：守卫1 防止 fork-agent 递归，守卫2 防止与 context-collapse 竞争，守卫3 将压缩延迟到绝对必要时。这种"宁可多占 token 也不误压缩"的哲学，在 AI 助手场景中尤为重要——丢失的关键上下文比多花几美分严重得多。</div>
+
+            <h3>4. Session 隔离的成本持久化——多实例安全</h3>
+            <p><code>saveCurrentSessionCosts()</code>（cost-tracker.ts:143-175）将 session ID 与成本数据一起写入项目配置。恢复时通过 <code>projectConfig.lastSessionId !== sessionId</code> 校验（在 <code>restoreCostStateForSession()</code> L130-137 中），防止读取错误 session 的成本。这在多 session 并行场景（多个 Claude Code 实例同时运行）中确保了成本数据的隔离性。</p>
+            <div class="component-box">
+                <div class="name">Session 隔离持久化</div>
+                <div class="desc">用 sessionId 作为成本数据的命名空间，防止多实例场景下的成本数据串扰</div>
+                <pre><code>// cost-tracker.ts:143-175 + 130-137
+export function saveCurrentSessionCosts(fpsMetrics?) {
+  const sessionId = getSessionId()
+  // 将 sessionId + 成本数据 + 模型用量写入 projectConfig
+  updateProjectConfig({ lastSessionId: sessionId, costs: ... })
+}
+
+export function restoreCostStateForSession(sessionId: string): boolean {
+  const stored = getStoredSessionCosts(sessionId)
+  if (!stored) return false
+  // 仅当 sessionId 匹配时才恢复——防止串扰
+  setCostStateForRestore(stored)
+  return true
+}</code></pre>
+            </div>
+            <div class="info-box tip">多实例并发是 CLI 工具中容易被忽视的场景。开发者经常在多个终端窗口同时运行 Claude Code——一个做前端开发，一个做后端调试。如果不做 session 隔离，实例 A 的成本可能被实例 B 覆盖或累加，导致 <code>/cost</code> 显示的成本完全不准确。session ID 作为命名空间是最简单有效的隔离方案。</div>
+        </section>
+
+        <section id="agent-practice" class="card">
+            <h2><span class="icon" style="background:rgba(34,197,94,.15);color:var(--green);">◈</span> Agent 实践借鉴 — 客服 Agent 成本控制设计</h2>
+
+            <h3>一、场景映射：客服 agent 的成本治理挑战</h3>
+            <p>每个 LLM 调用都要花钱。假设一个客服平台有 10 万个客户同时在线，每个客户平均 5 轮对话，每轮消耗 2000 token，使用 GPT-4o 每百万 token 约 $5，一天的光 LLM 费用就是 100000 x 5 x 2000 / 1000000 x $5 = $5000。一个月就是 $150,000。不同租户（企业客户）的预算不同：大客户每月 10 万额度，小客户每月 5000。单个会话如果客户聊了 50 轮，光 LLM 费用可能就要几十块。你需要实时知道"这个租户本月还剩多少额度"——这就是 CC 的实时成本追踪在客服场景的直接映射。</p>
+
+            <h3>二、借鉴 CC + 客服改造</h3>
+
+            <h4>实践 1：按租户 + 按会话的成本追踪（借鉴 CC 的 addToTotalSessionCost）</h4>
+            <p>CC 用 <code>addToTotalSessionCost()</code> 在每次 API 调用后累计成本。客服场景需要双维度追踪：既要按租户累计（月底计费），又要按会话累计（防止单会话成本爆炸）。</p>
+            <pre><code>// 借鉴 cost-tracker.ts:278-323 的单入口累计模式
+interface TenantCostRecord {
+  tenantId: string
+  monthYear: string            // '2026-04'
+  totalCostMicros: number      // 微美分整数，避免浮点精度问题
+  totalInputTokens: number
+  totalOutputTokens: number
+  sessionCount: number
+}
+
+interface SessionCostRecord {
+  sessionId: string
+  tenantId: string
+  turnCount: number
+  totalCostMicros: number
+  modelUsed: string
+}
+
+class CustomerServiceCostTracker {
+  // 按租户按月累计（计费用）
+  private tenantMonthly = new Map&lt;string, TenantCostRecord&gt;()
+  // 按会话累计（实时控制用）
+  private sessionCosts = new Map&lt;string, SessionCostRecord&gt;()
+
+  // 唯一入口：每次 LLM 调用后调用（借鉴 CC 的 addToTotalSessionCost）
+  recordLLMCall(params: {
+    tenantId: string; sessionId: string; model: string
+    inputTokens: number; outputTokens: number; costUSD: number
+  }): void {
+    const costMicros = Math.round(params.costUSD * 1_000_000)  // 整数累加
+
+    // 维度 1：按租户按月累计
+    const monthKey = `${params.tenantId}:${new Date().toISOString().slice(0, 7)}`
+    const tenantRecord = this.getOrCreateTenantRecord(monthKey, params.tenantId)
+    tenantRecord.totalCostMicros += costMicros
+    tenantRecord.totalInputTokens += params.inputTokens
+    tenantRecord.totalOutputTokens += params.outputTokens
+
+    // 维度 2：按会话累计
+    const sessionRecord = this.getOrCreateSessionRecord(
+      params.sessionId, params.tenantId, params.model
+    )
+    sessionRecord.turnCount += 1
+    sessionRecord.totalCostMicros += costMicros
+
+    // 上报遥测（借鉴 CC 的 OTel Counter）
+    this.reportMetrics(params, costMicros)
+  }
+
+  // 查询租户本月剩余额度（实时计算）
+  getTenantRemainingBudget(tenantId: string, monthlyBudgetUSD: number): {
+    usedUSD: number; remainingUSD: number; usagePercent: number
+  } {
+    const monthKey = `${tenantId}:${new Date().toISOString().slice(0, 7)}`
+    const record = this.tenantMonthly.get(monthKey)
+    const usedUSD = (record?.totalCostMicros ?? 0) / 1_000_000
+    return {
+      usedUSD,
+      remainingUSD: Math.max(0, monthlyBudgetUSD - usedUSD),
+      usagePercent: Math.round(usedUSD / monthlyBudgetUSD * 100),
+    }
+  }
+}</code></pre>
+
+            <h4>实践 2：三级预算阈值（借鉴 CC 的 warn → auto-compact → block）</h4>
+            <p>CC 用四级阈值控制上下文使用率。客服场景也有类似的成本控制需求，但阈值语义不同：50% 警告运营人员、80% 自动切换到便宜模型、100% 暂停服务。</p>
+            <pre><code>// 借鉴 autoCompact.ts:93-145 的多级阈值设计
+type CostLevel = 'normal' | 'warning' | 'downgrade' | 'suspended'
+
+class TenantBudgetManager {
+  private thresholds = {
+    warning: 0.50,     // 50% → 通知运营人员
+    downgrade: 0.80,   // 80% → 切换到便宜模型
+    suspended: 1.00,   // 100% → 暂停服务
+  }
+
+  // 便宜模型映射（降级时使用）
+  private modelFallback = {
+    'gpt-4o': 'gpt-4o-mini',           // $5/M → $0.15/M token，成本降 97%
+    'claude-sonnet': 'claude-haiku',    // $3/M → $0.25/M token
+    'deepseek-chat': 'deepseek-lite',   // 已是便宜模型，不再降级
+  }
+
+  evaluateBudget(tenantId: string, monthlyBudgetUSD: number): {
+    level: CostLevel; effectiveModel: string; usagePercent: number
+  } {
+    const budget = costTracker.getTenantRemainingBudget(tenantId, monthlyBudgetUSD)
+    const ratio = budget.usagePercent / 100
+
+    if (ratio &gt;= this.thresholds.suspended) {
+      return { level: 'suspended', effectiveModel: '', usagePercent: budget.usagePercent }
+    }
+    if (ratio &gt;= this.thresholds.downgrade) {
+      const config = getTenantConfig(tenantId)
+      const downgraded = this.modelFallback[config.model] ?? config.model
+      return { level: 'downgrade', effectiveModel: downgraded, usagePercent: budget.usagePercent }
+    }
+    if (ratio &gt;= this.thresholds.warning) {
+      return { level: 'warning', effectiveModel: getTenantConfig(tenantId).model, usagePercent: budget.usagePercent }
+    }
+    return { level: 'normal', effectiveModel: getTenantConfig(tenantId).model, usagePercent: budget.usagePercent }
+  }
+
+  // 在每次 LLM 调用前执行预算检查（借鉴 CC 的 enforceBudget）
+  async beforeLLMCall(tenantId: string, sessionId: string): Promise&lt;{
+    allowed: boolean; model: string; reason?: string
+  }&gt; {
+    const budget = getTenantBudget(tenantId)
+    const state = this.evaluateBudget(tenantId, budget.monthlyLimitUSD)
+
+    switch (state.level) {
+      case 'normal':
+        return { allowed: true, model: state.effectiveModel }
+      case 'warning':
+        // 通知运营人员（邮件/webhook）
+        await notifyOps(tenantId, `租户 ${tenantId} 本月已用 ${state.usagePercent}% 预算`)
+        return { allowed: true, model: state.effectiveModel }
+      case 'downgrade':
+        return { allowed: true, model: state.effectiveModel, reason: '已降级到经济模型' }
+      case 'suspended':
+        // 暂停服务，转人工
+        await transferToHuman(sessionId, '租户预算已耗尽')
+        return { allowed: false, model: '', reason: '本月额度已用完' }
+    }
+  }
+}</code></pre>
+
+            <h4>实践 3：会话级成本控制（借鉴 CC 的单会话 token 预算）</h4>
+            <p>CC 用上下文窗口阈值控制单会话 token 消费。客服场景同样需要会话级限制——一个客户聊了 50 轮，单会话成本可能超过 5 元，需要自动压缩上下文或降级。</p>
+            <pre><code>// 借鉴 autoCompact.ts 的阈值控制 + 自动压缩
+const SESSION_COST_LIMIT_USD = 5.0     // 单会话成本上限
+const SESSION_COST_COMPACT_AT = 3.0    // 触发上下文压缩的阈值
+
+async function checkSessionBudget(sessionId: string): Promise&lt;{
+  action: 'continue' | 'compact' | 'downgrade' | 'terminate'
+}&gt; {
+  const sessionCost = costTracker.getSessionCost(sessionId)
+  const costUSD = sessionCost.totalCostMicros / 1_000_000
+
+  if (costUSD &gt;= SESSION_COST_LIMIT_USD) {
+    // 单会话超过 5 元：降级到最便宜模型或转人工
+    return { action: 'downgrade' }
+  }
+  if (costUSD &gt;= SESSION_COST_COMPACT_AT) {
+    // 单会话超过 3 元：压缩上下文（类似 CC 的 autoCompact）
+    // 将前 20 轮对话摘要化，释放 token 空间
+    return { action: 'compact' }
+  }
+  return { action: 'continue' }
+}</code></pre>
+
+            <h4>实践 4：成本报告（按租户、按渠道、按日期统计）</h4>
+            <pre><code>// 借鉴 cost-tracker.ts:228-244 的 formatTotalCost
+class CostReporter {
+  // 按租户统计月度成本
+  getTenantMonthlyReport(tenantId: string): TenantMonthlyReport {
+    const monthKey = `${tenantId}:${new Date().toISOString().slice(0, 7)}`
+    const record = costTracker.getTenantRecord(monthKey)
+    return {
+      tenantId,
+      period: new Date().toISOString().slice(0, 7),
+      totalCostUSD: (record?.totalCostMicros ?? 0) / 1_000_000,
+      totalInputTokens: record?.totalInputTokens ?? 0,
+      totalOutputTokens: record?.totalOutputTokens ?? 0,
+      sessionCount: record?.sessionCount ?? 0,
+      avgCostPerSession: record
+        ? ((record.totalCostMicros / 1_000_000) / record.sessionCount).toFixed(4)
+        : '0',
+    }
+  }
+
+  // 按渠道统计（电话比在线聊天贵，因为有 ASR/TTS 成本）
+  getCostByChannel(tenantId: string): Record&lt;string, number&gt; {
+    const sessions = costTracker.getTenantSessions(tenantId)
+    const byChannel: Record&lt;string, number&gt; = {}
+    for (const session of sessions) {
+      const channel = session.channelType
+      byChannel[channel] = (byChannel[channel] ?? 0) + session.totalCostMicros / 1_000_000
+    }
+    return byChannel
+  }
+}</code></pre>
+
+            <h3>三、落地清单</h3>
+            <div class="two-col">
+                <div class="component-box">
+                    <div class="name" style="color:var(--green);">必须抄的</div>
+                    <div class="desc">
+                        <ul>
+                            <li><strong>实时成本追踪</strong>——每次 LLM 调用后立即累计，按租户按会话双维度记录，用整数微美分避免浮点精度问题</li>
+                            <li><strong>多级预算阈值</strong>——50% 警告 → 80% 切便宜模型 → 100% 暂停服务，借鉴 CC 的 warn/autoCompact/block 分级</li>
+                            <li><strong>会话级成本控制</strong>——单会话超阈值自动压缩上下文或降级模型，防止单个长对话成本爆炸</li>
+                        </ul>
+                    </div>
+                </div>
+                <div class="component-box">
+                    <div class="name" style="color:var(--text-muted);">不需要抄的</div>
+                    <div class="desc">
+                        <ul>
+                            <li><strong>Advisor 递归计费</strong>——客服场景的子 agent（转交专家）少，不需要递归拆分成本</li>
+                            <li><strong>服务端策略下发</strong>——CC 从 Anthropic 服务端获取 policy limits，客服的成本策略在本地配置文件或管理后台，不需要实时远程拉取</li>
+                            <li><strong>ETag/Checksum 缓存策略</strong>——客服预算配置变更频率低，不需要 CC 那样的 SHA-256 checksum 缓存验证</li>
+                        </ul>
+                    </div>
+                </div>
+            </div>
+
+            <h3>四、常见坑</h3>
+            <div class="info-box warning">
+                <ol>
+                    <li><strong>用浮点数累加导致计费不准</strong>——$0.1 + $0.2 != $0.3。CC 用微美分整数（USD * 1,000,000）累加，只在显示时转换。客服场景涉及真金白银的计费，精度问题更严重。</li>
+                    <li><strong>只算 LLM 成本忽略 ASR/TTS 成本</strong>——电话渠道的语音识别（ASR）和语音合成（TTS）也是按调用计费的，一个 50 轮的电话会话 ASR/TTS 成本可能和 LLM 成本相当。成本追踪必须覆盖所有付费 API。</li>
+                    <li><strong>降级模型后客户感知到质量下降</strong>——从 GPT-4o 切到 GPT-4o-mini，回复质量可能明显下降（特别是复杂售后问题）。降级时应该同时通知运营人员，必要时转人工而非继续用差模型硬撑。</li>
+                    <li><strong>预算归零后直接断服务导致客诉</strong>——100% 阈值不是直接挂断客户，而是优雅转人工并提示运营续费。借鉴 CC 的 "fails open" 哲学，宁可多花几块钱也不要在客户面前直接断线。</li>
+                </ol>
+            </div>
+        </section>
+
+        <section id="code-index" class="card">
+            <h2>代码索引</h2>
+            <table>
+                <thead><tr><th>文件</th><th>行数</th><th>说明</th></tr></thead>
+                <tbody>
+                    <tr><td><code>cost-tracker.ts</code></td><td>~324</td><td>成本追踪核心：累加、格式化、持久化、模型分类统计</td></tr>
+                    <tr><td><code>costHook.ts</code></td><td>~23</td><td>React Hook：进程退出时输出成本摘要并保存状态</td></tr>
+                    <tr><td><code>services/policyLimits/index.ts</code></td><td>~664</td><td>策略限制服务：获取、缓存、轮询、查询</td></tr>
+                    <tr><td><code>services/policyLimits/types.ts</code></td><td>~27</td><td>策略限制类型定义和 Schema</td></tr>
+                    <tr><td><code>services/compact/autoCompact.ts</code></td><td>~352</td><td>自动压缩阈值计算：有效窗口、警告状态、阻塞限制</td></tr>
+                    <tr><td><code>services/compact/microCompact.ts</code></td><td>~531</td><td>微压缩：工具结果清除策略，间接降低 token 消费</td></tr>
+                    <tr><td><code>utils/modelCost.ts</code></td><td>~medium</td><td>calculateUSDCost()：按模型和 token 类型计算美元成本</td></tr>
+                    <tr><td><code>utils/context.ts</code></td><td>~medium</td><td>getContextWindowForModel()：模型上下文窗口查询</td></tr>
+                    <tr><td><code>utils/tokens.ts</code></td><td>~medium</td><td>tokenCountWithEstimation()：精确 + 估算混合 token 计数</td></tr>
+                    <tr><td><code>bootstrap/state.js</code></td><td>~large</td><td>全局成本状态：getTotalCostUSD、getModelUsage、getCostCounter 等</td></tr>
+                </tbody>
+            </table>
+        </section>
+        <footer style="text-align:center; padding:32px 0 20px; margin-top:48px; border-top:1px solid var(--border); color:var(--text-secondary); font-size:13px; line-height:2;">
+        <div style="margin-bottom:4px;">⚠️ 免责声明</div>
+        本文仅用于技术学习和架构分析目的。源码分析基于公开泄漏的代码，所有商标和版权归 <a href="https://www.anthropic.com" style="color:var(--indigo);">Anthropic</a> 所有。未经授权不得用于商业用途。
+    </footer>
+    </main>
+</body>
+</html>

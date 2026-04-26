@@ -1,0 +1,846 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>上下文管理 - Claude Code 源码分析</title>
+    <link rel="stylesheet" href="shared/styles.css">
+</head>
+<body>
+    <nav class="sidebar">
+<div class="sidebar-header"><div class="logo">CC</div><div><div class="sidebar-title">Claude Code</div><div class="sidebar-subtitle">源码深度分析</div></div></div>
+        <div class="nav-section-title">总览</div>
+        <a href="reading-guide.html" class="nav-link">阅读指南</a>
+        <a href="index.html" class="nav-link">架构全景</a>
+        <a href="dependency-map.html" class="nav-link">模块依赖图</a>
+        <a href="vertical-agent-guide.html" class="nav-link">垂直 Agent 设计指南</a>
+<div class="nav-section-title">核心流程</div>
+<a href="00-startup.html" class="nav-link">启动链路</a>
+<a href="01-query-loop.html" class="nav-link">Query 循环</a>
+<a href="flows/query-lifecycle.html" class="nav-link">查询生命周期</a>
+<div class="nav-section-title">核心机制</div>
+<a href="02-tool-dispatch.html" class="nav-link">工具调度</a>
+<a href="03-permissions.html" class="nav-link">权限系统</a>
+<a href="03b-security-hardening.html" class="nav-link">风控与安全加固</a>
+<a href="04-agent-arch.html" class="nav-link">Agent 架构</a>
+<a href="11-hooks.html" class="nav-link">Hook 机制</a>
+<div class="nav-section-title">扩展体系</div>
+<a href="05-mcp.html" class="nav-link">MCP 体系</a>
+<a href="07-plugins.html" class="nav-link">插件系统</a>
+<a href="08-commands.html" class="nav-link">命令系统</a>
+<div class="nav-section-title">数据与服务</div>
+<a href="06-context-mgmt.html" class="nav-link active">上下文管理</a>
+<a href="10-services.html" class="nav-link">服务层</a>
+<a href="15-cost-limits.html" class="nav-link">成本与限流</a>
+<div class="nav-section-title">界面与配置</div>
+<a href="09-ui.html" class="nav-link">UI 交互层</a>
+<a href="13-config.html" class="nav-link">配置与迁移</a>
+<div class="nav-section-title">外围能力</div>
+<a href="12-external.html" class="nav-link">外部集成</a>
+<a href="14-native.html" class="nav-link">Native 能力</a>
+<div class="nav-section-title">流程图</div>
+<a href="flows/tool-execution.html" class="nav-link">工具执行流程</a>
+<a href="flows/agent-collab.html" class="nav-link">Agent 协作流程</a>
+</nav>
+    <main class="content">
+        <header class="page-header">
+            <span class="breadcrumb"><a href="index.html">源码分析</a></span>
+            <h1>上下文管理</h1>
+            <p class="subtitle">对话上下文窗口的全生命周期管理：从构建、膨胀、压缩到重建的完整策略</p>
+        </header>
+
+        <nav class="page-toc">
+    <div class="page-toc-title">页面导航</div>
+        <a href="#overview"><span class="toc-dot dot-overview"></span>职责概述</a>
+        <a href="#architecture"><span class="toc-dot dot-arch"></span>架构设计</a>
+        <a href="#dataflow"><span class="toc-dot dot-data"></span>数据流</a>
+        <a href="#interfaces"><span class="toc-dot dot-arch"></span>核心接口</a>
+        <a href="#patterns"><span class="toc-dot dot-arch"></span>设计模式</a>
+        <a href="#dev-guide"><span class="toc-dot dot-code"></span>开发者指南</a>
+        <a href="#arch-guide"><span class="toc-dot dot-arch"></span>架构师指南</a>
+        <a href="#topology"><span class="toc-dot dot-data"></span>处理拓扑图</a>
+        <a href="#core-flow"><span class="toc-dot dot-data"></span>核心流程详解</a>
+        <a href="#design-essence"><span class="toc-dot dot-design"></span>设计精华</a>
+        <a href="#agent-practice"><span class="toc-dot dot-practice"></span>Agent 实践借鉴</a>
+        <a href="#code-index"><span class="toc-dot dot-code"></span>代码索引</a>
+</nav>
+
+        <section id="overview" class="card">
+            <h2>职责概述</h2>
+            <p>上下文管理是 Claude Code 最核心的工程子系统之一。它负责管理对话历史的 token 预算，决定何时以及如何压缩上下文，确保对话在模型上下文窗口限制内持续运行而不丢失关键信息。该系统包含四个层次的压缩策略：<strong>Microcompact</strong>（细粒度工具结果清除）、<strong>Session Memory</strong>（后台会话笔记提取）、<strong>Auto Compact</strong>（全自动对话摘要）和 <strong>Memory Extraction</strong>（持久化记忆写入），形成了一个从"轻量清除"到"全量重建"的渐进式上下文管理体系。</p>
+        </section>
+
+        <section id="architecture" class="card">
+            <h2>架构设计</h2>
+            <div class="layer-diagram">
+                <div class="layer layer-entry">
+                    <div class="layer-header">上下文构建层</div>
+                    <div class="layer-body">
+                        <div class="layer-component highlight">context.ts</div>
+                        <div class="layer-component">getUserContext()</div>
+                        <div class="layer-component">getSystemContext()</div>
+                        <div class="layer-component">getGitStatus()</div>
+                    </div>
+                </div>
+                <div class="layer-arrow">&#9660;</div>
+                <div class="layer layer-engine">
+                    <div class="layer-header">压缩策略层</div>
+                    <div class="layer-body">
+                        <div class="layer-component highlight">microCompact.ts</div>
+                        <div class="layer-component">timeBasedMCConfig.ts</div>
+                        <div class="layer-component">apiMicrocompact.ts</div>
+                        <div class="layer-component">compact.ts</div>
+                    </div>
+                </div>
+                <div class="layer-arrow">&#9660;</div>
+                <div class="layer layer-orchestration">
+                    <div class="layer-header">压缩编排层</div>
+                    <div class="layer-body">
+                        <div class="layer-component highlight">autoCompact.ts</div>
+                        <div class="layer-component">sessionMemoryCompact.ts</div>
+                        <div class="layer-component">grouping.ts</div>
+                    </div>
+                </div>
+                <div class="layer-arrow">&#9660;</div>
+                <div class="layer layer-data">
+                    <div class="layer-header">记忆持久化层</div>
+                    <div class="layer-body">
+                        <div class="layer-component highlight">SessionMemory/</div>
+                        <div class="layer-component">extractMemories/</div>
+                        <div class="layer-component">utils/memory/</div>
+                    </div>
+                </div>
+                <div class="layer-arrow">&#9660;</div>
+                <div class="layer layer-infra">
+                    <div class="layer-header">基础设施层</div>
+                    <div class="layer-body">
+                        <div class="layer-component">prompt.ts</div>
+                        <div class="layer-component">postCompactCleanup.ts</div>
+                        <div class="layer-component">compactWarningState.ts</div>
+                    </div>
+                </div>
+            </div>
+        </section>
+
+        <section id="dataflow" class="card">
+            <h2>核心数据流</h2>
+
+            <h3>上下文生命周期</h3>
+            <div class="flow-chart">
+                <div class="flow-step">
+                    <div class="flow-step-title">1. 上下文构建</div>
+                    <div class="flow-step-desc">getUserContext() 加载 CLAUDE.md + 日期; getSystemContext() 加载 git 状态 + 缓存破坏标记</div>
+                </div>
+                <div class="flow-arrow">&rarr;</div>
+                <div class="flow-step">
+                    <div class="flow-step-title">2. 对话膨胀</div>
+                    <div class="flow-step-desc">每轮 API 调用后 token 增长，tokenCountWithEstimation() 估算当前用量</div>
+                </div>
+                <div class="flow-arrow">&rarr;</div>
+                <div class="flow-step">
+                    <div class="flow-step-title">3. Microcompact</div>
+                    <div class="flow-step-desc">microcompactMessages() 在 API 调用前清除旧工具结果，保留缓存前缀</div>
+                </div>
+                <div class="flow-arrow">&rarr;</div>
+                <div class="flow-step">
+                    <div class="flow-step-title">4. Session Memory</div>
+                    <div class="flow-step-desc">后台 forked agent 提取会话笔记到 markdown 文件，作为压缩时的摘要替代</div>
+                </div>
+                <div class="flow-arrow">&rarr;</div>
+                <div class="flow-step">
+                    <div class="flow-step-title">5. Auto Compact</div>
+                    <div class="flow-step-desc">token 超过阈值时触发全量摘要或 session memory 替换，重建上下文</div>
+                </div>
+                <div class="flow-arrow">&rarr;</div>
+                <div class="flow-step">
+                    <div class="flow-step-title">6. Post-Compact 恢复</div>
+                    <div class="flow-step-desc">重新注入文件内容、工具 schema、agent 状态、技能附件等关键上下文</div>
+                </div>
+            </div>
+
+            <h3>压缩决策流程</h3>
+            <div class="flow-chart vertical">
+                <div class="flow-step">
+                    <div class="flow-step-title">shouldAutoCompact() 判断</div>
+                    <div class="flow-step-desc">检查: DISABLE_COMPACT 环境变量? 非 compact/session_memory 源? 非 CONTEXT_COLLAPSE 模式? token 超过阈值?</div>
+                </div>
+                <div class="flow-arrow">&darr;</div>
+                <div class="flow-step">
+                    <div class="flow-step-title">trySessionMemoryCompaction()</div>
+                    <div class="flow-step-desc">优先尝试 Session Memory 压缩 — 无需 API 调用，零延迟，保留最近消息</div>
+                </div>
+                <div class="flow-arrow">&darr;</div>
+                <div class="flow-step">
+                    <div class="flow-step-title">compactConversation() 回退</div>
+                    <div class="flow-step-desc">Session Memory 不可用时，forked agent 生成摘要，支持缓存共享和 PTL 重试</div>
+                </div>
+                <div class="flow-arrow">&darr;</div>
+                <div class="flow-step">
+                    <div class="flow-step-title">runPostCompactCleanup()</div>
+                    <div class="flow-step-desc">清理 microcompact 状态、重置 memory 文件缓存、通知缓存破坏检测</div>
+                </div>
+            </div>
+
+            <h3>内存层级</h3>
+            <div class="diagram-container">
+                <div class="diagram-row">
+                    <div class="diagram-node" style="background: var(--layer-entry);">
+                        <strong>对话历史</strong><br>
+                        <small>实时消息流，最高优先级</small>
+                    </div>
+                    <div class="diagram-connector">&rarr;</div>
+                    <div class="diagram-node" style="background: var(--layer-engine);">
+                        <strong>Session Memory</strong><br>
+                        <small>后台提取的会话笔记 Markdown</small>
+                    </div>
+                    <div class="diagram-connector">&rarr;</div>
+                    <div class="diagram-node" style="background: var(--layer-orchestration);">
+                        <strong>Compact Summary</strong><br>
+                        <small>紧急压缩时生成的摘要文本</small>
+                    </div>
+                    <div class="diagram-connector">&rarr;</div>
+                    <div class="diagram-node" style="background: var(--layer-data);">
+                        <strong>Auto Memory</strong><br>
+                        <small>extractMemories 持久化到磁盘</small>
+                    </div>
+                </div>
+            </div>
+        </section>
+
+        <section id="interfaces" class="card">
+            <h2>关键类型与接口</h2>
+
+            <h3>CompactionResult — 压缩结果</h3>
+            <pre><code>// services/compact/compact.ts:299-310
+export interface CompactionResult {
+  boundaryMarker: SystemMessage          // 压缩边界标记
+  summaryMessages: UserMessage[]         // 摘要消息
+  attachments: AttachmentMessage[]       // 附件（文件、计划、技能）
+  hookResults: HookResultMessage[]       // Hook 产生的消息
+  messagesToKeep?: Message[]             // 保留的最近消息
+  userDisplayMessage?: string            // 用户可见的提示
+  preCompactTokenCount?: number          // 压缩前 token 数
+  postCompactTokenCount?: number         // 压缩后 token 数
+  truePostCompactTokenCount?: number     // 真实压缩后 token 估算
+  compactionUsage?: ReturnType&lt;typeof getTokenUsage&gt;
+}</code></pre>
+
+            <h3>SessionMemoryConfig — Session Memory 配置</h3>
+            <pre><code>// services/SessionMemory/sessionMemoryUtils.ts:18-29
+export type SessionMemoryConfig = {
+  /** 初始化最低 token 数（默认 10000） */
+  minimumMessageTokensToInit: number
+  /** 两次更新间最小 token 增长（默认 5000） */
+  minimumTokensBetweenUpdate: number
+  /** 两次更新间工具调用数（默认 3） */
+  toolCallsBetweenUpdates: number
+}</code></pre>
+
+            <h3>MicrocompactResult — 微压缩结果</h3>
+            <pre><code>// services/compact/microCompact.ts:207-220
+export type MicrocompactResult = {
+  messages: Message[]
+  compactionInfo?: {
+    pendingCacheEdits?: PendingCacheEdits  // 待执行的缓存编辑
+  }
+}</code></pre>
+
+            <h3>AutoCompactThreshold — 自动压缩阈值计算</h3>
+            <pre><code>// services/compact/autoCompact.ts:72-91
+export function getAutoCompactThreshold(model: string): number {
+  const effectiveContextWindow = getEffectiveContextWindowSize(model)
+  const autocompactThreshold =
+    effectiveContextWindow - AUTOCOMPACT_BUFFER_TOKENS  // 13000 buffer
+  // 支持 CLAUDE_AUTOCOMPACT_PCT_OVERRIDE 百分比覆盖
+  return autocompactThreshold
+}</code></pre>
+
+            <h3>消息分组 — API 轮次分组</h3>
+            <pre><code>// services/compact/grouping.ts:22-63
+export function groupMessagesByApiRound(messages: Message[]): Message[][] {
+  // 按 assistant message.id 边界分组
+  // 每个 API 调用产生一个 group，保证 tool_use/tool_result 配对完整
+  let lastAssistantId: string | undefined
+  for (const msg of messages) {
+    if (msg.type === 'assistant' && msg.message.id !== lastAssistantId
+        && current.length > 0) {
+      groups.push(current)
+      current = [msg]
+    }
+    // ...
+  }
+}</code></pre>
+        </section>
+
+        <section id="patterns" class="card">
+            <h2>设计模式与亮点</h2>
+
+            <h3>1. 多级渐进压缩策略</h3>
+            <p>系统实现了从轻到重的四级压缩：时间驱动的 Microcompact（清除旧工具结果） &rarr; 缓存感知的 Microcompact（cache_edits API） &rarr; Session Memory 替换（零 API 调用） &rarr; 全量 Compact（forked agent 摘要）。每一级都是上一级的降级方案，确保在最极端情况下也能回收上下文空间。</p>
+
+            <h3>2. Forked Agent 缓存共享</h3>
+            <p>压缩和 Session Memory 提取都通过 <code>runForkedAgent()</code> 创建一个"完美分叉"——相同的 system prompt、tools、消息前缀。这意味着分叉的 agent 可以直接命中主线程的 prompt cache，避免重复发送大量已有上下文。这是 <code>cacheSafeParams</code> 的核心价值。</p>
+
+            <h3>3. PTL（Prompt-Too-Long）自适应重试</h3>
+            <p>压缩请求本身也可能超限。<code>truncateHeadForPTLRetry()</code> 在 API 轮次分组后丢弃最旧的分组，逐步缩小待摘要的消息集，最多重试 3 次。这是一种优雅的自愈机制。</p>
+            <pre><code>// services/compact/compact.ts:243-291
+export function truncateHeadForPTLRetry(
+  messages: Message[],
+  ptlResponse: AssistantMessage,
+): Message[] | null {
+  const groups = groupMessagesByApiRound(input)
+  if (groups.length &lt; 2) return null
+  const tokenGap = getPromptTooLongTokenGap(ptlResponse)
+  // 按 token 缺口计算要丢弃的分组数
+  // 保底：丢弃 20%
+  // 确保至少保留一个分组可摘要
+}</code></pre>
+
+            <h3>4. 熔断器模式（Circuit Breaker）</h3>
+            <p><code>MAX_CONSECUTIVE_AUTOCOMPACT_FAILURES = 3</code>。连续压缩失败 3 次后停止尝试，防止在不可恢复的上下文溢出场景下无限重试。BQ 数据显示修复前有 1,279 个 session 产生了 50+ 次连续失败，每天浪费约 250K 次 API 调用。</p>
+
+            <h3>5. Sequential + 尾随提取（Trailing Extraction）</h3>
+            <p>Session Memory 和 extractMemories 都使用 <code>sequential()</code> 包装确保同一时刻只有一个提取在运行。当新请求到达时，它被暂存为 <code>pendingContext</code>，等当前提取完成后自动运行一次尾随提取，确保不丢消息。</p>
+
+            <h3>6. 闭包作用域状态（Closure-scoped State）</h3>
+            <p><code>initExtractMemories()</code> 将所有可变状态（cursor、inProgress、pendingContext）封装在闭包内，而非模块级变量。测试在 <code>beforeEach</code> 中调用 init 获得干净状态，避免了跨测试污染。</p>
+        </section>
+
+        <section id="dev-guide" class="card developer">
+            <h2>开发者实践指南</h2>
+
+            <div class="info-box tip">扩展压缩策略时，优先在 microcompact 层添加轻量清除逻辑；只有在需要语义理解时才走 compactConversation。</div>
+
+            <h3>如何添加新的可压缩工具</h3>
+            <p>在 <code>microCompact.ts</code> 的 <code>COMPACTABLE_TOOLS</code> 集合中添加工具名称即可：</p>
+            <pre><code>// services/compact/microCompact.ts:41-50
+const COMPACTABLE_TOOLS = new Set&lt;string&gt;([
+  FILE_READ_TOOL_NAME,
+  ...SHELL_TOOL_NAMES,
+  GREP_TOOL_NAME,
+  GLOB_TOOL_NAME,
+  // 在此添加新工具名
+])</code></pre>
+
+            <h3>如何调整压缩阈值</h3>
+            <p>自动压缩阈值由模型上下文窗口减去 13,000 buffer 决定。可通过环境变量覆盖：</p>
+            <pre><code># 百分比覆盖（1-100）
+CLAUDE_AUTOCOMPACT_PCT_OVERRIDE=80
+
+# 绝对覆盖（token 数）
+CLAUDE_CODE_AUTO_COMPACT_WINDOW=100000
+
+# 完全禁用自动压缩
+DISABLE_AUTO_COMPACT=1</code></pre>
+
+            <h3>Post-Compact 附件注入</h3>
+            <p>压缩后会丢失文件内容和工具 schema。<code>createPostCompactFileAttachments()</code> 重新注入最近读取的文件（最多 5 个，50K token 预算），<code>getDeferredToolsDeltaAttachment()</code> 重新宣告工具 schema。自定义附件可通过 <code>AttachmentMessage</code> 类型在 <code>compactConversation()</code> 中注册。</p>
+        </section>
+
+        <section id="arch-guide" class="card architect">
+            <h2>架构师决策指南</h2>
+
+            <h3>设计权衡：Session Memory vs Legacy Compact</h3>
+            <div class="two-col">
+                <div>
+                    <strong>Session Memory 压缩</strong>
+                    <ul>
+                        <li>零 API 调用，即时完成</li>
+                        <li>保留最近消息不变</li>
+                        <li>依赖后台提取质量</li>
+                        <li>需要 GrowthBook 双 flag（session_memory + sm_compact）</li>
+                    </ul>
+                </div>
+                <div>
+                    <strong>Legacy 全量压缩</strong>
+                    <ul>
+                        <li>需要 forked agent API 调用</li>
+                        <li>替换全部消息为摘要</li>
+                        <li>摘要质量由模型保证</li>
+                        <li>支持缓存共享减少开销</li>
+                    </ul>
+                </div>
+            </div>
+
+            <h3>上下文窗口利用率的考量</h3>
+            <p>系统使用 <code>effectiveContextWindow = contextWindow - reservedTokensForSummary（最大 20,000）</code> 作为可用空间。autocompact 在使用率达到约 97% 时触发（扣除 13,000 buffer）。这个 buffer 需要平衡：太小会导致频繁压缩影响体验，太大会浪费上下文空间。当前 13K 的设定基于 p99.99 的 compact summary 输出为 17,387 tokens 的统计。</p>
+
+            <h3>缓存一致性挑战</h3>
+            <p>压缩操作会破坏 prompt cache。系统通过三种方式缓解：(1) 缓存共享路径让 forked agent 复用主线程 cache；(2) <code>notifyCompaction()</code> 通知缓存破坏检测系统忽略预期的 cache read 下降；(3) <code>cache_edits</code> API 在不修改本地消息的情况下通过服务端编辑清除工具结果。这三者协同确保压缩后的首次请求不会因为 cache miss 而被误判为缓存断裂。</p>
+
+            <div class="info-box warning">压缩后重新注入附件（文件内容、工具 schema、技能）会增加 25-50K tokens 的 cache_creation 开销。在成本敏感场景中，应评估附件数量和大小。</div>
+        </section>
+
+        <section id="topology" class="card">
+            <h2><span class="icon" style="background:rgba(139,92,246,.15);color:var(--purple);">◈</span> 可视化处理拓扑图</h2>
+            <p>上下文管理是一个 4 层渐进式压缩管线：从最廉价的消息裁剪到最昂贵的 AI 摘要生成。每一层在前一层无法释放足够空间时才触发，90%+ 的场景在前两层即完成。压缩完成后执行附件重建和进程级状态清理，确保对话连贯性。</p>
+
+            <!-- Layer Overview: 4-tier compression -->
+            <div class="fc">
+                <div class="fc-center">
+                    <div class="fn n-start w">上下文构建入口<span class="sub">每次 API 调用：getUserContext() + getSystemContext() — context.ts:116-189</span></div>
+                    <div class="vc s24"></div>
+
+                    <div class="fn n-check ww">shouldAutoCompact() 触发检查<span class="sub">autoCompact.ts:160 — tokenUsage / effectiveWindow >= 97%？含熔断器</span></div>
+                    <div class="vc s16"></div>
+                    <div style="font-size:10px;color:var(--text-muted);margin:4px 0;text-align:center;">触发 → 进入 4 层压缩管线（廉价 → 昂贵） ↓</div>
+                </div>
+            </div>
+
+            <!-- Layer 1 & 2: Snip + Microcompact -->
+            <h3 style="margin-top:1.5rem;color:var(--text-secondary);">Layer 1-2 — 轻量压缩：Snip / Microcompact</h3>
+            <div class="fc">
+                <div class="fc-center">
+                    <div class="tier-row" style="max-width:680px;">
+                        <div class="tier-num" style="background:var(--green);">1</div>
+                        <div class="tier-body">
+                            <div class="tier-title">Snip — 消息裁剪 · 0ms · 无 AI 调用</div>
+                            <div class="tier-desc">直接移除最早的历史消息对（user+assistant）。不修改消息内容，只缩短消息数组长度。autoCompact.ts:160-239 中 snipTokensFreed 参数追踪释放量。</div>
+                        </div>
+                        <div class="tier-result" style="background:rgba(34,197,94,.12);color:var(--green);">释放足够 → 返回</div>
+                    </div>
+                    <div style="font-size:10px;color:var(--text-muted);margin:4px 0;text-align:center;">仍超阈值 → 继续 ↓</div>
+
+                    <div class="tier-row" style="max-width:680px;">
+                        <div class="tier-num" style="background:var(--cyan);">2</div>
+                        <div class="tier-body">
+                            <div class="tier-title">Microcompact — Cache Editing · 0ms · 无 AI 调用</div>
+                            <div class="tier-desc"><code>microcompactMessages()</code> (microCompact.ts:253)。两条子路径：<br>
+                            (a) <code>cachedMicrocompactPath()</code> — 通过 cache_edits API 服务端清除工具结果，本地消息不变<br>
+                            (b) <code>maybeTimeBasedMicrocompact()</code> — 长时间间隔时清除旧工具结果</div>
+                        </div>
+                        <div class="tier-result" style="background:rgba(6,182,212,.12);color:var(--cyan);">释放足够 → 返回</div>
+                    </div>
+                    <div style="font-size:10px;color:var(--text-muted);margin:4px 0;text-align:center;">仍超阈值 → 进入重量级压缩 ↓</div>
+                </div>
+            </div>
+
+            <!-- Layer 3: Autocompact / Context Collapse -->
+            <h3 style="margin-top:1.5rem;color:var(--text-secondary);">Layer 3 — 重量级压缩：Compact (AI 摘要)</h3>
+            <div class="fc">
+                <div class="fc-center">
+                    <div class="tier-row" style="max-width:680px;border-color:var(--purple);">
+                        <div class="tier-num" style="background:var(--purple);">3</div>
+                        <div class="tier-body">
+                            <div class="tier-title">compactConversation() — AI 摘要生成 · ~5s · Sonnet 调用</div>
+                            <div class="tier-desc">compact.ts:387。将完整消息历史发送给模型生成结构化摘要。</div>
+                        </div>
+                    </div>
+                    <div class="vc s20"></div>
+
+                    <div class="fn n-process w">PreCompact Hooks 执行<span class="sub">compact.ts:387 — 用户自定义压缩逻辑</span></div>
+                    <div class="vc s16"></div>
+
+                    <div class="fn n-check ww">streamCompactSummary()<span class="sub">compact.ts:1136 — 构建 compact prompt + prompt cache sharing</span></div>
+                    <div class="vc s16"></div>
+
+                    <div class="fc-row">
+                        <div class="fn n-process w" style="font-size:11px;">摘要生成成功<span class="sub">替换消息历史为<br>SystemCompactBoundaryMessage</span></div>
+                        <div class="hc s20"></div>
+                        <div class="fn n-deny w" style="font-size:11px;">Prompt-Too-Long<span class="sub">truncateHeadForPTLRetry()<br>丢弃最老轮次组重试 ×3</span></div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Layer 4: Post-Compact -->
+            <h3 style="margin-top:1.5rem;color:var(--text-secondary);">Layer 4 — 后压缩：附件重建 + 状态清理</h3>
+            <div class="fc">
+                <div class="fc-center">
+                    <div class="fn n-start w">压缩完成 — 摘要替换旧消息<span class="sub">buildPostCompactMessages() — compact.ts:330</span></div>
+                    <div class="vc s20"></div>
+
+                    <div class="fn n-process ww">附件重建（4 类）<span class="sub">createPostCompactFileAttachments() — 最近读取文件恢复</span><span class="sub">createPlanAttachmentIfNeeded() — 计划文件恢复</span><span class="sub">createSkillAttachmentIfNeeded() — 已激活技能恢复</span><span class="sub">createAsyncAgentAttachmentsIfNeeded() — 后台 agent 状态恢复</span></div>
+                    <div class="vc s16"></div>
+
+                    <div class="fn n-immune w">runPostCompactCleanup()<span class="sub">postCompactCleanup.ts:31 — 重置缓存 + 状态</span></div>
+                    <div class="vc s16"></div>
+
+                    <div class="fc-row" style="gap:24px;">
+                        <div style="display:flex;flex-direction:column;align-items:center;gap:0;">
+                            <div class="fn n-auto w" style="font-size:11px;">主线程压缩<span class="sub">clear getUserContext.cache<br>resetGetMemoryFilesCache<br>clearSystemPromptSections</span></div>
+                        </div>
+                        <div style="display:flex;flex-direction:column;align-items:center;gap:0;">
+                            <div class="fn n-process w" style="font-size:11px;">子 agent 压缩<span class="sub">仅 resetMicrocompactState<br>+ clearSystemPromptSections<br>不触碰主线程缓存</span></div>
+                        </div>
+                    </div>
+                    <div class="vc s20"></div>
+
+                    <div class="fn n-process w">SystemCompactBoundaryMessage 创建<span class="sub">compactBoundary + PostCompact hooks + SessionStart hooks</span></div>
+                    <div class="vc s16"></div>
+
+                    <div class="fn n-allow w">上下文窗口恢复到健康水位<span class="sub">通知 notifyCompaction() — 缓存断裂检测忽略预期下降</span></div>
+                </div>
+            </div>
+
+            <div class="info-box info"><strong>渐进设计要点</strong>：4 层压缩从廉价到昂贵逐层升级。Layer 1-2 不调用 AI、不修改本地消息（Snip 截断 / cache_edits 服务端编辑），几乎零成本。Layer 3 的 compactConversation 是唯一需要 AI 调用的层，通过 prompt cache sharing 复用主对话前缀最大化缓存命中。Layer 4 的附件重建通过 delta 增量机制（而非全量重发）减少 cache_creation 开销。子 agent 与主线程的压缩清理通过 <code>querySource</code> 前缀隔离，防止子 agent 清空共享进程的模块级缓存。</div>
+        </section>
+
+        <section id="core-flow" class="card">
+            <h2><span class="icon" style="background:rgba(6,182,212,.15);color:var(--cyan);">⇉</span> 核心处理流程详解</h2>
+            <p>上下文管理系统的核心职责是在有限的上下文窗口中保持对话连贯性。它由三个层次组成：顶层上下文构建（context.ts）、自动压缩引擎（autoCompact.ts + compact.ts）和轻量微压缩（microCompact.ts）。以下是从上下文构建到压缩完成的完整处理链路：</p>
+            <div class="flow-chart vertical">
+                <div class="flow-step">
+                    <div class="flow-step-title">1. 顶层上下文构建</div>
+                    <div class="flow-step-desc">每次 API 调用需要两类上下文。<code>getUserContext()</code>（context.ts:155）通过 <code>getMemoryFiles()</code> 发现 CLAUDE.md 文件并解析为 <code>claudeMd</code> 字符串，还包含当前日期。<code>getSystemContext()</code>（context.ts:116）包含 git 状态快照（分支、状态、最近提交）和可选的缓存破坏注入。两者都通过 <code>memoize</code> 缓存，确保同一会话中只计算一次 — context.ts:116-189</div>
+                </div>
+                <div class="flow-arrow">↓</div>
+                <div class="flow-step highlight">
+                    <div class="flow-step-title">2. 自动压缩触发检查</div>
+                    <div class="flow-step-desc"><code>shouldAutoCompact()</code>（autoCompact.ts:160）在每个 API 轮次后被调用。它计算当前 token 使用量与阈值（<code>getAutoCompactThreshold()</code>，autoCompact.ts:72）的比值。阈值由 <code>getEffectiveContextWindowSize()</code>（autoCompact.ts:33）计算（上下文窗口大小减去最大输出 token），再扣除约 13K buffer。当使用率达到约 97% 时触发自动压缩。还包含熔断器逻辑——连续压缩失败时暂停自动压缩 — autoCompact.ts:160-239</div>
+                </div>
+                <div class="flow-arrow">↓</div>
+                <div class="flow-step">
+                    <div class="flow-step-title">3. 微压缩预处理</div>
+                    <div class="flow-step-desc">在完整压缩之前，<code>microcompactMessages()</code>（microCompact.ts:253）尝试轻量级清理。两种策略：(1) <code>cachedMicrocompactPath()</code>（microCompact.ts:305）通过 <code>cache_edits</code> API 在不修改本地消息的情况下清除服务端的大体量工具结果；(2) <code>maybeTimeBasedMicrocompact()</code>（microCompact.ts:446）当对话出现长时间间隔时，清除间隔前的旧工具结果。时间策略通过 <code>evaluateTimeBasedTrigger()</code>（microCompact.ts:422）评估 — microCompact.ts:253-530</div>
+                </div>
+                <div class="flow-arrow">↓</div>
+                <div class="flow-step highlight">
+                    <div class="flow-step-title">4. 压缩引擎执行（compactConversation）</div>
+                    <div class="flow-step-desc">这是核心压缩路径。<code>compactConversation()</code>（compact.ts:387）首先执行 PreCompact hooks（允许用户自定义压缩逻辑），然后调用 <code>streamCompactSummary()</code>（compact.ts:1136）将完整消息历史发送给模型生成摘要。如果摘要请求本身触发 prompt-too-long，<code>truncateHeadForPTLRetry()</code>（compact.ts:243）逐步丢弃最老的 API 轮次组并重试（最多 3 次）— compact.ts:387-763</div>
+                </div>
+                <div class="flow-arrow">↓</div>
+                <div class="flow-step">
+                    <div class="flow-step-title">5. 摘要流式生成</div>
+                    <div class="flow-step-desc"><code>streamCompactSummary()</code>（compact.ts:1136）构建压缩专用 prompt（通过 <code>getCompactPrompt()</code> 获取模板），利用 prompt cache sharing（<code>tengu_compact_cache_prefix</code> 特性开关，默认启用）复用主对话的缓存前缀。在 Fork agent 路径中，压缩请求的 API 前缀与主对话完全一致，最大化 cache 命中率 — compact.ts:1136-1396</div>
+                </div>
+                <div class="flow-arrow">↓</div>
+                <div class="flow-step">
+                    <div class="flow-step-title">6. 附件重建与状态恢复</div>
+                    <div class="flow-step-desc">压缩后需要重建被丢弃的上下文。<code>createPostCompactFileAttachments()</code>（compact.ts:1415）将最近读取过的文件（最多 POST_COMPACT_MAX_FILES_TO_RESTORE 个）作为附件重新注入。<code>createPlanAttachmentIfNeeded()</code>、<code>createSkillAttachmentIfNeeded()</code>、<code>createAsyncAgentAttachmentsIfNeeded()</code> 分别恢复计划、技能和异步 agent 状态。还通过 <code>getDeferredToolsDeltaAttachment()</code> 重新通告延迟加载工具的 schema — compact.ts:1415-1600</div>
+                </div>
+                <div class="flow-arrow">↓</div>
+                <div class="flow-step highlight">
+                    <div class="flow-step-title">7. 后压缩清理</div>
+                    <div class="flow-step-desc"><code>runPostCompactCleanup()</code>（postCompactCleanup.ts:31）执行全面的缓存和状态清理：重置微压缩状态、清除上下文折叠缓存、刷新 CLAUDE.md 文件缓存（<code>getUserContext.cache.clear()</code>）、清除权限分类器缓存、推测性检查缓存。关键设计：子 agent 的压缩不重置主线程的模块级状态（通过 <code>querySource</code> 前缀判断）——子 agent 共享同一进程的模块变量 — postCompactCleanup.ts:31-77</div>
+                </div>
+                <div class="flow-arrow">↓</div>
+                <div class="flow-step">
+                    <div class="flow-step-title">8. 边界标记与 SessionStart hooks</div>
+                    <div class="flow-step-desc">压缩完成后创建 <code>SystemCompactBoundaryMessage</code>（compact.ts 中的 <code>createCompactBoundaryMessage()</code>）作为消息历史中的分界点。边界消息携带压缩前的 token 数量和 pre-compact 发现的工具名列表。随后执行 PostCompact hooks 和 SessionStart hooks（重新加载 hook 指令），使 hook 系统在压缩后保持一致 — compact.ts:600-760</div>
+                </div>
+            </div>
+            <div class="info-box info">
+                <strong>关键处理逻辑：</strong>上下文管理的核心矛盾是"压缩会破坏 prompt cache"。系统通过三层机制缓解：第一层，压缩请求复用主对话的 system prompt 前缀（通过 <code>cacheSafeParams.forkContextMessages</code>），最大化 cache 命中；第二层，<code>notifyCompaction()</code> 通知缓存断裂检测系统忽略预期的 cache read 下降，避免误报；第三层，压缩后重新注入的附件通过 delta 增量机制（而非全量重发）减少 cache_creation 开销。三层协同使压缩操作的成本从"接近全量重建"降低到"仅摘要输出 + 增量附件"。
+            </div>
+        </section>
+        <section id="design-essence" class="card">
+            <h2><span class="icon" style="background:rgba(245,158,11,.15);color:var(--amber);">★</span> 设计精华</h2>
+
+            <h3>1. 微压缩的 Cache Editing API</h3>
+            <p>传统压缩需要一次完整的 API 调用来生成摘要，而微压缩通过 <code>cache_edits</code> API 实现零模型调用的上下文缩减。具体机制：不修改本地消息历史，而是通过服务端 API 编辑（<code>pinCacheEdits()</code>，microCompact.ts:111）清除大体量工具结果块。下次 API 请求时，服务端应用编辑，工具结果变为空——本地消息不变，但发送到 API 的内容减少了。这样 prompt cache 前缀完全不变（因为消息结构未修改），只丢了工具结果的 body。</p>
+            <div class="component-box">
+                <div class="name">Cache Edits 生命周期（microCompact.ts:88-128）</div>
+                <div class="desc">pending → pin → re-send，零 API 调用清除工具结果</div>
+                <pre><code>// 收集可压缩的工具调用 ID
+const compactableIds = collectCompactableToolIds(messages)
+// 生成 cache_edits block（不修改本地消息）
+// 下次 API 请求时通过 cache_edits 参数发送
+// 服务端在读取时应用编辑，工具结果被替换为空</code></pre>
+            </div>
+            <div class="info-box tip">设计洞察：Cache Editing 是"数据不动、视图变"的典范。它利用了 Anthropic API 的 cache_edits 扩展能力，在服务端修改 prompt cache 的内容而不影响客户端状态。这意味着压缩后如果需要回滚（比如自动压缩后用户撤销），本地消息完整无损。</div>
+
+            <h3>2. 进程级状态隔离的精细控制</h3>
+            <p>子 agent 与主线程共享同一个 Node.js 进程和模块级变量。<code>runPostCompactCleanup()</code>（postCompactCleanup.ts:31）通过 <code>isMainThreadCompact</code> 标志精细控制哪些状态可以被重置。主线程压缩可以清空 <code>getUserContext</code> 的 memoize 缓存和 CLAUDE.md 文件缓存；子 agent 压缩跳过这些——因为清空主线程的上下文缓存会导致主线程的下一个 API 调用使用陈旧或不一致的数据。</p>
+            <div class="component-box">
+                <div class="name">主线程 vs 子 agent 状态清理（postCompactCleanup.ts:36-61）</div>
+                <div class="desc">子 agent 压缩只清理共享状态，不触碰主线程专属缓存</div>
+                <pre><code>const isMainThreadCompact =
+  querySource === undefined ||
+  querySource.startsWith('repl_main_thread') ||
+  querySource === 'sdk'
+
+resetMicrocompactState()  // 所有路径都执行
+if (isMainThreadCompact) {
+  getUserContext.cache.clear?.()   // 仅主线程
+  resetGetMemoryFilesCache('compact')  // 仅主线程
+}
+clearSystemPromptSections()  // 所有路径</code></pre>
+            </div>
+            <div class="info-box tip">设计洞察：这种"按 querySource 分级清理"的设计避免了为子 agent 引入独立进程的开销。一个进程内通过命名约定（<code>repl_main_thread</code>、<code>agent:builtin:*</code>）区分不同执行上下文，用最小的运行时成本实现了逻辑隔离。querySource 成为了整个系统的"上下文身份标识"。</div>
+
+            <h3>3. PTL 重试的渐进式截断</h3>
+            <p>压缩请求本身也可能触发 prompt-too-long（PTL）错误——当消息历史太长时，连同压缩 prompt 一起超过了上下文窗口。<code>truncateHeadForPTLRetry()</code>（compact.ts:243）不是简单地截断消息，而是通过 <code>groupMessagesByApiRound()</code>（grouping.ts:22）按 API 轮次边界分组，逐组丢弃最老的轮次，直到 token 差额被覆盖。最多重试 3 次（<code>MAX_PTL_RETRIES</code>）。这确保了即使在极端情况下（用户从未手动压缩），系统也能完成压缩操作。</p>
+            <div class="info-box tip">设计洞察：按 API 轮次（而非按消息）截断保证了截断后的消息序列仍然符合 API 规范——每个 assistant 消息后要么是 tool_result + assistant，要么是 user。如果按消息截断，可能在一个 API 调用的中间断开，导致 API 拒绝请求。</div>
+
+            <h3>4. 压缩后附件的增量重建</h3>
+            <p>压缩后不是全量重发所有上下文附件，而是通过 delta 机制增量注入。<code>getDeferredToolsDeltaAttachment()</code> 计算压缩前后工具 schema 的差异，只发送新增或变更的工具定义。同样，<code>getAgentListingDeltaAttachment()</code> 和 <code>getMcpInstructionsDeltaAttachment()</code> 也走 delta 路径。唯一需要全量重发的是文件附件（因为压缩丢失了"模型已看过哪些文件"的信息），但限制在 <code>POST_COMPACT_MAX_FILES_TO_RESTORE</code> 个以内。</p>
+            <div class="info-box tip">设计洞察：Delta 附件机制的核心假设是"压缩只改变消息历史，不改变工具和 MCP 配置"。这个假设在绝大多数情况下成立——压缩发生在对话中间，工具和 MCP 服务器配置不会因此改变。利用这个不变量，delta 机制将附件重建的 cache_creation 开销从约 50K tokens 降低到约 5-10K tokens。</div>
+        </section>
+
+        <section id="agent-practice" class="card">
+            <h2><span class="icon" style="background:rgba(34,197,94,.15);color:var(--green);">◈</span> Agent 实践借鉴 — 客服 Agent 上下文管理设计</h2>
+
+            <h3>场景映射：客服 agent 在上下文管理上的真实问题</h3>
+            <p>客服场景的上下文管理和代码助手完全不同——不是"文件很多"，而是"对话很长、数据很大、客户会反复来"。典型痛点包括：</p>
+            <ul>
+                <li><strong>对话太长 token 不够</strong>：客户打了 20 分钟电话，来回 30 轮对话（咨询退货政策、比价、犹豫、改主意），agent 的对话历史已经很长，API token 上限快到了。</li>
+                <li><strong>跨会话记忆断层</strong>：客户上周聊过退货问题，这次来问退货进度，agent 不记得上周聊了什么，客户被迫重新描述一遍。体验极差。</li>
+                <li><strong>工具返回数据太大</strong>：查物流轨迹返回 50 个节点，但 agent 只需要最新状态和预计到达时间。大量原始数据占满 token 预算。</li>
+                <li><strong>重复进线浪费 token</strong>：同一个客户今天问了 3 次物流（上午 10 点、下午 2 点、下午 5 点），每次都是相同的订单号和物流信息，重复的上下文信息白白消耗 token。</li>
+            </ul>
+
+            <h3>借鉴 CC + 客服改造</h3>
+
+            <h4>1. Token 预算监控 + 阈值触发（借鉴 CC shouldAutoCompact）</h4>
+            <p>CC 在每个 API 轮次后检查 token 使用率，达到 ~97% 就启动压缩。客服场景按对话轮数或 token 数触发：</p>
+            <pre><code>// 借鉴 CC 的 shouldAutoCompact → 客服场景的主动式上下文管理
+const SERVICE_CONTEXT_LIMITS = {
+  maxTokens: 128_000,          // 模型上下文窗口
+  bufferTokens: 8_000,         // 预留给回复的 buffer
+  compactThreshold: 0.85,      // 85% 时触发压缩（比 CC 的 97% 更保守）
+  maxConversationRounds: 25,   // 超过 25 轮主动压缩
+}
+
+// 每轮对话后检查——不等溢出
+function shouldCompactServiceContext(
+  tokenUsage: number,
+  roundCount: number,
+): { needed: boolean; reason: string } {
+  const threshold = SERVICE_CONTEXT_LIMITS.maxTokens
+    * SERVICE_CONTEXT_LIMITS.compactThreshold
+
+  if (tokenUsage >= threshold) {
+    return { needed: true, reason: `token 使用率 ${Math.round(tokenUsage/threshold*100)}% 超过阈值` }
+  }
+  if (roundCount >= SERVICE_CONTEXT_LIMITS.maxConversationRounds) {
+    return { needed: true, reason: `对话轮数 ${roundCount} 超过上限` }
+  }
+  return { needed: false, reason: '' }
+}
+
+// 熔断器——借鉴 CC 的连续失败保护
+let compactFailures = 0
+const MAX_COMPACT_FAILURES = 3
+
+async function tryCompactServiceContext(messages: Message[]): Promise&lt;void&gt; {
+  if (compactFailures >= MAX_COMPACT_FAILURES) {
+    logWarning('上下文压缩连续失败3次，跳过压缩，降低回复质量')
+    return
+  }
+  try {
+    await compactServiceMessages(messages)
+    compactFailures = 0
+  } catch (e) {
+    compactFailures++
+    logError('上下文压缩失败', e)
+  }
+}</code></pre>
+
+            <h4>2. 微压缩：清除工具返回的大块原始数据（借鉴 CC Microcompact）</h4>
+            <p>CC 的 Microcompact 在不调用 AI 的情况下清除旧工具结果。客服场景的微压缩重点是"数据瘦身"——物流 50 节点变 3 节点、订单详情只保留关键字段：</p>
+            <pre><code>// 借鉴 CC 的 microcompactMessages → 客服场景的数据瘦身
+// 零 AI 调用，直接压缩工具返回的原始数据
+
+interface ServiceMicrocompactRules {
+  toolName: string
+  maxDataPoints: number        // 最多保留多少条数据
+  keepStrategy: 'latest' | 'important' | 'summary'
+}
+
+// 客服场景的压缩规则
+const SERVICE_COMPACT_RULES: ServiceMicrocompactRules[] = [
+  {
+    toolName: 'query_logistics',    // 物流查询
+    maxDataPoints: 3,               // 50 个节点 → 只保留最新 3 个
+    keepStrategy: 'latest',
+  },
+  {
+    toolName: 'query_order_list',   // 订单列表
+    maxDataPoints: 5,               // 可能有 20+ 订单 → 只保留最近 5 个
+    keepStrategy: 'latest',
+  },
+  {
+    toolName: 'query_customer',     // 客户信息
+    maxDataPoints: 999,             // 客户信息本身不大，保留完整
+    keepStrategy: 'important',
+  },
+]
+
+function microcompactServiceData(
+  messages: Message[],
+  rules: ServiceMicrocompactRules[],
+): Message[] {
+  return messages.map(msg => {
+    if (msg.type !== 'tool_result') return msg
+
+    const rule = rules.find(r => r.toolName === msg.toolName)
+    if (!rule) return msg
+
+    // 按规则压缩原始数据
+    const data = JSON.parse(msg.content)
+    const compressed = compressData(data, rule)
+
+    return { ...msg, content: JSON.stringify(compressed) }
+  })
+}
+
+// 具体压缩：物流轨迹 50 节点 → 最新 3 个 + 状态摘要
+function compressLogisticsData(raw: LogisticsResponse): CompressedLogistics {
+  const latestNodes = raw.trackingNodes.slice(-3)
+  return {
+    orderNo: raw.orderNo,
+    currentStatus: raw.currentStatus,         // "运输中"
+    estimatedArrival: raw.estimatedArrival,    // "2024-01-15"
+    latestNodes,                               // 只保留最新 3 个节点
+    totalNodes: raw.trackingNodes.length,      // 标注原始节点数
+  }
+  // 压缩前: ~3000 tokens → 压缩后: ~300 tokens，节省 90%
+}</code></pre>
+
+            <h4>3. 会话摘要：20 轮对话压缩为关键信息（借鉴 CC AutoCompact）</h4>
+            <p>CC 用 AI 生成结构化摘要替换旧消息。客服场景也用 AI 摘要，但模板不同——保留客户诉求、已处理事项、待办事项：</p>
+            <pre><code>// 借鉴 CC 的 compactConversation → 客服场景的会话摘要
+async function compactServiceMessages(messages: Message[]): Promise&lt;CompactResult&gt; {
+  // 1. 分离：保留最近 5 轮不压缩（当前上下文最重要）
+  const recentRounds = messages.slice(-10)  // 最近 5 轮（每轮 user+assistant）
+  const oldRounds = messages.slice(0, -10)
+
+  if (oldRounds.length === 0) return { messages, compressed: false }
+
+  // 2. AI 生成客服场景的结构化摘要
+  const summary = await generateServiceSummary(oldRounds)
+
+  // 3. 合并：摘要 + 最近消息
+  const compactedMessages = [
+    createSummaryMessage(summary),
+    ...recentRounds,
+  ]
+
+  return { messages: compactedMessages, compressed: true }
+}
+
+// 客服场景的摘要模板——保留关键业务信息
+async function generateServiceSummary(oldMessages: Message[]): Promise&lt;string&gt; {
+  const prompt = `请将以下客服对话历史压缩为结构化摘要，保留以下关键信息：
+1. 客户诉求（一句话概括）
+2. 已处理事项（列表）
+3. 待办事项（如果有）
+4. 客户情绪状态（正常/不满/愤怒）
+5. 已承诺事项（如"24小时内回电"）
+
+对话历史：
+${formatMessages(oldMessages)}`
+
+  const summary = await callLLM(prompt)
+  return summary
+}
+
+// 摘要示例输出：
+// """
+// 【客户诉求】退货 ORD-20240101，原因：收到商品破损
+// 【已处理】已查订单（已签收）、已查物流（显示正常配送）、已提交退货申请
+// 【待办】等待仓库确认收货后退款
+// 【客户情绪】不满，因物流显示正常但实际破损，已安抚并承诺加急处理
+// 【已承诺】48小时内退款到账
+// """</code></pre>
+
+            <h4>4. 跨会话记忆：客户画像持久化（借鉴 CC Memory Extraction）</h4>
+            <p>CC 的 extractMemories 把关键事实写入磁盘。客服场景需要提取客户偏好、历史问题、关键事实，持久化到 CRM 或独立记忆库：</p>
+            <pre><code>// 借鉴 CC 的 initExtractMemories → 客服场景的跨会话记忆
+interface CustomerMemory {
+  customerId: string
+  preferences: string[]       // 如 ["偏好上午回电", "不喜欢机器人回复"]
+  frequentIssues: string[]    // 如 ["物流查询（最近3次进线都是查物流）"]
+  importantFacts: string[]    // 如 ["对花生过敏（影响食品推荐）", "住址无电梯（影响大件配送）"]
+  lastContactDate: string
+  lastContactSummary: string  // 上次对话的一句话摘要
+}
+
+// 对话结束时提取记忆——借鉴 CC 的尾随提取
+async function extractCustomerMemory(
+  customerId: string,
+  messages: Message[],
+): Promise&lt;CustomerMemory&gt; {
+  const existingMemory = await loadCustomerMemory(customerId)
+
+  // AI 提取本次对话的新增信息
+  const prompt = `从以下客服对话中提取需要跨会话记住的关键信息：
+
+已有记忆：${JSON.stringify(existingMemory)}
+本次对话：
+${formatMessages(messages)}
+
+请输出 JSON：
+{
+  "newPreferences": [],           // 新发现的客户偏好
+  "newFrequentIssues": [],        // 本次咨询的问题类型
+  "newImportantFacts": [],        // 新发现的重要事实
+  "contactSummary": "",           // 本次对话的一句话摘要
+}`
+
+  const extracted = await callLLM(prompt)
+
+  // 合并已有记忆 + 新增信息
+  return mergeMemories(existingMemory, extracted)
+}
+
+// 同一客户重复进线——直接加载记忆，不重复询问
+async function loadContextForRepeatCustomer(customerId: string): Promise&lt;string&gt; {
+  const memory = await loadCustomerMemory(customerId)
+  if (!memory) return ''
+
+  return `[客户记忆] ${memory.preferences.join('；')}
+[常咨询问题] ${memory.frequentIssues.join('；')}
+[重要事实] ${memory.importantFacts.join('；')}
+[上次接触] ${memory.lastContactDate} - ${memory.lastContactSummary}`
+}
+
+// 使用：客户再次进线时，记忆自动注入 system prompt
+// agent 直接知道"这个客户上周退过货，偏好上午回电"</code></pre>
+
+            <h3>落地清单</h3>
+            <div class="two-col">
+                <div class="info-box tip">
+                    <strong>必须抄的：</strong><br>
+                    1. <strong>渐进式压缩策略</strong>——微压缩（数据瘦身）→ 会话摘要（AI 压缩）→ 跨会话记忆（持久化），从廉价到昂贵逐层升级。<br>
+                    2. <strong>主动触发（不等溢出）</strong>——85% token 或 25 轮对话时主动压缩，不等 API 报错才处理。<br>
+                    3. <strong>跨会话记忆持久化</strong>——客户偏好、历史问题、关键事实写入数据库，下次进线自动加载。<br>
+                    4. <strong>数据瘦身规则</strong>——物流 50 节点变 3 节点，订单列表只保留最近 5 个，工具返回必须精简。
+                </div>
+                <div class="info-box warning">
+                    <strong>不需要抄的：</strong><br>
+                    1. <strong>Cache Editing API</strong>——客服场景不需要服务端编辑本地消息，直接本地压缩即可。CC 用 Cache Editing 是为了不破坏 prompt cache，客服场景对话短，cache 命中率本身就不高。<br>
+                    2. <strong>4 层压缩</strong>——客服 3 层够用（微压缩 → 会话摘要 → 跨会话记忆），不需要 CC 的 Memory Extraction 那么复杂的自动记忆提取。<br>
+                    3. <strong>PTL 自适应重试</strong>——客服场景对话不会像代码助手那样达到极端长度，不需要逐步丢弃最老分组的重试机制。
+                </div>
+            </div>
+
+            <div class="info-box warning">
+                <strong>常见坑：</strong>
+                <strong>1. 等到 token 溢出才压缩</strong>——客服场景最常见的错误。客户已经打了 30 分钟电话，agent 突然"失忆"（API 返回 prompt-too-long，压缩后摘要丢失了客户 15 分钟前的退货要求）。必须在 85% 时主动压缩，留出 buffer。
+                <strong>2. 微压缩丢掉了关键信息</strong>——物流 50 节点变 3 节点时，只保留了最新的，但客户投诉的其实是第 10 个节点（"显示已签收但没收到"）。压缩规则必须根据客户诉求动态调整，不能一刀切。
+                <strong>3. 跨会话记忆泄露隐私</strong>——客户 A 的记忆不能被客户 B 看到。记忆存储必须按 customerId 隔离，且敏感信息（手机号、地址）要脱敏后再存入记忆。
+            </div>
+        </section>
+
+        <section id="code-index" class="card">
+            <h2>代码索引</h2>
+            <table>
+                <thead><tr><th>文件</th><th>行数</th><th>说明</th></tr></thead>
+                <tbody>
+                    <tr><td><code>context.ts</code></td><td>~190</td><td>顶层上下文构建：getUserContext、getSystemContext、getGitStatus</td></tr>
+                    <tr><td><code>services/compact/compact.ts</code></td><td>~1706</td><td>核心压缩引擎：compactConversation、partialCompact、streamCompactSummary、附件重建</td></tr>
+                    <tr><td><code>services/compact/autoCompact.ts</code></td><td>~352</td><td>自动压缩编排：阈值计算、shouldAutoCompact、熔断器</td></tr>
+                    <tr><td><code>services/compact/microCompact.ts</code></td><td>~531</td><td>轻量微压缩：工具结果清除、缓存编辑、时间驱动策略</td></tr>
+                    <tr><td><code>services/compact/sessionMemoryCompact.ts</code></td><td>~631</td><td>Session Memory 压缩路径：零 API 调用的快速压缩</td></tr>
+                    <tr><td><code>services/compact/prompt.ts</code></td><td>~375</td><td>压缩提示词模板：BASE/PARTIAL/UP_TO 三种变体</td></tr>
+                    <tr><td><code>services/compact/grouping.ts</code></td><td>~64</td><td>消息分组：按 API 轮次边界切分</td></tr>
+                    <tr><td><code>services/compact/postCompactCleanup.ts</code></td><td>~78</td><td>压缩后清理：重置缓存、状态、模块级变量</td></tr>
+                    <tr><td><code>services/compact/apiMicrocompact.ts</code></td><td>~154</td><td>API 侧微压缩：context management 策略配置</td></tr>
+                    <tr><td><code>services/compact/timeBasedMCConfig.ts</code></td><td>~44</td><td>时间驱动微压缩配置：gap 阈值、keepRecent 数量</td></tr>
+                    <tr><td><code>services/SessionMemory/sessionMemory.ts</code></td><td>~496</td><td>Session Memory 主逻辑：提取触发、forked agent 执行</td></tr>
+                    <tr><td><code>services/SessionMemory/prompts.ts</code></td><td>~325</td><td>Session Memory 提示词和模板：摘要更新指令、截断策略</td></tr>
+                    <tr><td><code>services/SessionMemory/sessionMemoryUtils.ts</code></td><td>~208</td><td>Session Memory 工具函数：配置管理、游标跟踪、等待机制</td></tr>
+                    <tr><td><code>services/extractMemories/extractMemories.ts</code></td><td>~616</td><td>持久化记忆提取：闭包状态、尾随提取、工具权限</td></tr>
+                    <tr><td><code>services/extractMemories/prompts.ts</code></td><td>~155</td><td>记忆提取提示词：自动/团队记忆变体</td></tr>
+                    <tr><td><code>utils/memory/types.ts</code></td><td>~12</td><td>记忆类型定义：User/Project/Local/Managed/AutoMem/TeamMem</td></tr>
+                </tbody>
+            </table>
+        </section>
+        <footer style="text-align:center; padding:32px 0 20px; margin-top:48px; border-top:1px solid var(--border); color:var(--text-secondary); font-size:13px; line-height:2;">
+        <div style="margin-bottom:4px;">⚠️ 免责声明</div>
+        本文仅用于技术学习和架构分析目的。源码分析基于公开泄漏的代码，所有商标和版权归 <a href="https://www.anthropic.com" style="color:var(--indigo);">Anthropic</a> 所有。未经授权不得用于商业用途。
+    </footer>
+    </main>
+</body>
+</html>

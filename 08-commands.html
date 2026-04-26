@@ -1,0 +1,888 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>命令系统 - Claude Code 源码分析</title>
+    <link rel="stylesheet" href="shared/styles.css">
+</head>
+<body>
+    <nav class="sidebar">
+<div class="sidebar-header"><div class="logo">CC</div><div><div class="sidebar-title">Claude Code</div><div class="sidebar-subtitle">源码深度分析</div></div></div>
+        <div class="nav-section-title">总览</div>
+        <a href="reading-guide.html" class="nav-link">阅读指南</a>
+        <a href="index.html" class="nav-link">架构全景</a>
+        <a href="dependency-map.html" class="nav-link">模块依赖图</a>
+        <a href="vertical-agent-guide.html" class="nav-link">垂直 Agent 设计指南</a>
+<div class="nav-section-title">核心流程</div>
+<a href="00-startup.html" class="nav-link">启动链路</a>
+<a href="01-query-loop.html" class="nav-link">Query 循环</a>
+<a href="flows/query-lifecycle.html" class="nav-link">查询生命周期</a>
+<div class="nav-section-title">核心机制</div>
+<a href="02-tool-dispatch.html" class="nav-link">工具调度</a>
+<a href="03-permissions.html" class="nav-link">权限系统</a>
+<a href="03b-security-hardening.html" class="nav-link">风控与安全加固</a>
+<a href="04-agent-arch.html" class="nav-link">Agent 架构</a>
+<a href="11-hooks.html" class="nav-link">Hook 机制</a>
+<div class="nav-section-title">扩展体系</div>
+<a href="05-mcp.html" class="nav-link">MCP 体系</a>
+<a href="07-plugins.html" class="nav-link">插件系统</a>
+<a href="08-commands.html" class="nav-link active">命令系统</a>
+<div class="nav-section-title">数据与服务</div>
+<a href="06-context-mgmt.html" class="nav-link">上下文管理</a>
+<a href="10-services.html" class="nav-link">服务层</a>
+<a href="15-cost-limits.html" class="nav-link">成本与限流</a>
+<div class="nav-section-title">界面与配置</div>
+<a href="09-ui.html" class="nav-link">UI 交互层</a>
+<a href="13-config.html" class="nav-link">配置与迁移</a>
+<div class="nav-section-title">外围能力</div>
+<a href="12-external.html" class="nav-link">外部集成</a>
+<a href="14-native.html" class="nav-link">Native 能力</a>
+<div class="nav-section-title">流程图</div>
+<a href="flows/tool-execution.html" class="nav-link">工具执行流程</a>
+<a href="flows/agent-collab.html" class="nav-link">Agent 协作流程</a>
+</nav>
+    <main class="content">
+        <header class="page-header">
+            <span class="breadcrumb"><a href="index.html">源码分析</a></span>
+            <h1>命令系统</h1>
+            <p class="subtitle">70+ 斜杠命令的注册、发现、过滤与执行机制</p>
+        </header>
+
+        <nav class="page-toc">
+    <div class="page-toc-title">页面导航</div>
+        <a href="#overview"><span class="toc-dot dot-overview"></span>职责概述</a>
+        <a href="#architecture"><span class="toc-dot dot-arch"></span>架构设计</a>
+        <a href="#dataflow"><span class="toc-dot dot-data"></span>数据流</a>
+        <a href="#interfaces"><span class="toc-dot dot-arch"></span>核心接口</a>
+        <a href="#patterns"><span class="toc-dot dot-arch"></span>设计模式</a>
+        <a href="#dev-guide"><span class="toc-dot dot-code"></span>开发者指南</a>
+        <a href="#arch-guide"><span class="toc-dot dot-arch"></span>架构师指南</a>
+        <a href="#command-table"><span class="toc-dot dot-code"></span>命令一览</a>
+        <a href="#topology"><span class="toc-dot dot-data"></span>处理拓扑图</a>
+        <a href="#core-flow"><span class="toc-dot dot-data"></span>核心流程详解</a>
+        <a href="#design-essence"><span class="toc-dot dot-design"></span>设计精华</a>
+        <a href="#agent-practice"><span class="toc-dot dot-practice"></span>Agent 实践借鉴</a>
+        <a href="#code-index"><span class="toc-dot dot-code"></span>代码索引</a>
+</nav>
+
+        <section id="overview" class="card">
+            <h2>职责概述</h2>
+            <p>
+                命令系统是 Claude Code CLI 用户交互的核心入口之一。用户在 PromptInput 中输入 <code>/</code> 前缀即可触发斜杠命令。
+                系统管理着 <strong>70+</strong> 条命令，涵盖配置管理、模型切换、上下文压缩、代码审查、权限管理等方方面面。
+                命令来源包括：<strong>内置命令</strong>（硬编码在 <code>commands.ts</code> 中）、<strong>技能目录命令</strong>（<code>.claude/commands/</code>）、
+                <strong>打包技能</strong>（bundled skills）、<strong>插件命令</strong>、<strong>MCP 技能</strong> 和 <strong>工作流命令</strong>。
+                每条命令都是 <code>Command</code> 类型联合体的一员，分为 <code>prompt</code>、<code>local</code>、<code>local-jsx</code> 三种执行模式。
+            </p>
+        </section>
+
+        <section id="architecture" class="card">
+            <h2>架构设计</h2>
+            <div class="layer-diagram">
+                <div class="layer layer-entry">
+                    <div class="layer-header">命令发现层</div>
+                    <div class="layer-body">
+                        <div class="layer-component highlight">commands.ts — COMMANDS() 注册表</div>
+                        <div class="layer-component">skills/loadSkillsDir.ts — 技能目录扫描</div>
+                        <div class="layer-component">plugins/loadPluginCommands.ts — 插件命令加载</div>
+                        <div class="layer-component">getBundledSkills() — 打包技能</div>
+                    </div>
+                </div>
+                <div class="layer-arrow">▼</div>
+                <div class="layer layer-orchestration">
+                    <div class="layer-header">命令过滤层</div>
+                    <div class="layer-body">
+                        <div class="layer-component highlight">meetsAvailabilityRequirement()</div>
+                        <div class="layer-component">isCommandEnabled()</div>
+                        <div class="layer-component">filterCommandsForRemoteMode()</div>
+                        <div class="layer-component">isBridgeSafeCommand()</div>
+                    </div>
+                </div>
+                <div class="layer-arrow">▼</div>
+                <div class="layer layer-engine">
+                    <div class="layer-header">命令路由层</div>
+                    <div class="layer-body">
+                        <div class="layer-component highlight">findCommand() / getCommand()</div>
+                        <div class="layer-component">PromptInput — Typeahead 匹配</div>
+                        <div class="layer-component">getSkillToolCommands() — 模型可调用技能</div>
+                    </div>
+                </div>
+                <div class="layer-arrow">▼</div>
+                <div class="layer layer-tool">
+                    <div class="layer-header">命令执行层</div>
+                    <div class="layer-body">
+                        <div class="layer-component highlight">prompt — getPromptForCommand()</div>
+                        <div class="layer-component highlight">local — load().call()</div>
+                        <div class="layer-component highlight">local-jsx — load().call() → ReactNode</div>
+                    </div>
+                </div>
+            </div>
+        </section>
+
+        <section id="dataflow" class="card">
+            <h2>核心数据流</h2>
+            <h3>命令注册与发现流程</h3>
+            <div class="flow-chart">
+                <div class="flow-step">
+                    <div class="flow-step-title">1. 静态注册</div>
+                    <div class="flow-step-desc"><code>COMMANDS()</code> 通过 lodash memoize 返回 70+ 内置命令数组。条件编译（feature flags）动态注入实验性命令。</div>
+                </div>
+                <div class="flow-arrow">&rarr;</div>
+                <div class="flow-step">
+                    <div class="flow-step-title">2. 动态加载</div>
+                    <div class="flow-step-desc"><code>loadAllCommands(cwd)</code> 并行加载：技能目录命令、插件技能、打包技能、内置插件技能、工作流命令，合并到最终列表。</div>
+                </div>
+                <div class="flow-arrow">&rarr;</div>
+                <div class="flow-step">
+                    <div class="flow-step-title">3. 过滤可见命令</div>
+                    <div class="flow-step-desc"><code>getCommands(cwd)</code> 对全量命令执行 <code>meetsAvailabilityRequirement()</code>（认证过滤）和 <code>isCommandEnabled()</code>（特性开关过滤），返回用户可用的命令子集。</div>
+                </div>
+                <div class="flow-arrow">&rarr;</div>
+                <div class="flow-step">
+                    <div class="flow-step-title">4. 命令路由</div>
+                    <div class="flow-step-desc">用户输入 <code>/xxx</code>，PromptInput 触发 typeahead，<code>findCommand()</code> 匹配 name 或 aliases，定位到具体命令对象。</div>
+                </div>
+                <div class="flow-arrow">&rarr;</div>
+                <div class="flow-step">
+                    <div class="flow-step-title">5. 惰性执行</div>
+                    <div class="flow-step-desc">调用 <code>cmd.load()</code> 动态 import 实现模块，按 type 分发：prompt 类型调用 <code>getPromptForCommand()</code>，local/local-jsx 调用 <code>call()</code>。</div>
+                </div>
+            </div>
+
+            <h3>命令类型分发</h3>
+            <div class="flow-chart">
+                <div class="flow-step">
+                    <div class="flow-step-title">prompt 类型</div>
+                    <div class="flow-step-desc">调用 <code>getPromptForCommand(args, context)</code>，返回 <code>ContentBlockParam[]</code>。内容直接注入当前对话作为用户消息，模型据此执行任务。</div>
+                </div>
+                <div class="flow-arrow">&rarr;</div>
+                <div class="flow-step">
+                    <div class="flow-step-title">local 类型</div>
+                    <div class="flow-step-desc">调用 <code>load().call(args, context)</code>，返回 <code>LocalCommandResult</code>（text / compact / skip）。纯函数式，不渲染 UI。支持非交互模式。</div>
+                </div>
+                <div class="flow-arrow">&rarr;</div>
+                <div class="flow-step">
+                    <div class="flow-step-title">local-jsx 类型</div>
+                    <div class="flow-step-desc">调用 <code>load().call(onDone, context, args)</code>，返回 <code>React.ReactNode</code>。在 Ink 终端中渲染全屏 UI（如 /config、/doctor、/model 选择器）。通过 <code>onDone</code> 回调结束。</div>
+                </div>
+            </div>
+        </section>
+
+        <section id="interfaces" class="card">
+            <h2>关键类型与接口</h2>
+            <h3>Command 联合类型</h3>
+            <p><code>types/command.ts:175-206</code> — Command 是一个交叉类型，由 CommandBase 和三种命令变体之一组成：</p>
+            <pre><code>// types/command.ts:175-206
+export type CommandBase = {
+  availability?: CommandAvailability[]    // 认证要求: 'claude-ai' | 'console'
+  description: string
+  hasUserSpecifiedDescription?: boolean
+  isEnabled?: () => boolean               // 动态启用/禁用
+  isHidden?: boolean                      // 从 typeahead 隐藏
+  name: string
+  aliases?: string[]
+  argumentHint?: string                   // 参数提示（灰色显示）
+  whenToUse?: string                      // 详细使用场景
+  loadedFrom?: 'commands_DEPRECATED' | 'skills' | 'plugin'
+             | 'managed' | 'bundled' | 'mcp'
+  kind?: 'workflow'
+  immediate?: boolean                     // 绕过队列立即执行
+  isSensitive?: boolean                   // 参数从历史中脱敏
+}
+
+export type Command = CommandBase &
+  (PromptCommand | LocalCommand | LocalJSXCommand)</code></pre>
+
+            <h3>PromptCommand — 提示类命令</h3>
+            <pre><code>// types/command.ts:25-57
+export type PromptCommand = {
+  type: 'prompt'
+  progressMessage: string
+  contentLength: number
+  argNames?: string[]
+  allowedTools?: string[]
+  model?: string
+  source: SettingSource | 'builtin' | 'mcp' | 'plugin' | 'bundled'
+  context?: 'inline' | 'fork'            // inline=当前对话, fork=子代理
+  agent?: string                          // fork 时的代理类型
+  effort?: EffortValue
+  paths?: string[]                        // 文件路径匹配 glob
+  getPromptForCommand(args, context): Promise&lt;ContentBlockParam[]&gt;
+}</code></pre>
+
+            <h3>典型命令定义示例</h3>
+            <pre><code>// commands/compact/index.ts — local 类型
+const compact = {
+  type: 'local',
+  name: 'compact',
+  description: 'Clear conversation history but keep a summary...',
+  isEnabled: () => !isEnvTruthy(process.env.DISABLE_COMPACT),
+  supportsNonInteractive: true,
+  argumentHint: '&lt;optional custom summarization instructions&gt;',
+  load: () => import('./compact.js'),      // 惰性加载
+} satisfies Command
+
+// commands/help/index.ts — local-jsx 类型
+const help = {
+  type: 'local-jsx',
+  name: 'help',
+  description: 'Show help and available commands',
+  load: () => import('./help.js'),
+} satisfies Command
+
+// commands/review.ts — prompt 类型
+const review: Command = {
+  type: 'prompt',
+  name: 'review',
+  description: 'Review a pull request',
+  progressMessage: 'reviewing pull request',
+  contentLength: 0,
+  source: 'builtin',
+  async getPromptForCommand(args): Promise&lt;ContentBlockParam[]&gt; {
+    return [{ type: 'text', text: LOCAL_REVIEW_PROMPT(args) }]
+  },
+}</code></pre>
+
+            <h3>命令过滤函数</h3>
+            <pre><code>// commands.ts:417-443 — 认证过滤
+export function meetsAvailabilityRequirement(cmd: Command): boolean {
+  if (!cmd.availability) return true
+  for (const a of cmd.availability) {
+    switch (a) {
+      case 'claude-ai':
+        if (isClaudeAISubscriber()) return true; break
+      case 'console':
+        if (!isClaudeAISubscriber() && !isUsing3PServices()
+            && isFirstPartyAnthropicBaseUrl()) return true; break
+    }
+  }
+  return false
+}
+
+// commands.ts:672-676 — 桥接安全判定
+export function isBridgeSafeCommand(cmd: Command): boolean {
+  if (cmd.type === 'local-jsx') return false    // JSX 命令有 UI 副作用
+  if (cmd.type === 'prompt') return true         // prompt 类型天然安全
+  return BRIDGE_SAFE_COMMANDS.has(cmd)           // local 需白名单
+}</code></pre>
+        </section>
+
+        <section id="patterns" class="card">
+            <h2>设计模式与亮点</h2>
+
+            <h3>1. 惰性加载（Lazy Loading）</h3>
+            <p>每个命令的 <code>load()</code> 返回一个动态 <code>import()</code>。用户输入 <code>/doctor</code> 时才加载 <code>doctor.tsx</code>（含完整的诊断逻辑和 UI）。
+            这使得主入口 <code>commands.ts</code> 保持轻量——754 行管理 70+ 命令，每个命令的实现延迟到首次调用。</p>
+
+            <h3>2. 条件编译与特性开关</h3>
+            <p>命令系统大量使用 <code>feature('XXX')</code> 做 Dead Code Elimination。在构建时，未启用的特性分支被完全移除：</p>
+            <pre><code>// commands.ts:62-122 — 条件导入示例
+const bridge = feature('BRIDGE_MODE')
+  ? require('./commands/bridge/index.js').default : null
+const voiceCommand = feature('VOICE_MODE')
+  ? require('./commands/voice/index.js').default : null
+const workflowsCmd = feature('WORKFLOW_SCRIPTS')
+  ? require('./commands/workflows/index.js').default : null</code></pre>
+
+            <h3>3. Memoize 缓存策略</h3>
+            <p>命令列表通过 <code>lodash memoize</code> 按 <code>cwd</code> 缓存，避免每次按键触发 typeahead 时重新扫描文件系统。
+            <code>clearCommandMemoizationCaches()</code> 和 <code>clearCommandsCache()</code> 提供了精确和全局两种缓存失效机制。</p>
+
+            <h3>4. 双重安全过滤</h3>
+            <p>命令执行受两层安全机制保护：</p>
+            <ul>
+                <li><strong>Remote Mode 过滤</strong>：<code>REMOTE_SAFE_COMMANDS</code> 白名单限制 <code>--remote</code> 模式下可用的命令（仅 session、exit、clear、help 等）</li>
+                <li><strong>Bridge 安全</strong>：<code>isBridgeSafeCommand()</code> 防止移动端/Web 客户端触发本地 JSX 渲染命令</li>
+            </ul>
+
+            <h3>5. 技能分层架构</h3>
+            <p>命令系统实现了清晰的来源分层：</p>
+            <pre><code>// commands.ts:449-469 — loadAllCommands 合并顺序
+return [
+  ...bundledSkills,          // 打包技能（内置）
+  ...builtinPluginSkills,    // 内置插件技能
+  ...skillDirCommands,       // .claude/commands/ 用户自定义
+  ...workflowCommands,       // 工作流命令
+  ...pluginCommands,         // 插件命令
+  ...pluginSkills,           // 插件技能
+  ...COMMANDS(),             // 70+ 内置命令
+]</code></pre>
+        </section>
+
+        <section id="dev-guide" class="card developer">
+            <h2>开发者实践指南</h2>
+            <div class="info-box tip">新增命令只需 3 步：创建命令目录、定义 Command 对象、在 commands.ts 中注册。</div>
+
+            <h3>添加新命令</h3>
+            <p><strong>步骤 1</strong>：创建 <code>commands/mycommand/index.ts</code>：</p>
+            <pre><code>import type { Command } from '../../commands.js'
+
+const myCommand: Command = {
+  type: 'local-jsx',           // 或 'local' / 'prompt'
+  name: 'mycommand',
+  description: 'Do something useful',
+  load: () => import('./mycommand.js'),   // 惰性加载
+}
+export default myCommand</code></pre>
+
+            <p><strong>步骤 2</strong>：在 <code>commands.ts</code> 的 <code>COMMANDS()</code> 数组中添加：</p>
+            <pre><code>import myCommand from './commands/mycommand/index.js'
+// ...
+const COMMANDS = memoize((): Command[] => [
+  // ...existing commands
+  myCommand,
+])</code></pre>
+
+            <p><strong>步骤 3</strong>：实现 <code>commands/mycommand/mycommand.js</code>（以 local-jsx 为例）：</p>
+            <pre><code>import type { LocalJSXCommandCall } from '../../types/command.js'
+export const call: LocalJSXCommandCall = async (onDone, context, args) => {
+  // 处理逻辑...
+  onDone('操作完成', { shouldQuery: true })
+  return &lt;MyComponent /&gt;
+}</code></pre>
+
+            <h3>命令调试</h3>
+            <ul>
+                <li>使用 <code>--debug</code> 标志查看命令加载日志</li>
+                <li><code>clearCommandsCache()</code> 强制重新加载所有命令（插件变更后使用）</li>
+                <li><code>isHidden: true</code> 隐藏开发中的命令</li>
+                <li><code>isEnabled: () => isEnvTruthy('MY_FEATURE')</code> 通过环境变量控制</li>
+            </ul>
+        </section>
+
+        <section id="arch-guide" class="card architect">
+            <h2>架构师决策指南</h2>
+
+            <h3>命令数量与可维护性的权衡</h3>
+            <p>754 行管理 70+ 命令的设计刻意避免了过度抽象。每个命令只是一个满足 <code>Command</code> 类型的扁平对象，
+            用 <code>satisfies Command</code> 确保类型安全。这种 "注册表模式" 的优势是<strong>添加新命令零耦合</strong>——
+            只需在数组中追加一项，不会影响其他命令。劣势是随着命令增长，<code>commands.ts</code> 的导入区会变长，
+            但惰性加载确保了运行时不加载未使用的实现。</p>
+
+            <h3>三种命令类型的适用场景</h3>
+            <div class="two-col">
+                <div class="info-box info">
+                    <strong>prompt</strong>：适合将用户输入转换为模型提示的场景（如 <code>/review</code>、<code>/compact</code>）。
+                    不需要 UI，直接注入对话流。优点是可被模型自动调用（SkillTool），缺点是无法处理交互式流程。
+                </div>
+                <div class="info-box info">
+                    <strong>local-jsx</strong>：适合需要全屏交互式 UI 的场景（如 <code>/config</code> 选择器、<code>/doctor</code> 诊断面板）。
+                    通过 Ink 渲染 React 组件，功能最强大但不可在非交互模式使用。
+                </div>
+            </div>
+
+            <h3>性能考量</h3>
+            <p>命令系统的性能瓶颈在文件系统扫描（技能目录、插件命令）。通过以下策略优化：</p>
+            <ul>
+                <li><strong>Memoize 缓存</strong>：<code>loadAllCommands</code>、<code>getSkillToolCommands</code>、<code>getSlashCommandToolSkills</code> 均按 cwd 缓存</li>
+                <li><strong>并行加载</strong>：<code>Promise.all</code> 并行扫描技能目录、加载插件、加载工作流</li>
+                <li><strong>惰性 import</strong>：命令实现延迟到首次调用，避免启动时加载全部依赖</li>
+                <li><strong>增量失效</strong>：<code>clearCommandMemoizationCaches()</code> 只清内部缓存不清技能缓存，<code>clearCommandsCache()</code> 全量清理</li>
+            </ul>
+
+            <h3>安全边界设计</h3>
+            <p>命令系统的安全模型基于"默认拒绝"原则：</p>
+            <ul>
+                <li>remote 模式：只有 <code>REMOTE_SAFE_COMMANDS</code> 白名单中的命令可用</li>
+                <li>bridge 模式：JSX 命令一律禁止，prompt 命令一律放行，local 命令需显式白名单</li>
+                <li>模型调用：只有 <code>type === 'prompt'</code> 且 <code>disableModelInvocation !== true</code> 的命令可被 SkillTool 调用</li>
+            </ul>
+        </section>
+
+        <section id="command-table" class="card">
+            <h2>命令分类表</h2>
+            <table>
+                <thead><tr><th>分类</th><th>命令</th><th>类型</th><th>说明</th></tr></thead>
+                <tbody>
+                    <tr><td rowspan="4"><span class="tag tag-blue">会话管理</span></td><td><code>/compact</code></td><td>local</td><td>压缩上下文保留摘要</td></tr>
+                    <tr><td><code>/clear</code></td><td>local</td><td>清屏</td></tr>
+                    <tr><td><code>/resume</code></td><td>local-jsx</td><td>恢复历史会话</td></tr>
+                    <tr><td><code>/session</code></td><td>local-jsx</td><td>会话管理</td></tr>
+                    <tr><td rowspan="4"><span class="tag tag-green">模型与推理</span></td><td><code>/model</code></td><td>local-jsx</td><td>切换 AI 模型</td></tr>
+                    <tr><td><code>/fast</code></td><td>local-jsx</td><td>快速模式切换</td></tr>
+                    <tr><td><code>/effort</code></td><td>local-jsx</td><td>推理力度调节</td></tr>
+                    <tr><td><code>/cost</code></td><td>local</td><td>查看会话成本</td></tr>
+                    <tr><td rowspan="4"><span class="tag tag-purple">配置</span></td><td><code>/config</code></td><td>local-jsx</td><td>配置面板</td></tr>
+                    <tr><td><code>/permissions</code></td><td>local-jsx</td><td>权限管理</td></tr>
+                    <tr><td><code>/keybindings</code></td><td>local-jsx</td><td>快捷键配置</td></tr>
+                    <tr><td><code>/theme</code></td><td>local-jsx</td><td>主题切换</td></tr>
+                    <tr><td rowspan="3"><span class="tag tag-orange">开发工具</span></td><td><code>/review</code></td><td>prompt</td><td>PR 代码审查</td></tr>
+                    <tr><td><code>/diff</code></td><td>local-jsx</td><td>查看代码变更</td></tr>
+                    <tr><td><code>/doctor</code></td><td>local-jsx</td><td>安装诊断</td></tr>
+                    <tr><td rowspan="3"><span class="tag tag-cyan">扩展</span></td><td><code>/mcp</code></td><td>local-jsx</td><td>MCP 服务器管理</td></tr>
+                    <tr><td><code>/skills</code></td><td>local-jsx</td><td>技能列表</td></tr>
+                    <tr><td><code>/plugin</code></td><td>local-jsx</td><td>插件管理</td></tr>
+                    <tr><td rowspan="3"><span class="tag tag-red">安全与隐私</span></td><td><code>/hooks</code></td><td>local-jsx</td><td>Hook 配置查看</td></tr>
+                    <tr><td><code>/memory</code></td><td>local-jsx</td><td>记忆文件编辑</td></tr>
+                    <tr><td><code>/plan</code></td><td>local-jsx</td><td>计划模式</td></tr>
+                </tbody>
+            </table>
+        </section>
+
+        <!-- ========== 可视化处理拓扑图 ========== -->
+        <section id="topology" class="card">
+            <h2><span class="icon" style="background:rgba(139,92,246,.15);color:var(--purple);">◈</span> 可视化处理拓扑图</h2>
+
+            <!-- Phase 1: 注册与加载 -->
+            <div class="fc">
+                <div class="fc-center">
+                    <div class="fn n-start">用户输入 /command<span class="sub">REPL stdin → 解析前缀 /</span></div>
+                    <div class="vc s24"></div>
+
+                    <div class="fn n-process w">1. 静态命令注册 — COMMANDS() 闭包<span class="sub">commands.ts:258 — memoize(() =&gt; Command[])</span><span class="sub">约 80 个内置命令顶层 import，按 feature flag 条件展开</span></div>
+                    <div class="vc s20"></div>
+
+                    <div class="fn n-check ww">2. 多源并行加载 — loadAllCommands()<span class="sub">commands.ts:449 — memoize(async) 并行调用</span></div>
+                    <div class="vc s16"></div>
+
+                    <div class="fc-row" style="gap:12px;">
+                        <div class="fn n-process" style="max-width:150px;">getSkills()<span class="sub">技能目录 + 插件技能</span></div>
+                        <div class="fn n-process" style="max-width:150px;">getPluginCommands()<span class="sub">插件注册命令</span></div>
+                        <div class="fn n-process" style="max-width:150px;">getWorkflowCommands()<span class="sub">工作流命令</span></div>
+                    </div>
+                    <div style="font-size:10px;color:var(--text-muted);margin:6px 0;text-align:center;">Promise.all 并行加载，合并为统一数组 ↓</div>
+                    <div class="vc s16"></div>
+
+                    <div class="fn n-process w">3. 动态技能注入 — getCommands()<span class="sub">commands.ts:476 — getDynamicSkills() 运行时发现</span><span class="sub">Set 去重 → 插入到内置命令之前（L504-516）</span></div>
+                </div>
+            </div>
+
+            <!-- Phase 2: 门控与过滤 -->
+            <div class="fc">
+                <div class="fc-center">
+                    <div class="fn n-start">已加载命令列表<span class="sub">~100+ 条命令（内置 + 插件 + 动态）</span></div>
+                    <div class="vc s24"></div>
+
+                    <div class="fn n-check ww">4. 可用性门控 — meetsAvailabilityRequirement()<span class="sub">commands.ts:417 — 每次调用重新评估，不缓存</span><span class="sub">auth state 可在会话中变化（如 /login 后）</span></div>
+                    <div class="vc s16"></div>
+
+                    <div class="fc-row">
+                        <div class="fn n-process w" style="max-width:260px;">遍历 cmd.availability<span class="sub">claude-ai / console / vertex / bedrock</span></div>
+                        <div class="hc-arrow s60 green"><span class="hc-label" style="color:var(--green);">通过</span></div>
+                        <div class="fn n-allow">命令可用</div>
+                    </div>
+                    <div class="vc s16"><span class="vc-label">认证不符 ↓</span></div>
+                    <div class="fn n-deny">命令隐藏<span class="sub">不显示在补全列表中</span></div>
+                    <div class="vc s24"></div>
+
+                    <div class="fn n-check w">5. 命令路由 — findCommand() / getCommand()<span class="sub">commands.ts:688-719 — 按 name + aliases 查找</span></div>
+                    <div class="vc s20"></div>
+
+                    <div class="fc-row">
+                        <div class="fn n-process w" style="max-width:260px;">远程模式过滤<span class="sub">commands.ts:684 — REMOTE_SAFE_COMMANDS</span></div>
+                        <div class="hc-arrow s60 red"><span class="hc-label" style="color:var(--red);">远程会话</span></div>
+                        <div class="fn n-deny">不安全命令过滤</div>
+                    </div>
+                    <div class="vc s16"><span class="vc-label">通过 ↓</span></div>
+
+                    <div class="fn n-check w">6. isCommandEnabled() 检查<span class="sub">启用/禁用状态 → 最终可用命令</span></div>
+                </div>
+            </div>
+
+            <!-- Phase 3: 类型分发 -->
+            <div class="fc">
+                <div class="fc-center">
+                    <div class="fn n-start">已路由命令<span class="sub">Command 对象，type 字段判别</span></div>
+                    <div class="vc s24"></div>
+
+                    <div class="fn n-check ww">7. 类型分发 — Command.type 判断<span class="sub">types/command.ts:205 — CommandBase &amp; (Prompt | Local | LocalJSX)</span></div>
+                    <div class="vc s20"></div>
+
+                    <div class="fc-row" style="gap:24px;">
+                        <div style="display:flex;flex-direction:column;align-items:center;gap:0;">
+                            <div class="fn n-auto w" style="border-color:var(--green);color:var(--green);background:rgba(34,197,94,.08);">type: prompt<span class="sub">PromptCommand</span></div>
+                            <div class="vc s16" style="background:var(--green);"></div>
+                            <div class="fn n-process w" style="max-width:180px;">getPromptForCommand()<span class="sub">生成文本注入对话流</span><span class="sub">commands.ts — prompt 类型</span></div>
+                            <div class="vc s16" style="background:var(--green);"></div>
+                            <div class="fn n-allow">文本注入到消息流</div>
+                        </div>
+                        <div style="display:flex;flex-direction:column;align-items:center;gap:0;">
+                            <div class="fn n-auto w">type: local<span class="sub">LocalCommand</span></div>
+                            <div class="vc s16"></div>
+                            <div class="fn n-process w" style="max-width:180px;">call(args, context)<span class="sub">同步执行返回结果</span><span class="sub">Promise&lt;LocalCommandResult&gt;</span></div>
+                            <div class="vc s16"></div>
+                            <div class="fn n-allow">结果直接显示</div>
+                        </div>
+                        <div style="display:flex;flex-direction:column;align-items:center;gap:0;">
+                            <div class="fn n-auto w" style="border-color:var(--purple);color:var(--purple);background:rgba(139,92,246,.08);">type: local-jsx<span class="sub">LocalJSXCommand</span></div>
+                            <div class="vc s16" style="background:var(--purple);"></div>
+                            <div class="fn n-process w" style="max-width:180px;">call(args, ctx, onDone)<span class="sub">渲染 Ink 交互组件</span><span class="sub">React 组件 → Reconciler</span></div>
+                            <div class="vc s16" style="background:var(--purple);"></div>
+                            <div class="fn n-allow">交互式 UI 呈现</div>
+                        </div>
+                    </div>
+
+                    <div class="vc s24"></div>
+
+                    <!-- 缓存失效 -->
+                    <div class="loop-box" style="border-color:var(--amber);background:rgba(245,158,11,.04);max-width:560px;">
+                        <div class="loop-title" style="color:var(--amber);">缓存失效机制 — clearCommandMemoizationCaches()</div>
+                        <div class="loop-text">
+                            <strong>commands.ts:523</strong> — 清除三层 memoize 缓存：<br>
+                            ① loadAllCommands 缓存（命令列表）<br>
+                            ② getSkillToolCommands 缓存（技能工具）<br>
+                            ③ getSlashCommandToolSkills 缓存（斜杠命令技能）<br>
+                            ④ getSkillIndex 外层缓存需 <code>clearSkillIndexCache()</code> 显式清除<br>
+                            <span style="color:var(--text-muted);font-size:10px;">触发时机：插件变更、技能文件修改、/login 等认证状态变更</span>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <div class="info-box info"><strong>三层架构</strong>：静态注册（零 I/O，模块加载时完成）→ 动态发现（memoize 延迟执行，首次调用时磁盘扫描）→ 可用性检查（不缓存，每次重新评估认证状态）。类型系统通过判别联合（discriminated union）在编译期约束三种执行路径的行为。</div>
+        </section>
+
+        <section id="core-flow" class="card">
+            <h2><span class="icon" style="background:rgba(6,182,212,.15);color:var(--cyan);">⇉</span> 核心处理流程详解</h2>
+            <p>命令系统是 Claude Code 用户交互的核心入口。当用户在 REPL 中输入 <code>/command</code> 时，系统需要从多个来源加载命令定义、执行可用性过滤、路由到正确的处理器，最终将结果返回给用户。整个流程涉及静态注册、动态发现、权限门控和类型分发四个关键阶段。</p>
+            <div class="flow-chart vertical">
+                <div class="flow-step highlight">
+                    <div class="flow-step-title">1. 静态命令注册 — COMMANDS() 闭包</div>
+                    <div class="flow-step-desc">在 <code>commands.ts:258</code> 通过 <code>memoize((): Command[] => [...])</code> 延迟构建命令数组。约 80 个内置命令通过顶层 import 静态引入，按条件展开（feature flag、环境变量），形成完整的命令注册表。内部命令通过 <code>INTERNAL_ONLY_COMMANDS</code>（L225）在非 Ant 环境下过滤。</div>
+                </div>
+                <div class="flow-arrow">↓</div>
+                <div class="flow-step">
+                    <div class="flow-step-title">2. 多源并行加载 — loadAllCommands()</div>
+                    <div class="flow-step-desc">在 <code>commands.ts:449</code> 通过 <code>memoize(async)</code> 并行加载四种来源：<code>getSkills()</code>（技能目录 + 插件技能 + 内置技能 + 内置插件技能）、<code>getPluginCommands()</code>（插件命令）、<code>getWorkflowCommands()</code>（工作流命令）。所有来源合并为统一数组。</div>
+                </div>
+                <div class="flow-arrow">↓</div>
+                <div class="flow-step highlight">
+                    <div class="flow-step-title">3. 可用性门控 — meetsAvailabilityRequirement()</div>
+                    <div class="flow-step-desc">在 <code>commands.ts:417</code> 对每个命令执行认证/提供商过滤。<code>availability</code> 字段声明命令所需的认证环境（claude-ai / console / vertex / bedrock）。每次调用 <code>getCommands()</code> 重新评估，确保 <code>/login</code> 等操作后状态立即生效。此检查在 <code>isCommandEnabled()</code> 之前执行。</div>
+                </div>
+                <div class="flow-arrow">↓</div>
+                <div class="flow-step">
+                    <div class="flow-step-title">4. 动态技能注入 — getCommands()</div>
+                    <div class="flow-step-desc">在 <code>commands.ts:476</code> 获取所有已加载命令后，调用 <code>getDynamicSkills()</code> 获取运行时发现的技能。通过 Set 去重确保动态技能不与已有命令冲突，并按优先级插入到内置命令之前（L504-516）。</div>
+                </div>
+                <div class="flow-arrow">↓</div>
+                <div class="flow-step">
+                    <div class="flow-step-title">5. 命令路由 — findCommand() / getCommand()</div>
+                    <div class="flow-step-desc">在 <code>commands.ts:688-719</code> 按名称查找命令。<code>findCommand</code> 返回 <code>undefined</code>，<code>getCommand</code> 在未找到时抛出错误。查找同时匹配 <code>name</code> 和 <code>aliases</code>（通过 <code>getCommandName</code>，types/command.ts:209）。</div>
+                </div>
+                <div class="flow-arrow">↓</div>
+                <div class="flow-step highlight">
+                    <div class="flow-step-title">6. 类型分发 — Command.type 判断</div>
+                    <div class="flow-step-desc">根据 <code>Command.type</code>（types/command.ts:205）分为三种执行路径：<code>prompt</code>（生成提示词文本注入对话流）、<code>local</code>（同步执行返回结果）、<code>local-jsx</code>（渲染 Ink 交互组件）。PromptCommand 通过 <code>getPromptForCommand()</code> 获取文本内容。</div>
+                </div>
+                <div class="flow-arrow">↓</div>
+                <div class="flow-step">
+                    <div class="flow-step-title">7. 远程模式过滤 — filterCommandsForRemoteMode()</div>
+                    <div class="flow-step-desc">在 <code>commands.ts:684</code> 和 <code>REMOTE_SAFE_COMMANDS</code>（L619）确保远程会话（--remote / Direct Connect）只暴露安全的命令子集。<code>isBridgeSafeCommand</code>（L672）针对 Bridge 模式做额外限制。</div>
+                </div>
+                <div class="flow-arrow">↓</div>
+                <div class="flow-step">
+                    <div class="flow-step-title">8. 缓存失效 — clearCommandMemoizationCaches()</div>
+                    <div class="flow-step-desc">在 <code>commands.ts:523</code> 清除 <code>loadAllCommands</code>、<code>getSkillToolCommands</code>、<code>getSlashCommandToolSkills</code> 三层 memoize 缓存。注意 <code>getSkillIndex</code> 是独立的外层缓存，需通过 <code>clearSkillIndexCache()</code> 显式清除（L531 注释解释了 lodash memoize 的穿透问题）。</div>
+                </div>
+            </div>
+            <div class="info-box info">命令系统采用"静态注册 + 动态发现"双层架构。静态注册在模块加载时完成 import（零 I/O），动态发现通过 memoize 延迟到首次调用时执行磁盘扫描。这种分层设计确保启动速度快（import 无 I/O），同时支持运行时动态扩展。可用性检查不缓存，因为认证状态可能在会话中变化（如 <code>/login</code>）。</div>
+        </section>
+        <section id="design-essence" class="card">
+            <h2><span class="icon" style="background:rgba(245,158,11,.15);color:var(--amber);">★</span> 设计精华</h2>
+
+            <h3>1. 三级命令类型系统的精妙分离</h3>
+            <p>Command 联合类型（types/command.ts:205）将命令分为 <code>prompt</code>、<code>local</code>、<code>local-jsx</code> 三种执行模式。这种分类不是随意的——它精确对应了三种不同的用户交互需求：文本注入（不需要 UI）、同步执行（需要结果但不需要交互）、交互组件（需要完整的 React 渲染能力）。每种类型有独立的 <code>call</code> 签名和 <code>load()</code> 懒加载机制。</p>
+            <div class="component-box">
+                <div class="name">联合类型分发</div>
+                <div class="desc">Command 通过交叉类型 <code>CommandBase & (PromptCommand | LocalCommand | LocalJSXCommand)</code> 实现，type 字段作为判别式（discriminated union）</div>
+                <pre><code>// types/command.ts:205-206
+export type Command = CommandBase &
+  (PromptCommand | LocalCommand | LocalJSXCommand)
+
+// 每种类型有独立的 call 签名
+type LocalCommandCall = (args, context) => Promise&lt;LocalCommandResult&gt;
+type LocalJSXCommandCall = (args, context, onDone) =&gt; Promise&lt;void&gt;</code></pre>
+            </div>
+            <div class="info-box tip">这种设计的核心洞察：终端应用中"命令"的概念比 Web 应用复杂得多。一条命令可能是纯文本转换、可能是阻塞操作、也可能是完整的交互式 UI。通过类型系统而非 if-else 来约束行为，让编译器在编译期捕获错误（例如给 prompt 命令传递 onDone 回调）。</div>
+
+            <h3>2. Availability 门控的实时响应设计</h3>
+            <p><code>meetsAvailabilityRequirement()</code>（commands.ts:417）故意不做缓存。注释明确说明："auth state can change mid-session (e.g. after /login), so this must be re-evaluated on every getCommands() call"。这意味着每次 REPL 渲染命令列表时，都会重新检查认证状态。代价是每次调用遍历命令数组的 O(n) 开销，收益是 <code>/login</code> 后命令列表立即更新。</p>
+            <div class="component-box">
+                <div class="name">认证感知的命令过滤</div>
+                <div class="desc">availability 字段声明命令的认证依赖，运行时检查当前用户状态</div>
+                <pre><code>// commands.ts:417-443
+export function meetsAvailabilityRequirement(cmd: Command): boolean {
+  if (!cmd.availability) return true  // 无声明 = 全局可用
+  for (const a of cmd.availability) {
+    switch (a) {
+      case 'claude-ai':
+        if (isClaudeAISubscriber()) return true
+        break
+      case 'console':
+        // 直接 API 用户（排除 3P 和 claude.ai）
+        if (!isClaudeAISubscriber() &&
+            !isUsing3PServices() &&
+            isFirstPartyAnthropicBaseUrl()) return true
+        break
+      // ... exhaustive check
+    }
+  }
+  return false
+}</code></pre>
+            </div>
+            <div class="info-box tip">这个设计选择反映了 CLI 工具的特殊约束：认证状态在会话中可变（用户可以 <code>/login</code> 或 <code>/logout</code>），但命令列表的渲染频率极高（每次按键都可能触发）。设计者选择了正确性优先、性能由 memoize 上层保证的策略。</div>
+
+            <h3>3. 动态技能的优先级插入算法</h3>
+            <p>在 <code>getCommands()</code>（commands.ts:504-516）中，动态发现的技能需要插入到已有命令列表中。插入位置不是随意选择的——动态技能被插入到"插件技能之后、内置命令之前"。这确保了：内置命令优先级最高（同名冲突时内置胜出），插件技能次之，动态技能最低。</p>
+            <div class="component-box">
+                <div class="name">有序插入</div>
+                <div class="desc">找到第一个内置命令的索引，在其前面插入动态技能</div>
+                <pre><code>// commands.ts:504-516
+const builtInNames = new Set(COMMANDS().map(c =&gt; c.name))
+const insertIndex = baseCommands.findIndex(c =&gt; builtInNames.has(c.name))
+return [
+  ...baseCommands.slice(0, insertIndex),  // 技能 + 插件命令
+  ...uniqueDynamicSkills,                  // 动态技能
+  ...baseCommands.slice(insertIndex),      // 内置命令（最高优先级）
+]</code></pre>
+            </div>
+
+            <h3>4. 三层缓存与精确失效</h3>
+            <p><code>clearCommandMemoizationCaches()</code>（commands.ts:523）需要清除三个独立的 memoize 缓存：<code>loadAllCommands</code>、<code>getSkillToolCommands</code>、<code>getSlashCommandToolSkills</code>。但更深层的问题是 <code>getSkillIndex</code>（skillSearch/localSearch.ts）是一个独立的外层缓存，它缓存了内层函数的结果。L527-531 的注释详细解释了 lodash memoize 的穿透陷阱：清除内层缓存后，外层仍返回旧结果。</p>
+            <div class="info-box tip">这是缓存分层中的经典难题：当外层缓存依赖内层缓存的结果时，仅清除内层是无效的。Claude Code 的解决方案是显式调用 <code>clearSkillIndexCache()</code>，而非依赖缓存穿透。这种显式失效策略比自动失效更容易理解和调试。</div>
+
+            <h3>5. 内部命令的编译时过滤</h3>
+            <p><code>INTERNAL_ONLY_COMMANDS</code>（commands.ts:225）数组收集所有仅限内部使用的命令。在 <code>COMMANDS()</code> 的末尾（L343-345），通过 <code>process.env.USER_TYPE === 'ant' && !process.env.IS_DEMO</code> 条件展开。这意味着外部构建完全不含这些命令——它们在编译时就被 tree-shaking 移除了，而非运行时隐藏。</p>
+            <div class="component-box">
+                <div class="name">编译时排除</div>
+                <div class="desc">内部命令通过条件展开和 feature flag 在编译时完全排除</div>
+                <pre><code>// commands.ts:225-254
+export const INTERNAL_ONLY_COMMANDS = [
+  backfillSessions, breakCache, bughunter, commit,
+  commitPushPr, ctx_viz, goodClaude, // ...
+].filter(Boolean)
+
+// commands.ts:343-345 — 条件展开
+...(process.env.USER_TYPE === 'ant' && !process.env.IS_DEMO
+  ? INTERNAL_ONLY_COMMANDS
+  : [])</code></pre>
+            </div>
+            <div class="info-box tip">安全敏感的内部命令不应该是"隐藏但存在"的——它们应该从产物中完全移除。通过展开运算符 + 环境变量检查 + tree-shaking 的组合，确保外部用户无法通过任何方式访问这些命令。这比运行时权限检查更安全，因为即使绕过了前端过滤，命令处理函数也不在代码中。</div>
+        </section>
+
+        <section id="agent-practice" class="card">
+            <h2><span class="icon" style="background:rgba(34,197,94,.15);color:var(--green);">◈</span> Agent 实践借鉴 — 客服 Agent 命令交互设计</h2>
+
+            <div class="info-box info">本节回答：如果你在设计一个客服 Agent 助手，坐席在面板中输入 "/" 快捷命令来操作，Claude Code 的命令系统有哪些值得抄、哪些不需要抄？</div>
+
+            <h3>1. 场景映射：客服坐席的 "/" 命令</h3>
+            <p>想象一个客服坐席的日常工作面板。坐席不想点菜单、不想记快捷键，最自然的操作是输入 "/" 触发命令：</p>
+            <div class="two-col">
+                <div class="component-box">
+                    <div class="name">坐席日常命令</div>
+                    <div class="desc">按交互复杂度分三级</div>
+                    <pre><code>// 客服命令的真实分级
+/问候   → 自动插入"您好，请问有什么可以帮您？"
+         纯文本注入，无 UI，无副作用 → 模板级
+
+/查订单 ORDER-12345 → 调用订单系统，直接返回结果
+         同步查询，有网络 IO，不需要表单 → 查询级
+
+/退单   → 弹出退单表单：选择原因 + 填写金额 + 上传凭证
+         需要交互式 UI，多步操作 → 表单级
+
+/查物流 WAYBILL-67890 → 调用物流 API，返回时间线
+         同步查询 → 查询级
+
+/记录   → 将本次服务摘要写入客户档案
+         同步操作 → 查询级</code></pre>
+                </div>
+                <div class="component-box">
+                    <div class="name">CC 借鉴点映射</div>
+                    <div class="desc">CC 的三级命令 → 客服的三级命令</div>
+                    <pre><code>// Claude Code              →  客服 Agent
+// ──────────────────────────────────────────
+type: "prompt"     文本注入  →  模板级：/问候、/结束语
+type: "local"      同步执行  →  查询级：/查订单、/查物流
+type: "local-jsx"  交互 UI   →  表单级：/退单、/发券
+
+// CC 的懒加载                       →  客服也按需加载
+// CC 的统一 Command 联合类型        →  客服统一注册调度
+// CC 的命令自动补全                →  坐席输入 "/" 弹候选</code></pre>
+                </div>
+            </div>
+
+            <h3>2. 借鉴 CC + 客服改造：伪代码实现</h3>
+            <p>以下是客服命令系统的核心实现，借鉴 CC 的三级命令分离、懒加载和统一调度，但去掉终端相关的 React Reconciler：</p>
+            <div class="component-box">
+                <div class="name">客服三级命令类型定义</div>
+                <div class="desc">判别联合类型，编译期约束每种命令只能做自己该做的事</div>
+                <pre><code>// 客服命令的三级类型 — 借鉴 CC 的 PromptCommand/LocalCommand/LocalJSXCommand
+type CSCommand = TemplateCommand | QueryCommand | FormCommand
+
+// 模板级：纯文本注入，无 UI，无副作用
+interface TemplateCommand {
+  type: "template"
+  name: string                          // "/问候"
+  description: string                   // 自动补全的说明
+  transformInput: (args: string) =&gt; string  // 模板渲染
+}
+
+// 查询级：同步调用后端，直接返回结果
+interface QueryCommand {
+  type: "query"
+  name: string                          // "/查订单"
+  description: string
+  handler: (args: string) =&gt; Promise&lt;QueryResult&gt;
+  loadingText: string                   // "正在查询订单..."
+}
+
+// 表单级：需要弹表单收集参数
+interface FormCommand {
+  type: "form"
+  name: string                          // "/退单"
+  description: string
+  schema: FormSchema                    // 表单字段定义
+  onSubmit: (formData: Record&lt;string,any&gt;) =&gt; Promise&lt;FormResult&gt;
+}
+
+// 表单 Schema 示例 — /退单
+const refundFormSchema: FormSchema = {
+  fields: [
+    { key: "reason", label: "退款原因", type: "select",
+      options: ["质量问题","七天无理由","发错货","其他"] },
+    { key: "amount", label: "退款金额", type: "number", required: true },
+    { key: "evidence", label: "凭证图片", type: "fileUpload", required: false },
+  ]
+}</code></pre>
+            </div>
+
+            <div class="component-box">
+                <div class="name">命令调度器：根据类型走不同执行路径</div>
+                <div class="desc">借鉴 CC 的 dispatchCommand，但用 Web 表单替代终端 React</div>
+                <pre><code>// 统一调度器 — 借鉴 CC 的 switch(cmd.type) 模式
+async function dispatchCSCommand(
+  cmd: CSCommand, args: string, ctx: CSCommandContext
+) {
+  switch (cmd.type) {
+    case "template":
+      // 模板注入：直接插入到坐席的输入框或消息区
+      const text = cmd.transformInput(args)
+      ctx.insertToMessageArea(text)      // 不需要弹 UI
+      break
+
+    case "query":
+      // 同步查询：显示 loading，调用后端，直接展示结果
+      ctx.showLoading(cmd.loadingText)
+      try {
+        const result = await cmd.handler(args)
+        ctx.displayResult(result)        // 查订单→卡片，查物流→时间线
+      } finally {
+        ctx.hideLoading()
+      }
+      break
+
+    case "form":
+      // 弹表单：Web 框架渲染表单，收集参数后提交
+      ctx.openFormDialog({
+        title: cmd.name,
+        schema: cmd.schema,
+        onSubmit: async (formData) =&gt; {
+          const result = await cmd.onSubmit(formData)
+          ctx.displayResult(result)
+        }
+      })
+      break
+  }
+}</code></pre>
+            </div>
+
+            <div class="component-box">
+                <div class="name">懒加载 + 命令自动补全</div>
+                <div class="desc">不常用命令不占内存，坐席输入 "/" 时弹出候选列表</div>
+                <pre><code>// 懒加载注册表 — 借鉴 CC 的 CommandDescriptor
+const csCommandRegistry = new Map&lt;string, CSCommandDescriptor&gt;()
+
+function registerCSCommand(name: string, loader: () =&gt; Promise&lt;CSCommand&gt;) {
+  csCommandRegistry.set(name, {
+    loaded: false,
+    loader,                // 工厂函数，首次调用时执行
+    instance: null,
+    // 自动补全信息在注册时就提供，不需要加载实现
+    autoComplete: { name, description: loader.description }
+  })
+}
+
+// 首次调用时才加载实现
+async function getCSCommand(name: string): Promise&lt;CSCommand&gt; {
+  const desc = csCommandRegistry.get(name)
+  if (!desc.loaded) {
+    desc.instance = await desc.loader()
+    desc.loaded = true
+  }
+  return desc.instance
+}
+
+// 自动补全 — 坐席输入 "/" 时触发
+function getAutoCompleteList(): AutoCompleteItem[] {
+  return Array.from(csCommandRegistry.values())
+    .map(desc =&gt; desc.autoComplete)     // 只取 name + description
+    .filter(cmd =&gt; isAvailable(cmd.name))  // 权限过滤
+}</code></pre>
+            </div>
+
+            <h3>3. 落地清单：必须抄 vs 不需要抄</h3>
+            <div class="two-col">
+                <div class="info-box tip">
+                    <strong>必须抄：</strong>
+                    <ul>
+                        <li><strong>三级命令分离</strong> — 模板/查询/表单，编译期约束行为，防止模板命令产生副作用</li>
+                        <li><strong>懒加载注册</strong> — 注册时只存工厂函数和描述，首次调用才加载实现，冷启动快</li>
+                        <li><strong>统一注册 + 调度</strong> — 不同类型的命令统一注册到一个注册表，调度器按 type 字段分发</li>
+                        <li><strong>自动补全</strong> — 注册时提供 name + description，输入 "/" 时弹出候选，不需要加载实现</li>
+                    </ul>
+                </div>
+                <div class="info-box warning">
+                    <strong>不需要抄：</strong>
+                    <ul>
+                        <li><strong>local-jsx 的 React Reconciler</strong> — 客服面板是 Web 应用，直接用 FormDialog 组件，不需要终端 Ink reconciler</li>
+                        <li><strong>缓存失效三层联动</strong> — 客服命令数量通常不到 30，简单的 Map 清除就够</li>
+                        <li><strong>内部/外部命令隔离</strong> — 客服场景没有"内部 build"概念，所有坐席用同一套命令</li>
+                    </ul>
+                </div>
+            </div>
+
+            <h3>4. 常见坑</h3>
+            <div class="info-box warning">
+                <strong>坑 1：查询类命令超时没有 loading 反馈。</strong>坐席点了 /查订单 后页面没有任何反应，以为是卡死了。解决方案：QueryCommand 必须有 <code>loadingText</code> 字段，调度器在调用 handler 前先显示 loading，finally 中隐藏。
+            </div>
+            <div class="info-box warning">
+                <strong>坑 2：模板命令偷偷加了副作用。</strong>有人给 /问候 命令加了"同时记录客户到访"的逻辑，结果坐席只是想插入一句问候语却触发了一次数据库写入。解决方案：严格遵循三级分离——模板级命令只能做文本变换，禁止网络请求和状态修改。
+            </div>
+            <div class="info-box warning">
+                <strong>坑 3：所有命令在面板初始化时全部加载。</strong>30+ 命令全部 import，首屏加载从 500ms 涨到 3s。解决方案：注册时只存工厂函数和自动补全元数据，首次调用时才动态 import 实现。
+            </div>
+            <div class="info-box warning">
+                <strong>坑 4：自动补全列表包含无权限的命令。</strong>坐席看到 /退单 命令，点击后提示"无权限"，体验很差。解决方案：自动补全生成时就根据坐席角色过滤，不是在执行时才检查。
+            </div>
+        </section>
+        <section id="code-index" class="card">
+            <h2>代码索引</h2>
+            <table>
+                <thead><tr><th>文件</th><th>行数</th><th>说明</th></tr></thead>
+                <tbody>
+                    <tr><td><code>commands.ts</code></td><td>~754</td><td>命令注册中心：导入、注册、过滤、路由</td></tr>
+                    <tr><td><code>types/command.ts</code></td><td>~217</td><td>Command 联合类型定义、PromptCommand/LocalCommand/LocalJSXCommand</td></tr>
+                    <tr><td><code>commands/help/</code></td><td>~10</td><td>帮助命令（local-jsx）</td></tr>
+                    <tr><td><code>commands/config/</code></td><td>~10</td><td>配置面板命令（local-jsx），别名 settings</td></tr>
+                    <tr><td><code>commands/compact/</code></td><td>~15</td><td>上下文压缩命令（local），支持非交互</td></tr>
+                    <tr><td><code>commands/model/</code></td><td>~16</td><td>模型选择器（local-jsx），dynamic description</td></tr>
+                    <tr><td><code>commands/fast/</code></td><td>~24</td><td>快速模式（local-jsx），带 availability 门控</td></tr>
+                    <tr><td><code>commands/doctor/</code></td><td>~12</td><td>安装诊断面板（local-jsx）</td></tr>
+                    <tr><td><code>commands/review.ts</code></td><td>~58</td><td>PR 审查命令（prompt），含 ultrareview 变体</td></tr>
+                    <tr><td><code>commands/mcp/</code></td><td>~12</td><td>MCP 服务器管理（local-jsx），immediate 模式</td></tr>
+                    <tr><td><code>commands/permissions/</code></td><td>~10</td><td>权限管理（local-jsx），别名 allowed-tools</td></tr>
+                    <tr><td><code>skills/loadSkillsDir.ts</code></td><td>~200</td><td>技能目录扫描与命令加载</td></tr>
+                    <tr><td><code>utils/plugins/loadPluginCommands.ts</code></td><td>~150</td><td>插件命令加载</td></tr>
+                </tbody>
+            </table>
+        </section>
+        <footer style="text-align:center; padding:32px 0 20px; margin-top:48px; border-top:1px solid var(--border); color:var(--text-secondary); font-size:13px; line-height:2;">
+        <div style="margin-bottom:4px;">⚠️ 免责声明</div>
+        本文仅用于技术学习和架构分析目的。源码分析基于公开泄漏的代码，所有商标和版权归 <a href="https://www.anthropic.com" style="color:var(--indigo);">Anthropic</a> 所有。未经授权不得用于商业用途。
+    </footer>
+    </main>
+</body>
+</html>

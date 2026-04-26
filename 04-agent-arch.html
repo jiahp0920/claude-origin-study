@@ -1,0 +1,927 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Agent 架构 - Claude Code 源码分析</title>
+    <link rel="stylesheet" href="shared/styles.css">
+</head>
+<body>
+    <nav class="sidebar">
+<div class="sidebar-header"><div class="logo">CC</div><div><div class="sidebar-title">Claude Code</div><div class="sidebar-subtitle">源码深度分析</div></div></div>
+        <div class="nav-section-title">总览</div>
+        <a href="reading-guide.html" class="nav-link">阅读指南</a>
+        <a href="index.html" class="nav-link">架构全景</a>
+        <a href="dependency-map.html" class="nav-link">模块依赖图</a>
+        <a href="vertical-agent-guide.html" class="nav-link">垂直 Agent 设计指南</a>
+<div class="nav-section-title">核心流程</div>
+<a href="00-startup.html" class="nav-link">启动链路</a>
+<a href="01-query-loop.html" class="nav-link">Query 循环</a>
+<a href="flows/query-lifecycle.html" class="nav-link">查询生命周期</a>
+<div class="nav-section-title">核心机制</div>
+<a href="02-tool-dispatch.html" class="nav-link">工具调度</a>
+<a href="03-permissions.html" class="nav-link">权限系统</a>
+<a href="03b-security-hardening.html" class="nav-link">风控与安全加固</a>
+<a href="04-agent-arch.html" class="nav-link active">Agent 架构</a>
+<a href="11-hooks.html" class="nav-link">Hook 机制</a>
+<div class="nav-section-title">扩展体系</div>
+<a href="05-mcp.html" class="nav-link">MCP 体系</a>
+<a href="07-plugins.html" class="nav-link">插件系统</a>
+<a href="08-commands.html" class="nav-link">命令系统</a>
+<div class="nav-section-title">数据与服务</div>
+<a href="06-context-mgmt.html" class="nav-link">上下文管理</a>
+<a href="10-services.html" class="nav-link">服务层</a>
+<a href="15-cost-limits.html" class="nav-link">成本与限流</a>
+<div class="nav-section-title">界面与配置</div>
+<a href="09-ui.html" class="nav-link">UI 交互层</a>
+<a href="13-config.html" class="nav-link">配置与迁移</a>
+<div class="nav-section-title">外围能力</div>
+<a href="12-external.html" class="nav-link">外部集成</a>
+<a href="14-native.html" class="nav-link">Native 能力</a>
+<div class="nav-section-title">流程图</div>
+<a href="flows/tool-execution.html" class="nav-link">工具执行流程</a>
+<a href="flows/agent-collab.html" class="nav-link">Agent 协作流程</a>
+</nav>
+    <main class="content">
+        <header class="page-header">
+            <span class="breadcrumb"><a href="index.html">源码分析</a></span>
+            <h1>Agent 架构</h1>
+            <p class="subtitle">5 种任务类型、AgentTool 子 agent 调度、SendMessage 多 agent 通信——Claude Code 的多 agent 协作体系</p>
+        </header>
+
+        <nav class="page-toc">
+    <div class="page-toc-title">页面导航</div>
+        <a href="#overview"><span class="toc-dot dot-overview"></span>职责概述</a>
+        <a href="#architecture"><span class="toc-dot dot-arch"></span>架构设计</a>
+        <a href="#dataflow"><span class="toc-dot dot-data"></span>数据流</a>
+        <a href="#interfaces"><span class="toc-dot dot-arch"></span>核心接口</a>
+        <a href="#patterns"><span class="toc-dot dot-arch"></span>设计模式</a>
+        <a href="#dev-guide"><span class="toc-dot dot-code"></span>开发者指南</a>
+        <a href="#arch-guide"><span class="toc-dot dot-arch"></span>架构师指南</a>
+        <a href="#topology"><span class="toc-dot dot-data"></span>处理拓扑图</a>
+        <a href="#core-flow"><span class="toc-dot dot-data"></span>核心流程详解</a>
+        <a href="#design-essence"><span class="toc-dot dot-design"></span>设计精华</a>
+        <a href="#agent-practice"><span class="toc-dot dot-practice"></span>Agent 实践借鉴</a>
+        <a href="#code-index"><span class="toc-dot dot-code"></span>代码索引</a>
+</nav>
+
+        <section id="overview" class="card">
+            <h2>职责概述</h2>
+            <p>Agent 架构是 Claude Code 实现复杂任务分解和并行执行的核心。它由三层组成：<strong>（1）Task 抽象层</strong>——<code>Task.ts</code> 定义了统一的任务类型系统（7 种 <code>TaskType</code>、5 种 <code>TaskStatus</code>），通过 <code>tasks.ts</code> 注册表管理所有任务实现；<strong>（2）AgentTool 调度层</strong>——作为唯一的 agent 入口工具，支持同步子 agent、异步后台 agent、Fork 子 agent、In-process teammate 和远程 agent 五种运行模式；<strong>（3）通信协调层</strong>——<code>SendMessageTool</code> 实现 agent 间点对点消息、广播、关闭协商和计划审批，<code>TeamCreateTool</code>/<code>TeamDeleteTool</code> 管理 agent 团队生命周期。</p>
+        </section>
+
+        <section id="architecture" class="card">
+            <h2>架构设计</h2>
+
+            <h3>任务类型层次</h3>
+            <div class="layer-diagram">
+                <div class="layer layer-entry">
+                    <div class="layer-header">AgentTool 入口（tools/AgentTool/AgentTool.tsx）</div>
+                    <div class="layer-body">
+                        <div class="layer-component highlight">call() — 统一入口，根据参数路由到不同运行模式</div>
+                        <div class="layer-component">输入参数：prompt, subagent_type, run_in_background, name, team_name, isolation, cwd</div>
+                    </div>
+                </div>
+                <div class="layer-arrow">▼</div>
+                <div class="layer layer-orchestration">
+                    <div class="layer-header">任务调度层</div>
+                    <div class="layer-body">
+                        <div class="layer-component highlight">runAgent.ts — 同步/异步子 agent 执行引擎</div>
+                        <div class="layer-component">forkSubagent.ts — Fork 子 agent（同一进程独立对话）</div>
+                        <div class="layer-component">spawnInProcess.ts — In-process teammate 生成</div>
+                        <div class="layer-component">远程 agent 会话管理</div>
+                    </div>
+                </div>
+                <div class="layer-arrow">▼</div>
+                <div class="layer layer-engine">
+                    <div class="layer-header">Task 实现层（tasks/）</div>
+                    <div class="layer-body">
+                        <div class="layer-component">LocalAgentTask — 本地 agent 任务状态管理</div>
+                        <div class="layer-component">LocalShellTask — 后台 shell 命令任务</div>
+                        <div class="layer-component">InProcessTeammateTask — 进程内 teammate</div>
+                        <div class="layer-component">RemoteAgentTask — 远程 agent 会话</div>
+                        <div class="layer-component">DreamTask — 梦境代理（后台思考）</div>
+                    </div>
+                </div>
+                <div class="layer-arrow">▼</div>
+                <div class="layer layer-tool">
+                    <div class="layer-header">通信层</div>
+                    <div class="layer-body">
+                        <div class="layer-component highlight">SendMessageTool — 点对点/广播消息</div>
+                        <div class="layer-component">TeamCreateTool / TeamDeleteTool — 团队管理</div>
+                        <div class="layer-component">TaskOutputTool — 任务输出查询</div>
+                        <div class="layer-component">TaskStopTool — 任务终止</div>
+                    </div>
+                </div>
+            </div>
+
+            <h3>5 种 Task 类型对比</h3>
+            <table>
+                <thead><tr><th>TaskType</th><th>前缀</th><th>执行环境</th><th>生命周期</th><th>通信</th></tr></thead>
+                <tbody>
+                    <tr>
+                        <td><code>local_agent</code></td>
+                        <td><code>a</code></td>
+                        <td>同进程，独立 query() 循环</td>
+                        <td>同步或后台化</td>
+                        <td>通过 parentMessage 注入</td>
+                    </tr>
+                    <tr>
+                        <td><code>local_bash</code></td>
+                        <td><code>b</code></td>
+                        <td>Shell 子进程</td>
+                        <td>同步或后台化</td>
+                        <td>文件输出 + 轮询</td>
+                    </tr>
+                    <tr>
+                        <td><code>in_process_teammate</code></td>
+                        <td><code>t</code></td>
+                        <td>同进程，独立 query() 循环</td>
+                        <td>持续运行直到关闭</td>
+                        <td><strong>SendMessage 邮箱</strong></td>
+                    </tr>
+                    <tr>
+                        <td><code>remote_agent</code></td>
+                        <td><code>r</code></td>
+                        <td>远程服务器（API session）</td>
+                        <td>异步轮询</td>
+                        <td>Session 状态同步</td>
+                    </tr>
+                    <tr>
+                        <td><code>dream</code></td>
+                        <td><code>d</code></td>
+                        <td>同进程，自动 Dream 提示</td>
+                        <td>自动启动/完成</td>
+                        <td>文件系统（consolidation lock）</td>
+                    </tr>
+                </tbody>
+            </table>
+        </section>
+
+        <section id="dataflow" class="card">
+            <h2>核心数据流</h2>
+
+            <h3>AgentTool.call() 路由流程</h3>
+            <div class="flow-chart">
+                <div class="flow-step">
+                    <div class="flow-step-title">1. 参数解析</div>
+                    <div class="flow-step-desc">解析 prompt, subagent_type, run_in_background, name, team_name, isolation, cwd 参数。获取权限模式和 agent 定义。来源：AgentTool.tsx:239-275</div>
+                </div>
+                <div class="flow-arrow">→</div>
+                <div class="flow-step">
+                    <div class="flow-step-title">2. 路由判断</div>
+                    <div class="flow-step-desc">
+                        <strong>team_name + name</strong> → spawnTeammate（In-process teammate）<br>
+                        <strong>isolation='remote'</strong> → 远程 agent<br>
+                        <strong>Fork 启用</strong> → forkSubagent<br>
+                        <strong>run_in_background</strong> → registerAsyncAgent<br>
+                        <strong>默认</strong> → 同步 runAgent
+                    </div>
+                </div>
+                <div class="flow-arrow">→</div>
+                <div class="flow-step">
+                    <div class="flow-step-title">3. 执行引擎</div>
+                    <div class="flow-step-desc">runAgent.ts 创建独立的 query() 循环，组装工具集（filterToolsForAgent），初始化 MCP 服务器，构建 system prompt，启动消息处理。</div>
+                </div>
+                <div class="flow-arrow">→</div>
+                <div class="flow-step">
+                    <div class="flow-step-title">4. 结果处理</div>
+                    <div class="flow-step-desc">同步 agent 直接返回结果。异步 agent 返回 <code>async_launched</code> 状态 + taskId。Teammate 返回 <code>teammate_spawned</code> + 邮箱信息。</div>
+                </div>
+            </div>
+
+            <h3>Agent 层次结构</h3>
+            <div class="diagram-container">
+                <div class="diagram-row">
+                    <div class="diagram-node" style="background: var(--layer-entry); min-width: 180px;">
+                        <strong>主 Agent (Leader)</strong><br><small>REPL 主循环</small>
+                    </div>
+                </div>
+                <div class="diagram-row" style="justify-content: center;">
+                    <div class="diagram-connector">▼ AgentTool.call()</div>
+                </div>
+                <div class="diagram-row" style="gap: 12px;">
+                    <div class="diagram-node" style="background: var(--layer-engine); flex: 1;">
+                        <strong>同步子 Agent</strong><br>
+                        <small>同进程 query() 循环<br>阻塞主循环<br>可后台化</small>
+                    </div>
+                    <div class="diagram-node" style="background: var(--layer-plugin); flex: 1;">
+                        <strong>异步后台 Agent</strong><br>
+                        <small>同进程独立运行<br>不阻塞主循环<br>TaskOutputTool 查询进度</small>
+                    </div>
+                    <div class="diagram-node" style="background: var(--layer-orchestration); flex: 1;">
+                        <strong>In-process Teammate</strong><br>
+                        <small>持久化 agent<br>SendMessage 通信<br>独立权限模式</small>
+                    </div>
+                    <div class="diagram-node" style="background: var(--layer-security); flex: 1;">
+                        <strong>远程 Agent</strong><br>
+                        <small>服务器端 session<br>轮询获取结果<br>脱机执行</small>
+                    </div>
+                </div>
+                <div class="diagram-row" style="margin-top: 12px; gap: 12px;">
+                    <div class="diagram-node" style="background: var(--layer-data); flex: 1;">
+                        <strong>Fork 子 Agent</strong><br>
+                        <small>独立对话上下文<br>从 assistant message 继承<br>Worktree 隔离</small>
+                    </div>
+                    <div class="diagram-node" style="background: var(--layer-infra); flex: 1;">
+                        <strong>Dream Agent</strong><br>
+                        <small>自动后台思考<br>consolidation lock<br>回滚支持</small>
+                    </div>
+                </div>
+            </div>
+
+            <h3>SendMessage 通信模式</h3>
+            <div class="flow-chart">
+                <div class="flow-step">
+                    <div class="flow-step-title">handleMessage — 点对点消息</div>
+                    <div class="flow-step-desc">向指定 teammate 注入用户消息。消息进入 <code>pendingUserMessages</code> 队列，teammate 在下一个 query 循环中消费。来源：SendMessageTool.ts:149</div>
+                </div>
+                <div class="flow-arrow">→</div>
+                <div class="flow-step">
+                    <div class="flow-step-title">handleBroadcast — 广播</div>
+                    <div class="flow-step-desc">向所有活跃 teammate 发送相同消息。每个 teammate 独立接收和处理。来源：SendMessageTool.ts:191</div>
+                </div>
+                <div class="flow-arrow">→</div>
+                <div class="flow-step">
+                    <div class="flow-step-title">handleShutdownRequest/Approval — 关闭协商</div>
+                    <div class="flow-step-desc">请求关闭 teammate 需要对方批准。实现分布式关闭协议：request → approval/rejection。来源：SendMessageTool.ts:268-432</div>
+                </div>
+                <div class="flow-arrow">→</div>
+                <div class="flow-step">
+                    <div class="flow-step-title">handlePlanApproval/Rejection — 计划审批</div>
+                    <div class="flow-step-desc">plan_mode_required 的 teammate 需要提交计划等待 leader 审批。审批通过后 teammate 才能执行。来源：SendMessageTool.ts:434-518</div>
+                </div>
+            </div>
+        </section>
+
+        <section id="interfaces" class="card">
+            <h2>关键类型与接口</h2>
+
+            <h3>TaskType 与 TaskStatus（Task.ts:6-29）</h3>
+            <pre><code>export type TaskType =
+  | 'local_bash'          // Shell 命令任务
+  | 'local_agent'         // 本地 agent 任务
+  | 'remote_agent'        // 远程 agent 任务
+  | 'in_process_teammate' // 进程内 teammate
+  | 'local_workflow'      // 工作流任务
+  | 'monitor_mcp'         // MCP 监控任务
+  | 'dream'               // 梦境代理
+
+export type TaskStatus =
+  | 'pending' | 'running' | 'completed' | 'failed' | 'killed'
+
+export function isTerminalTaskStatus(status: TaskStatus): boolean {
+  return status === 'completed' || status === 'failed' || status === 'killed'
+}</code></pre>
+
+            <h3>Task 接口（Task.ts:72-76）</h3>
+            <pre><code>export type Task = {
+  name: string
+  type: TaskType
+  kill(taskId: string, setAppState: SetAppState): Promise&lt;void&gt;
+}</code></pre>
+
+            <h3>TaskStateBase 共享状态（Task.ts:45-57）</h3>
+            <pre><code>export type TaskStateBase = {
+  id: string
+  type: TaskType
+  status: TaskStatus
+  description: string
+  toolUseId?: string
+  startTime: number
+  endTime?: number
+  totalPausedMs?: number
+  outputFile: string     // 输出文件路径（磁盘持久化）
+  outputOffset: number   // 输出读取偏移量
+  notified: boolean      // 是否已通知用户
+}</code></pre>
+
+            <h3>Task ID 生成（Task.ts:98-106）</h3>
+            <pre><code>const TASK_ID_PREFIXES: Record&lt;string, string&gt; = {
+  local_bash: 'b', local_agent: 'a', remote_agent: 'r',
+  in_process_teammate: 't', local_workflow: 'w',
+  monitor_mcp: 'm', dream: 'd',
+}
+
+export function generateTaskId(type: TaskType): string {
+  const prefix = getTaskIdPrefix(type)
+  const bytes = randomBytes(8)  // 36^8 ≈ 2.8 万亿组合
+  let id = prefix
+  for (let i = 0; i &lt; 8; i++) {
+    id += TASK_ID_ALPHABET[bytes[i]! % TASK_ID_ALPHABET.length]
+  }
+  return id  // 例如 "a3f7k2j9n"
+}</code></pre>
+
+            <h3>InProcessTeammateTaskState（tasks/InProcessTeammateTask/types.ts:22-76）</h3>
+            <pre><code>export type InProcessTeammateTaskState = TaskStateBase &amp; {
+  type: 'in_process_teammate'
+  identity: TeammateIdentity       // agentId, agentName, teamName, color
+  prompt: string
+  model?: string                   // 可选模型覆盖
+  selectedAgent?: AgentDefinition  // 可选 agent 定义
+  abortController?: AbortController
+  currentWorkAbortController?: AbortController
+  awaitingPlanApproval: boolean    // 等待计划审批
+  permissionMode: PermissionMode   // 独立权限模式
+  result?: AgentToolResult
+  progress?: AgentProgress
+  messages?: Message[]             // 对话历史（UI 镜像，最多 50 条）
+  pendingUserMessages: string[]    // 待消费的用户消息队列
+  isIdle: boolean                  // 是否空闲（等待消息）
+  shutdownRequested: boolean       // 关闭请求标志
+  onIdleCallbacks?: Array&lt;() =&gt; void&gt;  // idle 通知回调
+}</code></pre>
+
+            <h3>AgentTool 输出类型（AgentTool.tsx:140-191）</h3>
+            <pre><code>// 同步完成
+{ status: 'completed', prompt: string, ...agentToolResult }
+
+// 异步启动
+{ status: 'async_launched', agentId, description, prompt, outputFile, canReadOutputFile }
+
+// Teammate 启动（内部类型）
+{ status: 'teammate_spawned', prompt, teammate_id, agent_id, name, color,
+  tmux_session_name, tmux_window_name, tmux_pane_id, team_name,
+  is_splitpane, plan_mode_required }
+
+// 远程启动
+{ status: 'remote_launched', taskId, sessionUrl, description, prompt, outputFile }</code></pre>
+
+            <h3>SendMessage 路由类型（SendMessageTool.ts:92-131）</h3>
+            <pre><code>export type MessageRouting = {
+  recipient: string       // 目标 teammate 名称或 'all'
+  content: string         // 消息内容
+  summary?: string        // 消息摘要
+  action?: 'message' | 'broadcast' | 'shutdown_request' | 'shutdown_approval'
+          | 'shutdown_rejection' | 'plan_approval' | 'plan_rejection'
+}</code></pre>
+        </section>
+
+        <section id="patterns" class="card">
+            <h2>设计模式与亮点</h2>
+
+            <div class="three-col">
+                <div class="component-box">
+                    <div class="name">统一 Task 抽象</div>
+                    <div class="desc">所有任务类型（agent、shell、teammate、remote、dream）共享 <code>TaskStateBase</code>，通过 <code>Task</code> 接口的 <code>kill()</code> 方法统一管理生命周期。状态存储在 <code>AppState.tasks</code> Map 中，以 taskId 为 key。</div>
+                    <span class="badge badge-core">核心</span>
+                </div>
+                <div class="component-box">
+                    <div class="name">Fork 子 agent 模式</div>
+                    <div class="desc"><code>forkSubagent.ts</code> 实现了一种独特的 agent 隔离：在同一进程内创建完全独立的对话上下文。通过 <code>buildForkedMessages()</code> 从当前 assistant message 构建子 agent 的初始消息，支持 worktree 隔离。</div>
+                    <span class="badge badge-ext">高级</span>
+                </div>
+                <div class="component-box">
+                    <div class="name">邮箱式通信</div>
+                    <div class="desc">In-process teammate 使用 <code>pendingUserMessages</code> 队列实现异步邮箱通信。Leader 通过 SendMessageTool 投递消息，teammate 在下一个 query 循环中消费。<code>onIdleCallbacks</code> 避免 leader 轮询。</div>
+                    <span class="badge badge-perf">高效</span>
+                </div>
+            </div>
+
+            <h3>更多亮点</h3>
+            <ul>
+                <li><strong>动态后台化</strong>：LocalAgentTask 和 LocalShellTask 都支持从同步模式动态转为后台模式。<code>backgroundAgentTask()</code> 将任务从 foreground 队列移到后台，释放主循环。用户可以在运行中按 Escape 触发后台化。</li>
+                <li><strong>消息数量上限</strong>：<code>TEAMMATE_MESSAGES_UI_CAP = 50</code> 限制 teammate 的 UI 镜像消息数量，防止长时间运行的 teammate 消耗过多内存。完整对话保存在磁盘。</li>
+                <li><strong>分布式关闭协议</strong>：SendMessageTool 实现了 request → approval/rejection 关闭协商。Teammate 不能被强制终止（除非 kill），必须通过协商优雅关闭。支持 reason 反馈。</li>
+                <li><strong>计划审批流程</strong>：<code>plan_mode_required</code> 的 teammate 在执行前必须提交计划等待 leader 审批。Leader 通过 <code>handlePlanApproval</code>/<code>handlePlanRejection</code> 决定是否允许执行，支持 feedback。</li>
+                <li><strong>Worktree 隔离</strong>：AgentTool 支持 <code>isolation: 'worktree'</code> 参数，为子 agent 创建独立的 git worktree。Fork 子 agent 自动检测 worktree 并注入通知。完成后自动清理。</li>
+                <li><strong>Task ID 前缀</strong>：每种任务类型有唯一前缀（a/b/r/t/w/m/d），便于在日志和 UI 中快速识别任务类型。8 位随机字符提供 2.8 万亿组合，抵抗暴力攻击。</li>
+                <li><strong>Agent 自定义 MCP</strong>：<code>initializeAgentMcpServers()</code>（runAgent.ts:95）为每个 agent 初始化独立的 MCP 服务器实例，避免跨 agent 的 MCP 状态污染。</li>
+                <li><strong>进度追踪</strong>：<code>ProgressTracker</code>（LocalAgentTask.tsx:41-49）实时追踪 agent 的 token 使用量、工具调用次数和当前活动。支持 SDK 消费者通过 <code>tool_progress</code> 事件获取实时更新。</li>
+            </ul>
+        </section>
+
+        <section id="dev-guide" class="card developer">
+            <h2>开发者实践指南</h2>
+
+            <h3>如何添加新的 Task 类型</h3>
+            <div class="info-box tip">
+                <strong>步骤 1</strong>：在 <code>Task.ts</code> 的 <code>TaskType</code> 联合类型中添加新类型，在 <code>TASK_ID_PREFIXES</code> 中指定前缀。
+            </div>
+            <div class="info-box tip">
+                <strong>步骤 2</strong>：在 <code>tasks/</code> 下创建目录，实现 <code>Task</code> 接口（<code>name</code>, <code>type</code>, <code>kill()</code>）。定义继承 <code>TaskStateBase</code> 的状态类型。
+            </div>
+            <div class="info-box tip">
+                <strong>步骤 3</strong>：在 <code>tasks.ts</code> 的 <code>getAllTasks()</code> 中注册新任务。
+            </div>
+
+            <h3>如何使用 AgentTool 调度子 agent</h3>
+            <pre><code>// 同步子 agent（阻塞等待完成）
+{ prompt: "分析这个文件", subagent_type: "code-reviewer" }
+
+// 异步后台 agent
+{ prompt: "重构整个模块", run_in_background: true }
+
+// In-process teammate（持久化 agent）
+{ prompt: "你负责测试", name: "tester", team_name: "dev-team" }
+
+// 远程 agent
+{ prompt: "运行大规模分析", isolation: "remote" }
+
+// Fork 子 agent（实验性）
+{ prompt: "探索代码库", subagent_type: "explorer" }</code></pre>
+
+            <h3>Teammate 通信模式</h3>
+            <pre><code>// Leader 向 teammate 发送消息
+SendMessageTool: { recipient: "tester", content: "请测试登录功能" }
+
+// Leader 广播消息
+SendMessageTool: { recipient: "all", content: "代码已合并", action: "broadcast" }
+
+// Leader 请求关闭 teammate
+SendMessageTool: { recipient: "researcher", action: "shutdown_request" }
+
+// Teammate 提交计划等待审批（内部机制）
+// teammate 自动将计划发送给 leader，leader 通过 PlanApproval 响应</code></pre>
+
+            <h3>注意事项</h3>
+            <div class="info-box warning">
+                <strong>循环防护</strong>：Teammate 不能嵌套生成 teammate（<code>isTeammate() &amp;&amp; teamName &amp;&amp; name</code> 会抛出异常）。Team roster 是扁平结构，只允许一层 teammate。
+            </div>
+            <div class="info-box warning">
+                <strong>In-process teammate 限制</strong>：In-process teammate 不能创建后台 agent（生命周期绑定到 leader 进程），也不能嵌套生成 teammate。
+            </div>
+        </section>
+
+        <section id="arch-guide" class="card architect">
+            <h2>架构师决策指南</h2>
+
+            <h3>设计权衡</h3>
+            <div class="two-col">
+                <div class="info-box info">
+                    <strong>同进程 vs 多进程</strong><br>
+                    所有 agent 都在同一 Node.js 进程中运行（远程 agent 除外）。优势：零 IPC 开销，共享 MCP 连接，状态管理简单。代价：agent 共享事件循环，长时间运行的 agent 可能影响主循环响应性。通过 <code>run_in_background</code> 和 <code>backgroundAgentTask()</code> 缓解。
+                </div>
+                <div class="info-box info">
+                    <strong>邮箱队列 vs 直接调用</strong><br>
+                    Teammate 通信采用邮箱队列（<code>pendingUserMessages</code>）而非直接函数调用。优势：解耦 Leader 和 Teammate 的执行循环，支持异步消息传递和优雅关闭协商。代价：消息传递有延迟（一个 query 循环的延迟），不适合实时协作。
+                </div>
+            </div>
+
+            <h3>扩展性考量</h3>
+            <ul>
+                <li><strong>Agent 数量扩展</strong>：每个 In-process teammate 的 UI 镜像消息上限为 50 条（<code>TEAMMATE_MESSAGES_UI_CAP</code>）。完整对话保存在磁盘。大型 swarm 场景（如 292 个 agent 的极端案例）需要关注内存。</li>
+                <li><strong>新通信模式</strong>：SendMessageTool 的 <code>action</code> 字段是可扩展的枚举。新增通信模式只需在 <code>call()</code> 中添加新的路由分支和对应的 <code>handle*</code> 函数。</li>
+                <li><strong>新隔离模式</strong>：<code>isolation</code> 参数支持 'worktree' 和 'remote' 两种隔离。新增隔离模式（如 Docker 容器）需要修改 AgentTool.call() 的路由逻辑和对应的任务类型。</li>
+            </ul>
+
+            <h3>性能考量</h3>
+            <ul>
+                <li><strong>MCP 服务器开销</strong>：每个 agent 初始化独立的 MCP 服务器实例（<code>initializeAgentMcpServers()</code>）。大量并发 agent 可能导致 MCP 连接数激增。</li>
+                <li><strong>内存控制</strong>：<code>TEAMMATE_MESSAGES_UI_CAP</code> 限制每个 teammate 的 AppState 内存占用。实际数据显示：500+ turn session 约 20MB RSS，292 agent swarm 峰值 36.8GB。消息上限从无限制改为 50 条后显著缓解。</li>
+                <li><strong>Task 输出持久化</strong>：所有任务输出写入磁盘文件（<code>getTaskOutputPath()</code>），通过 <code>outputOffset</code> 增量读取。避免大输出占用内存。</li>
+                <li><strong>过滤不完整工具调用</strong>：<code>filterIncompleteToolCalls()</code>（runAgent.ts:866）清理子 agent 终止时的未完成工具调用，防止无效 tool_use block 污染主对话。</li>
+            </ul>
+
+            <h3>架构演进方向</h3>
+            <div class="info-box info">
+                <strong>从单 agent 到多 agent</strong>：代码库的演进路径清晰可见——最初的 <code>LocalAgentTask</code> 处理简单子 agent，后加入 <code>LocalShellTask</code> 处理后台命令，再引入 <code>InProcessTeammateTask</code> 实现持久化 teammate，最后加入 <code>RemoteAgentTask</code> 支持远程执行。每一步都是增量扩展，保留了向后兼容性。
+            </div>
+        </section>
+
+        <section id="topology" class="card">
+            <h2><span class="icon" style="background:rgba(139,92,246,.15);color:var(--purple);">◈</span> 可视化处理拓扑图</h2>
+            <p>AgentTool.call() 是所有子 agent 请求的统一入口。它根据参数组合进行多级路由判断，最终将任务分发到 5 种执行路径之一。以下拓扑图展示完整的路由决策、执行引擎和结果回收流程。</p>
+
+            <!-- Phase 1: Entry & Routing -->
+            <div class="fc">
+                <div class="fc-center">
+                    <div class="fn n-start w">AgentTool.call() 入口<span class="sub">AgentTool.tsx:239 — 解析 prompt, subagent_type, run_in_background, name, team_name</span></div>
+                    <div class="vc s24"></div>
+
+                    <div class="fn n-check w">Team Name + Name 检查<span class="sub">L290 — team_name + name 同时存在？</span></div>
+                    <div class="fc-row">
+                        <div class="hc s20"></div>
+                        <div class="hc-arrow s60 green"><span class="hc-label" style="color:var(--green);">是</span></div>
+                        <div class="fn n-allow w">spawnTeammate()<span class="sub">In-process teammate 生成<br>返回 teammate_spawned</span></div>
+                    </div>
+                    <div class="vc s20"><span class="vc-label">否 ↓</span></div>
+
+                    <div class="fn n-check w">isolation='remote' 检查<span class="sub">L548 — 远程隔离模式？</span></div>
+                    <div class="fc-row">
+                        <div class="hc s20"></div>
+                        <div class="hc-arrow s60 green"><span class="hc-label" style="color:var(--green);">是</span></div>
+                        <div class="fn n-process w">teleportToRemote()<span class="sub">CCR 远程 session<br>返回 remote_launched</span></div>
+                    </div>
+                    <div class="vc s20"><span class="vc-label">否 ↓</span></div>
+
+                    <div class="fn n-check w">Agent Type 路由<span class="sub">L350-400 — Fork 开关 / subagent_type 匹配 / 权限过滤</span></div>
+                    <div class="vc s16"></div>
+                    <div class="fc-row" style="gap:16px;">
+                        <div style="display:flex;flex-direction:column;align-items:center;gap:0;">
+                            <div class="fn n-auto" style="font-size:11px;">Fork Path<span class="sub">effectiveType=undefined<br>继承父 prompt</span></div>
+                        </div>
+                        <div style="display:flex;flex-direction:column;align-items:center;gap:0;">
+                            <div class="fn n-process" style="font-size:11px;">Built-in Agent<span class="sub">subagent_type 匹配<br>内置 agent 定义</span></div>
+                        </div>
+                        <div style="display:flex;flex-direction:column;align-items:center;gap:0;">
+                            <div class="fn n-process" style="font-size:11px;">Custom Agent<span class="sub">agentDefinitions<br>自定义 agent</span></div>
+                        </div>
+                    </div>
+                    <div class="vc s16"></div>
+                    <div class="fn n-deny" style="font-size:11px;">Agent 不存在 / 权限拒绝<span class="sub">filterDeniedAgents() → throw Error</span></div>
+                </div>
+            </div>
+
+            <!-- Phase 2: System Prompt & Execution -->
+            <h3 style="margin-top:1.5rem;color:var(--text-secondary);">Phase 2 — 系统提示注入与执行引擎</h3>
+            <div class="fc">
+                <div class="fc-center">
+                    <div class="fn n-process w">selectedAgent 确定<span class="sub">L400 — agentDefinition + model + MCP server 检查</span></div>
+                    <div class="vc s20"></div>
+
+                    <div class="fn n-check ww">系统提示构建<span class="sub">L540-600 — Fork 与 Normal 两条路径</span></div>
+                    <div class="vc s16"></div>
+                    <div class="fc-row" style="gap:24px;">
+                        <div style="display:flex;flex-direction:column;align-items:center;gap:0;">
+                            <div class="fn n-auto w" style="font-size:11px;">Fork: 继承父 systemPrompt<span class="sub">buildForkedMessages()<br>cache-identical 前缀</span></div>
+                        </div>
+                        <div style="display:flex;flex-direction:column;align-items:center;gap:0;">
+                            <div class="fn n-process w" style="font-size:11px;">Normal: Agent 专属 prompt<span class="sub">getSystemPrompt() + envDetails<br>enhanceSystemPromptWithEnvDetails()</span></div>
+                        </div>
+                    </div>
+                    <div class="vc s24"></div>
+
+                    <div class="fn n-check w">shouldRunAsync 判断<span class="sub">L640 — background / coordinator / forkForce / proactive</span></div>
+                    <div class="vc s16"></div>
+                    <div class="fc-row" style="gap:24px;">
+                        <div style="display:flex;flex-direction:column;align-items:center;gap:0;">
+                            <div class="fn n-process w" style="font-size:11px;">异步: registerAsyncAgent<span class="sub">void runAsyncAgentLifecycle()<br>返回 async_launched</span></div>
+                        </div>
+                        <div style="display:flex;flex-direction:column;align-items:center;gap:0;">
+                            <div class="fn n-process w" style="font-size:11px;">同步: runAgent iterator<span class="sub">while(true) 消息循环<br>forward progress</span></div>
+                        </div>
+                    </div>
+                    <div class="vc s24"></div>
+
+                    <div class="fn n-process w">runAgent() — 独立 query() 循环<span class="sub">runAgent.ts — assembleToolPool + initMCP + buildPrompt + query()</span></div>
+                </div>
+            </div>
+
+            <!-- Phase 3: Sync Agent Loop (with loop-back) -->
+            <h3 style="margin-top:1.5rem;color:var(--text-secondary);">Phase 3 — 同步 Agent 消息循环</h3>
+            <div class="fc">
+                <div class="fc-center">
+                    <div class="fn n-start w">runAgent() AsyncIterator<span class="sub">runAgent.ts — yield Message 逐一产出</span></div>
+                    <div class="vc s20"></div>
+
+                    <div class="loop-box" style="max-width:560px;">
+                        <div class="loop-title">while(true) 消息迭代循环 — AgentTool.tsx:850-1000</div>
+                        <div class="loop-text">
+                            <strong>每次迭代：</strong><br>
+                            ① agentIterator.next() 获取下一条消息<br>
+                            ② Promise.race([nextMessage, backgroundSignal]) 竞速<br>
+                            ③ 消息推入 agentMessages[]，更新 progress<br>
+                            ④ result.done === true → 跳出循环<br>
+                            <span style="color:var(--text-muted);font-size:10px;">超时自动后台化：elapsed >= PROGRESS_THRESHOLD_MS → 显示 BackgroundHint</span>
+                        </div>
+                    </div>
+                    <div class="vc s16"></div>
+
+                    <div class="fc-row">
+                        <div class="fn n-process w" style="font-size:11px;">backgroundSignal 触发<span class="sub">用户点击后台化或<br>autoBackgroundMs 超时</span></div>
+                        <div class="hc-arrow s60 amber"><span class="hc-label" style="color:var(--amber);">转入后台</span></div>
+                        <div class="fn n-allow" style="font-size:11px;">async_launched<span class="sub">继续后台运行<br>enqueueAgentNotification</span></div>
+                    </div>
+                    <div class="vc s16"></div>
+
+                    <div class="fn n-allow w">循环结束 → finalizeAgentTool()<span class="sub">提取文本 + 统计 toolUseCount + durationMs</span></div>
+                    <div class="vc s20"></div>
+
+                    <div class="fn n-check w">classifyHandoffIfNeeded<span class="sub">L1010 — 交接警告检测（Transcript Classifier）</span></div>
+                    <div class="vc s20"></div>
+
+                    <div class="fn n-process w">cleanupWorktreeIfNeeded()<span class="sub">L644 — 检测 worktree 变更 → 保留或删除</span></div>
+                </div>
+            </div>
+
+            <div class="info-box info"><strong>路由设计要点</strong>：AgentTool.call() 的路由决策是级联式的——team_name 优先级最高（coordinator 模式），然后是 remote isolation（CCR 远程执行），最后是 Fork/Built-in/Custom 三选一。每一级都有递归守卫：Fork 子 agent 不能再 fork、In-process teammate 不能创建后台 agent、子 agent 不继承父的 setAppState 权限。这些约束通过 <code>isInForkChild()</code>、<code>isInProcessTeammate()</code> 等 guard 函数在运行时强制执行。</div>
+        </section>
+
+        <section id="core-flow" class="card">
+            <h2><span class="icon" style="background:rgba(6,182,212,.15);color:var(--cyan);">⇉</span> 核心处理流程详解</h2>
+            <p>Agent 系统的核心是一个从用户请求到最终输出的完整处理链路。入口是 <code>AgentTool.call()</code>（AgentTool.tsx:239），它负责路由决策、资源准备、生命周期管理，最终将子 agent 的结果返回给主对话。以下是每一步的详细处理过程：</p>
+            <div class="flow-chart vertical">
+                <div class="flow-step highlight">
+                    <div class="flow-step-title">1. 路由决策与类型解析</div>
+                    <div class="flow-step-desc"><code>call()</code> 首先解析 <code>subagent_type</code>、<code>team_name</code>、<code>name</code> 等输入参数。如果 <code>team_name</code> + <code>name</code> 同时存在，走 Teammate 路径（调用 <code>spawnTeammate()</code>）。否则根据 <code>subagent_type</code> 判断走 Fork 路径还是标准 Agent 路径。递归 Fork 防护通过 <code>querySource</code>（压缩安全）和消息扫描双保险实现 — AgentTool.tsx:239-340</div>
+                </div>
+                <div class="flow-arrow">↓</div>
+                <div class="flow-step">
+                    <div class="flow-step-title">2. Agent 定义查找与权限过滤</div>
+                    <div class="flow-step-desc">从 <code>agentDefinitions.activeAgents</code> 中查找匹配的 AgentDefinition。通过 <code>filterDeniedAgents()</code> 过滤被权限规则拒绝的 agent，并通过 <code>getDenyRuleForAgent()</code> 生成精确的错误提示（告知用户哪条规则阻止了哪个 agent）— AgentTool.tsx:340-400</div>
+                </div>
+                <div class="flow-arrow">↓</div>
+                <div class="flow-step">
+                    <div class="flow-step-title">3. MCP 依赖等待与验证</div>
+                    <div class="flow-step-desc">如果 Agent 声明了 <code>requiredMcpServers</code>，系统会轮询等待尚未完成连接的 MCP 服务器（最多 30 秒）。等待完成后，从已连接工具列表中提取服务器名，验证所需的 MCP 工具确实可用。不可用则抛出明确错误引导用户运行 <code>/mcp</code> — AgentTool.tsx:400-470</div>
+                </div>
+                <div class="flow-arrow">↓</div>
+                <div class="flow-step highlight">
+                    <div class="flow-step-title">4. System Prompt 构建与消息准备</div>
+                    <div class="flow-step-desc">这是缓存命中率的关键步骤。Fork 路径复用父进程的 system prompt（通过 <code>buildEffectiveSystemPrompt()</code>）以实现 cache-identical 前缀；标准路径调用 <code>getAgentSystemPrompt()</code>（runAgent.ts:906）构建独立 prompt。Fork 路径还通过 <code>buildForkedMessages()</code>（forkSubagent.ts:107）克隆父消息并注入子指令 — AgentTool.tsx:470-560</div>
+                </div>
+                <div class="flow-arrow">↓</div>
+                <div class="flow-step">
+                    <div class="flow-step-title">5. 工具池组装与隔离设置</div>
+                    <div class="flow-step-desc">通过 <code>assembleToolPool()</code> 独立组装 worker 的工具池，使用 worker 自己的权限模式（默认 <code>acceptEdits</code>），不受父进程工具限制。如果请求了 <code>worktree</code> 隔离，调用 <code>createAgentWorktree()</code> 创建独立 git 工作树。Fork 路径额外注入 worktree 路径转换通知 — AgentTool.tsx:560-640</div>
+                </div>
+                <div class="flow-arrow">↓</div>
+                <div class="flow-step">
+                    <div class="flow-step-title">6. 同步/异步分发</div>
+                    <div class="flow-step-desc">根据 <code>shouldRunAsync</code> 决定执行模式。异步路径通过 <code>registerAsyncAgent()</code> 注册后台任务，使用 <code>void runAsyncAgentLifecycle()</code> 火花运行；同步路径注册为前台任务（<code>registerAgentForeground()</code>），支持超时自动转后台（通过 <code>backgroundPromise</code> 竞速）— AgentTool.tsx:640-770</div>
+                </div>
+                <div class="flow-arrow">↓</div>
+                <div class="flow-step highlight">
+                    <div class="flow-step-title">7. runAgent() 执行引擎</div>
+                    <div class="flow-step-desc">这是核心执行循环。初始化 agent 专属 MCP 服务器（<code>initializeAgentMcpServers()</code>，runAgent.ts:95），合并工具集，构建 <code>agentToolUseContext</code>，执行 SubagentStart hooks，预加载 frontmatter 中的 skills，然后进入 <code>query()</code> 异步迭代循环。每条消息实时记录到 sidechain transcript（runAgent.ts:735-805）— runAgent.ts:248-810</div>
+                </div>
+                <div class="flow-arrow">↓</div>
+                <div class="flow-step">
+                    <div class="flow-step-title">8. 结果收集与清理</div>
+                    <div class="flow-step-desc">同步 agent 的消息通过 <code>finalizeAgentTool()</code> 聚合为最终结果。如果启用了 transcript classifier，运行 <code>classifyHandoffIfNeeded()</code> 检测交接风险。最后执行 worktree 清理（有变更保留、无变更删除）、MCP 连接释放、前台任务注销 — AgentTool.tsx:770-1263</div>
+                </div>
+            </div>
+            <div class="info-box info">
+                <strong>关键处理逻辑：</strong>整个流程最精妙的设计是同步 Agent 的"可后台化"机制。前台 Agent 注册时会创建一个 <code>backgroundSignal</code> Promise，在迭代循环中通过 <code>Promise.race([nextMessage, backgroundPromise])</code> 竞速。当超时（<code>autoBackgroundMs</code>）或用户手动后台化时，signal 触发，当前迭代器被清理，新的 <code>runAgent()</code> 在后台启动并从已有消息继续。这实现了从同步到异步的无缝转换，用户无需重新发起请求。
+            </div>
+        </section>
+        <section id="design-essence" class="card">
+            <h2><span class="icon" style="background:rgba(245,158,11,.15);color:var(--amber);">★</span> 设计精华</h2>
+
+            <h3>1. Fork 路径的 Cache-Identical 前缀优化</h3>
+            <p>Fork 子 agent 复用父进程的完整 system prompt 和工具定义数组（<code>useExactTools: true</code>），确保 API 请求的字节前缀完全一致，从而命中 prompt cache。这是性能优化的极致体现——不是"相似"，而是"字节级一致"。代价是 Fork 子 agent 继承了父进程的 thinking 配置和交互模式，但这正是设计意图：用最少的 cache_creation tokens 获得最大的上下文共享。</p>
+            <div class="component-box">
+                <div class="name">Fork 工具池继承（AgentTool.tsx:590-600）</div>
+                <div class="desc">Fork 路径传递父进程的工具列表和 system prompt，而非重新构建</div>
+                <pre><code>availableTools: isForkPath ? toolUseContext.options.tools : workerTools,
+// useExactTools 让 runAgent 跳过 resolveAgentTools()，直接使用传入的工具
+// 同时继承父进程的 thinkingConfig 和 isNonInteractiveSession
+...(isForkPath && { useExactTools: true }),</code></pre>
+            </div>
+            <div class="info-box tip">设计洞察：通过 <code>buildForkedMessages()</code>（forkSubagent.ts:107）克隆父 assistant 消息的所有 tool_use 块，并为每个 Fork 子 agent 注入占位符 tool_result + 独立指令，实现了在单一 API 前缀下并行派生多个工作单元。</div>
+
+            <h3>2. 递归 Fork 双重防护</h3>
+            <p>Fork 子 agent 保留了 Agent 工具（用于 cache 前缀一致），但必须防止递归 Fork。系统使用两级防护：主防护是 <code>context.options.querySource</code>（设为 <code>'agent:builtin:fork'</code>），这个值存在于 options 对象上而非消息中，因此能抵抗 autocompact 的消息重写。备用防护是 <code>isInForkChild()</code>（forkSubagent.ts:78），扫描消息中是否存在 Fork 标记——当 querySource 因某种原因未传递时兜底。</p>
+            <div class="component-box">
+                <div class="name">递归 Fork 检测（AgentTool.tsx:340-355）</div>
+                <div class="desc">主防护检查 options 上的 querySource，备用防护扫描消息历史</div>
+                <pre><code>if (toolUseContext.options.querySource === `agent:builtin:${FORK_AGENT.agentType}`
+    || isInForkChild(toolUseContext.messages)) {
+  throw new Error('Fork is not available inside a forked worker.')
+}</code></pre>
+            </div>
+            <div class="info-box tip">设计洞察：为什么不用简单的布尔标记？因为 autocompact 会重写消息，删除旧的 Fork boilerplate。把标记放在 options 对象上，options 在整个 agent 生命周期内保持不变，不受压缩影响。这种"元数据与消息分离"的模式在多个地方使用。</div>
+
+            <h3>3. Worktree 隔离的智能清理</h3>
+            <p>Agent 可以在独立 git worktree 中运行（<code>isolation: 'worktree'</code>），实现文件系统级别的沙箱。清理逻辑尤为精妙：<code>cleanupWorktreeIfNeeded()</code>（AgentTool.tsx:644）比较 worktree 创建时的 HEAD commit 和当前状态——有变更则保留 worktree，无变更则自动删除。Hook-based worktree 永远保留（因为无法检测 VCS 变更）。</p>
+            <div class="info-box tip">设计洞察：这种"创建快照-执行-比较差异-条件清理"的模式是资源管理的最佳实践。它避免了"无变更也保留"的空间浪费，也避免了"有变更也删除"的数据丢失。清理结果还会写入 agent metadata 并传递给通知，让 resume 路径知道 worktree 的最终状态。</div>
+
+            <h3>4. 消息过滤保证 API 一致性</h3>
+            <p><code>filterIncompleteToolCalls()</code>（runAgent.ts:866）在多个关键路径上确保消息序列符合 API 规范：每个 tool_use 必须有对应的 tool_result。当 Fork 子 agent 的父消息包含多个 tool_use 但只需处理其中一部分时，该函数为未配对的 tool_use 补充 placeholder result，防止 API 拒绝请求。同样在 agent 终止时清理未完成的工具调用。</p>
+            <div class="component-box">
+                <div class="name">不完整工具调用过滤（runAgent.ts:866-904）</div>
+                <div class="desc">遍历消息，收集所有 tool_use ID，为缺失的 tool_result 补充空结果</div>
+                <pre><code>export function filterIncompleteToolCalls(messages: Message[]): Message[] {
+  // 收集所有 tool_use ID 和已匹配的 tool_result ID
+  // 对于未匹配的 tool_use，在其后的 assistant 消息前
+  // 插入带空结果的 user 消息
+}</code></pre>
+            </div>
+
+            <h3>5. 模块化 Task 类型系统</h3>
+            <p>Task 类型（Task.ts:6-76）定义了 6 种 TaskType，每种对应不同的执行模型：<code>local-agent</code>（本地同步/异步）、<code>local-shell</code>（后台命令）、<code>in-process-teammate</code>（进程内持久化队友）、<code>remote-agent</code>（远程执行）等。<code>getTaskByType()</code> 工厂函数根据类型分发不同的 Task handler，每种 handler 只实现自己关心的生命周期方法（kill、spawn、render），实现了开放-封闭原则。</p>
+            <div class="info-box tip">设计洞察：从 <code>LocalAgentTask</code> 到 <code>InProcessTeammateTask</code> 再到 <code>RemoteAgentTask</code> 的演进路径展示了"先具体后抽象"的架构演进模式。每种新 Task 类型都是增量添加，不修改已有类型的逻辑，通过统一的 Task 接口保持兼容性。</div>
+        </section>
+
+        <section id="agent-practice" class="card">
+            <h2><span class="icon" style="background:rgba(34,197,94,.15);color:var(--green);">◈</span> Agent 实践借鉴 — 客服 Agent 多 Agent 协作设计</h2>
+
+            <h3>场景映射：客服 agent 在协作上遇到的真实问题</h3>
+            <p>在客服场景中，多 agent 协作是刚需而非锦上添花。典型痛点包括：</p>
+            <ul>
+                <li><strong>技术问题升级</strong>：客户来电，一线 agent 处理不了的技术问题需要转给技术支持 agent，转交时上下文容易丢失，客户被迫重复描述问题。</li>
+                <li><strong>退单审批流转</strong>：退单超过 5000 元需要主管 agent 审批，一线 agent 必须带上操作建议（如"建议同意退款，原因是物流破损"）提交审批，主管审批后一线 agent 才能执行。</li>
+                <li><strong>大促期间并行查询</strong>：一个 agent 查订单状态，另一个 agent 同时查物流轨迹，两个结果合并后才能给客户完整答复。串行查询太慢，客户等不及。</li>
+                <li><strong>VIP 专属权限</strong>：VIP 客户有专属 agent，能直接操作普通坐席没权限的功能（如免审批全额退款、优先发货），需要权限隔离。</li>
+            </ul>
+
+            <h3>借鉴 CC + 客服改造</h3>
+
+            <h4>1. 客服 agent 的任务类型定义（CC 5 种 → 客服 3 种）</h4>
+            <p>CC 定义了 7 种 TaskType（local_agent/local_bash/in_process_teammate/remote_agent/local_workflow/monitor_mcp/dream），但客服场景只需要 3 种核心模式：</p>
+            <pre><code>// CC 的 5 种运行模式 → 客服场景精简为 3 种
+type ServiceTaskType =
+  | 'sync_query'      // 同步处理：查订单、查物流、回答FAQ
+  | 'async_background' // 异步后台：发短信通知、同步CRM记录
+  | 'escalation'      // 升级转交：技术支持、主管审批
+
+type ServiceTaskStatus =
+  | 'pending' | 'handling' | 'waiting_approval'
+  | 'completed' | 'failed' | 'timeout'
+
+// 统一任务基类——借鉴 CC 的 TaskStateBase
+interface ServiceTask {
+  taskId: string
+  type: ServiceTaskType
+  status: ServiceTaskStatus
+  customerPhone: string
+  startTime: number
+  endTime?: number
+  // 输出持久化到磁盘，避免内存溢出
+  outputFilePath: string
+  kill(): Promise&lt;void&gt;
+}
+
+// 优先级路由：借鉴 CC AgentTool.call() 的级联路由
+function dispatchServiceTask(params: ServiceTaskParams): ServiceTaskResult {
+  // 优先级 1: 升级转交（金额超限/技术问题/VIP专属）
+  if (needsEscalation(params)) {
+    return escalateToSpecialist(params)
+  }
+  // 优先级 2: 异步后台（通知/日志/数据同步）
+  if (isBackgroundTask(params)) {
+    return launchBackgroundTask(params)  // fire-and-forget
+  }
+  // 默认: 同步处理（一线 agent 直接处理）
+  return handleSyncQuery(params)
+}</code></pre>
+
+            <h4>2. agent 间上下文传递协议（借鉴 CC SendMessageTool）</h4>
+            <p>CC 的 SendMessageTool 使用 <code>pendingUserMessages</code> 队列 + <code>onIdleCallbacks</code> 实现邮箱式通信。客服场景改造为"带摘要的上下文传递"——不是传递完整对话（太长），而是传递关键信息摘要：</p>
+            <pre><code>// 借鉴 CC 的 MessageRouting → 客服场景的上下文传递协议
+interface HandoffContext {
+  fromAgent: string          // 来源 agent（如 "一线坐席-A03"）
+  toAgent: string            // 目标 agent（如 "技术支持-B07"）
+  customerProfile: {
+    phone: string
+    vipLevel: 'normal' | 'silver' | 'gold' | 'platinum'
+    tags: string[]           // 如 ["高频投诉", "退款偏好"]
+  }
+  issueSummary: string       // 问题摘要（不是完整对话！）
+  actionsTaken: string[]     // 已执行的操作（如 ["已查订单 ORD-20240101", "已查物流 显示签收"]）
+  recommendation?: string    // 操作建议（如 "建议同意退款，物流显示破损"）
+  urgency: 'low' | 'medium' | 'high' | 'critical'
+}
+
+// 上下文传递——借鉴 CC 的 handleMessage + pendingUserMessages
+function handoffToSpecialist(context: HandoffContext): void {
+  const targetAgent = findAvailableAgent(context.toAgent)
+  // 摘要注入 target agent 的消息队列
+  targetAgent.pendingMessages.push(formatHandoffPrompt(context))
+  // 借鉴 CC 的 onIdleCallbacks：如果目标 agent 空闲，立即唤醒
+  if (targetAgent.isIdle) {
+    targetAgent.onIdleCallbacks.forEach(cb => cb())
+  }
+}
+
+// 格式化转交提示——关键信息在前，不是原始对话堆砌
+function formatHandoffPrompt(ctx: HandoffContext): string {
+  return `[客户转交] 来自 ${ctx.fromAgent}
+客户: ${ctx.customerProfile.phone} (${ctx.customerProfile.vipLevel})
+问题: ${ctx.issueSummary}
+已处理: ${ctx.actionsTaken.join('; ')}
+建议: ${ctx.recommendation || '无'}
+紧急度: ${ctx.urgency}`
+}</code></pre>
+
+            <h4>3. 并行查询 + 结果合并（借鉴 CC Fork cache-identical）</h4>
+            <p>CC 的 Fork 模式通过共享 system prompt 实现 cache-identical 前缀。客服场景借鉴其"共享上下文、独立执行"的思想，做并行查询：</p>
+            <pre><code>// 借鉴 CC Fork 的"共享上下文、独立执行" → 客服并行查询
+async function parallelQuery(customerId: string, issues: string[]) {
+  // 共享上下文：客户基本信息（避免每个 agent 重复查）
+  const sharedContext = {
+    customerId,
+    customerProfile: await getCustomerProfile(customerId),
+  }
+
+  // 并行派生多个查询任务——类似 CC 的 Fork 子 agent
+  const tasks = issues.map(issue => ({
+    agent: selectAgentForIssue(issue),
+    context: { ...sharedContext, query: issue },
+  }))
+
+  // Promise.allSettled——不因单个查询失败而放弃全部
+  const results = await Promise.allSettled(
+    tasks.map(t => t.agent.query(t.context))
+  )
+
+  // 合并结果——每个查询只返回摘要，不是原始数据
+  return results.map((r, i) => ({
+    issue: issues[i],
+    status: r.status,
+    summary: r.status === 'fulfilled' ? r.value.summary : '查询失败',
+  }))
+}
+
+// 使用示例：大促期间同时查订单 + 物流
+const queryResults = await parallelQuery('CUS-12345', [
+  '查询订单 ORD-20240101 的状态',
+  '查询订单 ORD-20240101 的物流轨迹',
+])
+// → [{ issue: '订单状态', summary: '已发货，预计明天到达' },
+//    { issue: '物流轨迹', summary: '最新节点: 广州中转站，今天14:00' }]</code></pre>
+
+            <h4>4. 升级审批流程（借鉴 CC 计划审批机制）</h4>
+            <p>CC 的 <code>plan_mode_required</code> teammate 需要提交计划等待 leader 审批。客服场景改造为"一线 agent 提交操作建议 → 主管审批"：</p>
+            <pre><code>// 借鉴 CC 的 plan_approval/plan_rejection → 客服升级审批
+interface EscalationRequest {
+  requestId: string
+  fromAgent: string
+  customerPhone: string
+  issueType: 'refund' | 'compensation' | 'technical' | 'complaint'
+  amount?: number            // 退单金额
+  recommendation: string     // 一线 agent 的建议
+  evidence: string[]         // 支撑材料（订单截图、物流证据等）
+}
+
+// 一线 agent 提交审批
+async function submitApproval(req: EscalationRequest): Promise&lt;void&gt; {
+  const supervisor = await findAvailableSupervisor(req.issueType)
+  // 借鉴 CC 的 pendingUserMessages 队列
+  supervisor.pendingApprovals.push(req)
+  // 通知主管（类似 CC 的 onIdleCallbacks）
+  notifySupervisor(supervisor.id, `新的审批请求: ${req.issueType}`)
+}
+
+// 主管审批——借鉴 CC 的 handlePlanApproval / handlePlanRejection
+async function handleApproval(
+  requestId: string,
+  decision: 'approved' | 'rejected',
+  feedback?: string
+): Promise&lt;void&gt; {
+  const req = findEscalationRequest(requestId)
+  if (decision === 'approved') {
+    // 自动执行一线 agent 的建议（如发起退款）
+    await executeRecommendation(req.recommendation)
+  }
+  // 回传审批结果给一线 agent
+  notifyAgent(req.fromAgent, {
+    requestId,
+    decision,
+    feedback,  // 如 "同意退款，但下次先核实物流再提交"
+  })
+}</code></pre>
+
+            <h3>落地清单</h3>
+            <div class="two-col">
+                <div class="info-box tip">
+                    <strong>必须抄的：</strong><br>
+                    1. <strong>统一任务类型</strong>——所有 agent 任务共享同一个 ServiceTask 接口，新增任务类型不改下游代码。<br>
+                    2. <strong>agent 间消息协议</strong>——传递摘要而非完整对话，带操作建议和紧急度。<br>
+                    3. <strong>上下文共享</strong>——并行查询前共享客户基本信息，避免每个 agent 重复查 CRM。<br>
+                    4. <strong>审批流程</strong>——一线 agent 不能直接执行超额操作，必须经过主管 agent 审批。
+                </div>
+                <div class="info-box warning">
+                    <strong>不需要抄的：</strong><br>
+                    1. <strong>5 种运行模式</strong>——客服场景 3 种够用（同步/异步/升级），不需要 Fork cache 优化和 Dream agent。<br>
+                    2. <strong>Fork cache-identical 优化</strong>——客服对话短（平均 5-10 轮），不需要 prompt cache 共享来节省 token。<br>
+                    3. <strong>Remote agent</strong>——客服 agent 都在内网运行，不需要远程执行能力。<br>
+                    4. <strong>Dream agent</strong>——后台自动思考在客服场景没有意义。
+                </div>
+            </div>
+
+            <div class="info-box warning">
+                <strong>常见坑：</strong>
+                <strong>1. 转交时丢失上下文</strong>——最常见的问题。一线 agent 转交时只传了"客户要退款"，没传订单号、退款原因、已处理步骤，导致技术支持/主管 agent 重复询问客户，体验极差。必须在 HandoffContext 中强制包含 actionsTaken 和 recommendation 字段。
+                <strong>2. 并行查询没有超时控制</strong>——一个查询卡住（如物流系统响应慢），整个并行任务都卡住。每个并行查询必须设独立超时，超时的返回默认值而非阻塞。
+                <strong>3. 主管审批变成瓶颈</strong>——所有升级请求都走同一个主管队列，大促期间主管处理不过来，客户等待超时。需要按问题类型分配多个主管，并设超时自动升级机制。
+            </div>
+        </section>
+
+        <section id="code-index" class="card">
+            <h2>代码索引</h2>
+            <table>
+                <thead><tr><th>文件</th><th>行数</th><th>说明</th></tr></thead>
+                <tbody>
+                    <tr><td><code>Task.ts</code></td><td>~126</td><td>Task 类型定义：TaskType, TaskStatus, TaskStateBase, Task 接口, ID 生成</td></tr>
+                    <tr><td><code>tasks.ts</code></td><td>~40</td><td>任务注册表：getAllTasks(), getTaskByType()</td></tr>
+                    <tr><td><code>tools/AgentTool/AgentTool.tsx</code></td><td>~1398</td><td>AgentTool 入口：call() 路由逻辑、5 种运行模式分发</td></tr>
+                    <tr><td><code>tools/AgentTool/runAgent.ts</code></td><td>~974</td><td>Agent 执行引擎：MCP 初始化、query() 循环、消息过滤、system prompt 构建</td></tr>
+                    <tr><td><code>tools/AgentTool/forkSubagent.ts</code></td><td>~211</td><td>Fork 子 agent：消息构建、worktree 通知、递归防护</td></tr>
+                    <tr><td><code>tools/AgentTool/loadAgentsDir.ts</code></td><td>~文件</td><td>Agent 定义加载：目录扫描、frontmatter 解析</td></tr>
+                    <tr><td><code>tools/AgentTool/builtInAgents.ts</code></td><td>~文件</td><td>内置 agent 类型定义</td></tr>
+                    <tr><td><code>tools/AgentTool/agentMemory.ts</code></td><td>~文件</td><td>Agent 记忆快照管理</td></tr>
+                    <tr><td><code>tools/SendMessageTool/SendMessageTool.ts</code></td><td>~918</td><td>多 agent 通信：handleMessage, handleBroadcast, 关闭协商, 计划审批</td></tr>
+                    <tr><td><code>tools/TeamCreateTool/</code></td><td>目录</td><td>团队创建工具（Swarm 模式）</td></tr>
+                    <tr><td><code>tools/TeamDeleteTool/</code></td><td>目录</td><td>团队删除工具</td></tr>
+                    <tr><td><code>tasks/LocalAgentTask/LocalAgentTask.tsx</code></td><td>~683</td><td>本地 agent 任务：注册、进度追踪、后台化、完成/失败处理</td></tr>
+                    <tr><td><code>tasks/LocalShellTask/LocalShellTask.tsx</code></td><td>~523</td><td>Shell 命令任务：spawn、后台化、stall 检测、通知</td></tr>
+                    <tr><td><code>tasks/InProcessTeammateTask/InProcessTeammateTask.tsx</code></td><td>~126</td><td>In-process teammate：kill、消息注入、shutdown 协商</td></tr>
+                    <tr><td><code>tasks/InProcessTeammateTask/types.ts</code></td><td>~122</td><td>Teammate 状态类型定义：TeammateIdentity, 消息上限</td></tr>
+                    <tr><td><code>tasks/RemoteAgentTask/RemoteAgentTask.tsx</code></td><td>~856</td><td>远程 agent：session 管理、轮询、review 提取、ultraplan 处理</td></tr>
+                    <tr><td><code>tasks/DreamTask/DreamTask.ts</code></td><td>~158</td><td>Dream agent：自动启动、turn 追踪、consolidation lock 回滚</td></tr>
+                    <tr><td><code>tools/TaskOutputTool/</code></td><td>目录</td><td>任务输出查询工具</td></tr>
+                    <tr><td><code>tools/TaskStopTool/</code></td><td>目录</td><td>任务终止工具</td></tr>
+                    <tr><td><code>tools/TaskCreateTool/</code>~<code>TaskListTool/</code></td><td>目录</td><td>TodoV2 任务管理工具集</td></tr>
+                </tbody>
+            </table>
+        </section>
+        <footer style="text-align:center; padding:32px 0 20px; margin-top:48px; border-top:1px solid var(--border); color:var(--text-secondary); font-size:13px; line-height:2;">
+        <div style="margin-bottom:4px;">⚠️ 免责声明</div>
+        本文仅用于技术学习和架构分析目的。源码分析基于公开泄漏的代码，所有商标和版权归 <a href="https://www.anthropic.com" style="color:var(--indigo);">Anthropic</a> 所有。未经授权不得用于商业用途。
+    </footer>
+    </main>
+</body>
+</html>
