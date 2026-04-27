@@ -54,6 +54,7 @@
 | [14-native.html](14-native.html) | Native 能力 |
 | [16-anti-distillation.html](16-anti-distillation.html) | 反蒸馏与输出保护 |
 | [17-buddy.html](17-buddy.html) | Buddy 宠物系统 |
+| [18-telemetry.html](18-telemetry.html) | 遥测与用户画像 |
 
 ### 流程图
 | 文件 | 内容 |

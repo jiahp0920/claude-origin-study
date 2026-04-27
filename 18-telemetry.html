@@ -1,0 +1,731 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>遥测与用户画像 - Claude Code 源码分析</title>
+    <link rel="stylesheet" href="shared/styles.css">
+</head>
+<body>
+    <nav class="sidebar">
+<div class="sidebar-header"><div class="logo">CC</div><div><div class="sidebar-title">Claude Code</div><div class="sidebar-subtitle">源码深度分析</div></div></div>
+        <div class="nav-section-title">总览</div>
+        <a href="reading-guide.html" class="nav-link">阅读指南</a>
+        <a href="index.html" class="nav-link">架构全景</a>
+        <a href="dependency-map.html" class="nav-link">模块依赖图</a>
+        <a href="vertical-agent-guide.html" class="nav-link">垂直 Agent 设计指南</a>
+<div class="nav-section-title">核心流程</div>
+<a href="00-startup.html" class="nav-link">启动链路</a>
+<a href="01-query-loop.html" class="nav-link">Query 循环</a>
+<a href="flows/query-lifecycle.html" class="nav-link">查询生命周期</a>
+<div class="nav-section-title">核心机制</div>
+<a href="02-tool-dispatch.html" class="nav-link">工具调度</a>
+<a href="03-permissions.html" class="nav-link">权限系统</a>
+<a href="03b-security-hardening.html" class="nav-link">风控与安全加固</a>
+<a href="04-agent-arch.html" class="nav-link">Agent 架构</a>
+<a href="11-hooks.html" class="nav-link">Hook 机制</a>
+<div class="nav-section-title">扩展体系</div>
+<a href="05-mcp.html" class="nav-link">MCP 体系</a>
+<a href="07-plugins.html" class="nav-link">插件系统</a>
+<a href="08-commands.html" class="nav-link">命令系统</a>
+<div class="nav-section-title">数据与服务</div>
+<a href="06-context-mgmt.html" class="nav-link">上下文管理</a>
+<a href="10-services.html" class="nav-link">服务层</a>
+<a href="15-cost-limits.html" class="nav-link">成本与限流</a>
+<div class="nav-section-title">界面与配置</div>
+<a href="09-ui.html" class="nav-link">UI 交互层</a>
+<a href="13-config.html" class="nav-link">配置与迁移</a>
+<div class="nav-section-title">外围能力</div>
+<a href="12-external.html" class="nav-link">外部集成</a>
+<a href="14-native.html" class="nav-link">Native 能力</a>
+<div class="nav-section-title">安全专题</div>
+<a href="16-anti-distillation.html" class="nav-link">反蒸馏与输出保护</a>
+<a href="17-buddy.html" class="nav-link">Buddy 宠物系统</a>
+<div class="nav-section-title">数据专题</div>
+<a href="18-telemetry.html" class="nav-link active">遥测与用户画像</a>
+<div class="nav-section-title">流程图</div>
+<a href="flows/tool-execution.html" class="nav-link">工具执行流程</a>
+<a href="flows/agent-collab.html" class="nav-link">Agent 协作流程</a>
+</nav>
+    <main class="content">
+        <header class="page-header">
+            <span class="breadcrumb"><a href="index.html">源码分析</a></span>
+            <h1>遥测与用户画像</h1>
+            <p class="subtitle">Claude Code 的多管道遥测架构 — 664 种 tengu_ 事件、Datadog 实时监控、1P BigQuery 数据仓库、GrowthBook A/B 实验平台、用户画像收集、PII 分层保护的完整实现</p>
+        </header>
+
+        <nav class="page-toc">
+    <div class="page-toc-title">页面导航</div>
+        <a href="#overview"><span class="toc-dot dot-overview"></span>职责概述</a>
+        <a href="#architecture"><span class="toc-dot dot-arch"></span>架构设计</a>
+        <a href="#event-bus"><span class="toc-dot dot-data"></span>事件总线与队列</a>
+        <a href="#datadog"><span class="toc-dot dot-data"></span>Datadog 实时监控</a>
+        <a href="#first-party"><span class="toc-dot dot-arch"></span>1P 事件日志 (BigQuery)</a>
+        <a href="#growthbook"><span class="toc-dot dot-arch"></span>GrowthBook A/B 实验</a>
+        <a href="#metadata"><span class="toc-dot dot-arch"></span>元数据收集引擎</a>
+        <a href="#user-profile"><span class="toc-dot dot-code"></span>用户画像维度</a>
+        <a href="#privacy"><span class="toc-dot dot-data"></span>隐私保护机制</a>
+        <a href="#events-taxonomy"><span class="toc-dot dot-design"></span>事件分类体系</a>
+        <a href="#patterns"><span class="toc-dot dot-arch"></span>设计模式</a>
+        <a href="#agent-practice"><span class="toc-dot dot-practice"></span>Agent 实践借鉴</a>
+        <a href="#code-index"><span class="toc-dot dot-code"></span>代码索引</a>
+</nav>
+
+        <section id="overview" class="card">
+            <h2>职责概述</h2>
+            <p>CC 的遥测系统是一个多管道、多目的的数据收集体系。它同时服务于四个目标：<strong>产品质量监控</strong>（Datadog 实时告警）、<strong>用户行为分析</strong>（BigQuery 数据仓库）、<strong>产品实验</strong>（GrowthBook A/B 测试）、<strong>计费与限流</strong>（token 用量追踪）。系统设计了精细的 PII 分层保护、隐私控制和管道熔断机制，在数据收集与用户隐私之间取得了平衡。</p>
+            <div class="component-box">
+                <div class="name">664 种 tengu_ 事件 × 3 条管道</div>
+                <div class="desc">每个事件路由到 Datadog（白名单 64 种）或 1P（全量）或两者</div>
+            </div>
+        </section>
+
+        <section id="architecture" class="card">
+            <h2>架构设计</h2>
+            <div class="layer-diagram">
+                <div class="layer" style="border-color:var(--blue);background:rgba(59,130,246,.06);">
+                    <div class="layer-header" style="color:var(--blue);">上层 — 事件生产者（散布在各模块中）</div>
+                    <div class="layer-body">
+                        <div class="layer-component highlight" style="border-color:var(--blue);">logEvent() / logEventAsync() — 统一公共 API</div>
+                        <div class="layer-component" style="border-color:var(--blue);">Query 循环、工具执行、Git 操作、认证、MCP 等 664 个调用点</div>
+                    </div>
+                </div>
+                <div class="layer-arrow">▼</div>
+                <div class="layer" style="border-color:var(--purple);background:rgba(139,92,246,.06);">
+                    <div class="layer-header" style="color:var(--purple);">中层 — 事件总线与路由</div>
+                    <div class="layer-body">
+                        <div class="layer-component" style="border-color:var(--purple);">Event Queue — Sink 附加前缓存，附加后排空</div>
+                        <div class="layer-component" style="border-color:var(--purple);">Metadata Enrichment — 注入环境/用户/进程上下文</div>
+                        <div class="layer-component" style="border-color:var(--purple);">Sink Router → Datadog + 1P 双管道分发</div>
+                        <div class="layer-component" style="border-color:var(--purple);">Sink Killswitch — GrowthBook 动态熔断</div>
+                    </div>
+                </div>
+                <div class="layer-arrow">▼</div>
+                <div class="layer" style="border-color:var(--green);background:rgba(34,197,94,.06);">
+                    <div class="layer-header" style="color:var(--green);">底层 — 数据管道</div>
+                    <div class="layer-body">
+                        <div class="layer-component" style="border-color:var(--green);">Datadog HTTP API — 批量日志（15s/100条）→ us5.datadoghq.com</div>
+                        <div class="layer-component" style="border-color:var(--green);">1P OTel Pipeline → api.anthropic.com/event_logging/batch → BigQuery</div>
+                        <div class="layer-component" style="border-color:var(--green);">GrowthBook SDK → api.anthropic.com → Feature Gate + A/B 实验</div>
+                        <div class="layer-component" style="border-color:var(--green);">BigQuery Metrics Exporter → api.anthropic.com/claude_code/metrics</div>
+                    </div>
+                </div>
+            </div>
+
+            <h3>数据流全景</h3>
+            <pre><code>                           logEvent() / logEventAsync()
+                                    │
+                            ┌───────┴───────┐
+                            │  Event Queue  │ ← Sink 未附加时缓存
+                            └───────┬───────┘
+                                    │ Sink 附加后一次性排空
+                            ┌───────┴───────┐
+                            │  Sink Router  │ ← metadata.ts 注入上下文
+                            └───┬───────┬───┘
+                    ┌───────────┘       └───────────┐
+                    ▼                               ▼
+          ┌─────────────────┐            ┌─────────────────────┐
+          │  Datadog Sink   │            │  1P Event Logger    │
+          │  (白名单 64 种)  │            │  (OTel LoggerProv.) │
+          └────────┬────────┘            └──────────┬──────────┘
+                   │                                │
+                   ▼                                ▼
+          Datadog HTTP API              FirstPartyEventLoggingExporter
+          (us5.datadoghq.com)           (protobuf 序列化 + 重试)
+                                             │
+                                             ▼
+                                  api.anthropic.com/event_logging/batch
+                                             │
+                                             ▼
+                                       BigQuery 仓库
+
+          GrowthBook SDK (remoteEval)
+               │
+               ├──→ Feature Gates (控制 Datadog 开关等)
+               ├──→ Dynamic Configs (采样率、批次配置)
+               └──→ Experiment Exposures → 1P Event Logger</code></pre>
+        </section>
+
+        <section id="event-bus" class="card">
+            <h2><span class="icon" style="background:rgba(59,130,246,.15);color:var(--blue);">◉</span> 事件总线与队列</h2>
+            <p><code>logEvent()</code> 是整个遥测系统的统一入口。它实现了<strong>延迟绑定</strong>模式：在 Sink 附加前，所有事件缓存在内存队列中；Sink 附加后，队列一次性排空到真实管道。这确保了启动早期的事件（如初始化错误）不会丢失。</p>
+            <div class="component-box">
+                <div class="name">logEvent() 事件总线</div>
+                <div class="desc">延迟绑定 + 类型安全 + PII 标记强制验证</div>
+                <pre><code>// services/analytics/index.ts
+
+// 公共 API — 所有模块通过此函数上报事件
+export function logEvent(
+  eventName: string,
+  eventProperties?: Record&lt;string, unknown&gt;,
+  analyticsMetadata?: AnalyticsMetadata_I_VERIFIED_THIS_IS_NOT_CODE_OR_FILEPATHS,
+): void
+
+// 异步版本 — 支持需要 await 的元数据收集
+export async function logEventAsync(
+  eventName: string,
+  eventProperties?: Record&lt;string, unknown&gt;,
+  analyticsMetadata?: AnalyticsMetadata_I_VERIFIED_THIS_IS_NOT_CODE_OR_FILEPATHS,
+): Promise&lt;void&gt;
+
+// 类型标记：强制开发者显式验证字符串不含代码/文件路径
+type AnalyticsMetadata_I_VERIFIED_THIS_IS_NOT_CODE_OR_FILEPATHS = {
+  [key: string]: string | boolean | number | null
+}
+
+// PII 标记：标记字段发送至特权 BigQuery 列
+type AnalyticsMetadata_I_VERIFIED_THIS_IS_PII_TAGGED = {
+  _PROTO_EMAIL?: string
+  _PROTO_SKILL_NAME?: string
+  _PROTO_PLUGIN_NAME?: string
+  _PROTO_MARKETPLACE_NAME?: string
+}
+
+// Sink 未附加时 → 缓存到 eventQueue
+// Sink 附加后 → 排空队列 + 后续事件直接分发
+const eventQueue: QueuedEvent[] = []</code></pre>
+            </div>
+            <div class="info-box tip">类型标记设计很巧妙：<code>I_VERIFIED_THIS_IS_NOT_CODE_OR_FILEPATHS</code> 不是一个接口而是一个类型别名，开发者每次调用 <code>logEvent</code> 时必须显式声明变量类型，强制其确认数据合规。这是一种编译期的"勾选确认"机制。</div>
+        </section>
+
+        <section id="datadog" class="card">
+            <h2><span class="icon" style="background:rgba(99,102,241,.15);color:var(--indigo);">📊</span> Datadog 实时监控管道</h2>
+            <p>Datadog 管道负责<strong>实时告警和运营监控</strong>。采用白名单机制（仅 64 种事件），用户 ID 哈希到 30 个桶（不可逆），仅限第一方 API 提供商。</p>
+            <div class="component-box">
+                <div class="name">Datadog 日志集成</div>
+                <div class="desc">批量发送 + 白名单 + 用户桶 + 15s 刷新</div>
+                <pre><code>// services/analytics/datadog.ts
+
+const DATADOG_ENDPOINT = 'https://http-intake.logs.us5.datadoghq.com/api/v2/logs'
+const DATADOG_CLIENT_TOKEN = 'pubbbf48e6d78dae54bceaa4acf463299bf' // 硬编码
+
+// 批量配置
+const FLUSH_INTERVAL_MS = 15_000   // 15 秒刷新
+const MAX_BATCH_SIZE = 100         // 最大批次 100 条
+
+// 白名单机制 — 仅发送以下事件
+const DATADOG_ALLOWED_EVENTS = new Set([
+  'chrome_bridge_*',          // Chrome 桥接
+  'tengu_api_error',          // API 错误
+  'tengu_init',               // 初始化
+  'tengu_tool_use_success',   // 工具成功
+  'tengu_tool_use_error',     // 工具失败
+  'tengu_started',            // 启动
+  // ... 共约 64 种
+])
+
+// 用户隐私桶 — SHA-256 哈希后取模
+function getUserBucket(userId: string): number {
+  const hash = createHash('sha256').update(userId).digest('hex')
+  return parseInt(hash.slice(0, 8), 16) % 30
+}
+
+// 仅第一方提供商（排除 Bedrock/Vertex/Foundry）
+if (!isFirstPartyProvider()) return  // 跳过第三方</code></pre>
+            </div>
+            <div class="info-box tip">用户桶的设计目标不是追踪个体，而是<strong>估算受影响用户数</strong>。30 个桶意味着可以知道"大约有多少用户遇到了这个问题"，但无法知道"是哪个具体用户"。这是隐私保护与运营可观测性之间的优雅折衷。</div>
+        </section>
+
+        <section id="first-party" class="card">
+            <h2><span class="icon" style="background:rgba(139,92,246,.15);color:var(--purple);">🗄</span> 1P 事件日志 — BigQuery 数据仓库</h2>
+            <p>1P（First Party）管道是数据分析的核心，基于 OpenTelemetry 构建。全量收集 664 种事件，序列化为 Protobuf 格式，批量发送到 Anthropic API 后进入 BigQuery。支持失败重试、磁盘缓存和动态采样率配置。</p>
+            <div class="component-box">
+                <div class="name">1P 事件日志管线</div>
+                <div class="desc">OTel → Protobuf → API → BigQuery，带失败缓存和重试</div>
+                <pre><code>// services/analytics/firstPartyEventLogger.ts
+
+// 基于 OpenTelemetry LoggerProvider 构建
+const provider = new LoggerProvider({
+  resource: new Resource({
+    'service.name': 'claude-code',
+    'service.version': VERSION,
+  }),
+})
+provider.addLogRecordProcessor(
+  new BatchLogRecordProcessor(exporter, {
+    scheduledDelayMillis: 5000,    // 5 秒刷新
+    maxExportBatchSize: 512,       // 最大批次 512
+    maxQueueSize: 2048,            // 队列上限 2048
+  })
+)
+
+// 每个事件的结构
+interface ClaudeCodeInternalEvent {
+  event_id: string           // UUID
+  core_metadata: {
+    model: string            // 模型名称
+    session_id: string       // 会话 ID
+    user_type: string        // ant | external
+    beta_features: string[]  // 启用的 beta 特性
+    entrypoint: string       // cli | sdk | unknown
+    interaction_mode: string // 交互模式
+    client_type: string      // 客户端类型
+    agent_id?: string        // Agent 标识
+    agent_type?: string      // teammate | subagent | standalone
+    team_name?: string       // 团队名
+    subscription_type?: string  // max | pro | enterprise | team
+  }
+  user_metadata: {
+    device_id: string        // 设备 ID
+    session_id: string       // 会话 ID
+    email?: string           // 用户邮箱（PII）
+    app_version: string      // 应用版本
+    platform: string         // 平台
+    organization_uuid?: string
+    account_uuid?: string
+  }
+  event_metadata: Record&lt;string, unknown&gt;  // 事件特有属性
+}</code></pre>
+            </div>
+
+            <h3>失败处理：磁盘缓存 + 指数退避</h3>
+            <div class="component-box">
+                <div class="name">FirstPartyEventLoggingExporter</div>
+                <div class="desc">失败事件持久化到本地，二次退避重试（最多 8 次）</div>
+                <pre><code>// services/analytics/firstPartyEventLoggingExporter.ts
+
+// 失败事件写入磁盘缓存
+const FAILED_EVENTS_DIR = '~/.claude/telemetry/'
+const FAILED_EVENTS_FILE = '1p_failed_events.*.json'
+
+// 指数退避重试
+const MAX_RETRIES = 8
+const BASE_DELAY_MS = 1000  // 1s, 2s, 4s, 8s, 16s, 32s, 64s, 128s
+
+async function exportWithRetry(events: LogRecord[]): Promise&lt;void&gt; {
+  for (let attempt = 0; attempt &lt; MAX_RETRIES; attempt++) {
+    try {
+      await this.sendBatch(events)
+      return
+    } catch (error) {
+      if (attempt === MAX_RETRIES - 1) {
+        // 最终失败 → 写入磁盘缓存
+        await this.persistFailedEvents(events)
+        return
+      }
+      await this.delay(BASE_DELAY_MS * Math.pow(2, attempt))
+    }
+  }
+}
+
+// 支持动态配置（通过 GrowthBook）
+// - 批次大小、延迟、端点 URL、采样率均可远程调整</code></pre>
+            </div>
+        </section>
+
+        <section id="growthbook" class="card">
+            <h2><span class="icon" style="background:rgba(245,158,11,.15);color:var(--amber);">⚗</span> GrowthBook A/B 实验平台</h2>
+            <p>GrowthBook 是 CC 的特性开关和 A/B 测试平台。通过远程评估模式获取实验配置，控制 Datadog 开关、采样率、反蒸馏策略等。用户属性用于实验分组，实验曝光记录写入 1P 事件系统。</p>
+            <div class="component-box">
+                <div class="name">GrowthBook 用户属性与特性缓存</div>
+                <div class="desc">远程评估 + 磁盘缓存 + 差异化刷新频率</div>
+                <pre><code>// services/analytics/growthbook.ts
+
+const gb = new GrowthBook({
+  apiHost: 'https://api.anthropic.com/',
+  remoteEval: true,     // 远程评估模式
+  attributes: {         // 用户属性 — 实验分组依据
+    id: userId,
+    sessionId: sessionId,
+    deviceID: deviceId,
+    platform: platform,
+    apiBaseUrlHost: apiHost,
+    organizationUUID: orgUuid,
+    accountUUID: accountUuid,
+    userType: userType,              // ant | external
+    subscriptionType: subscription,  // max | pro | enterprise | team
+    rateLimitTier: tier,
+    firstTokenTime: firstTokenTime,
+    email: email,
+    appVersion: version,
+    github: {                         // CI 环境上下文
+      eventName: ghEventName,
+      repository: ghRepo,
+      runnerEnvironment: ghRunner,
+    },
+  },
+})
+
+// 特性缓存到磁盘（~/.claude.json → cachedGrowthBookFeatures）
+// 外部用户: 6 小时刷新
+// Anth 内部: 20 分钟刷新
+
+// 关键 Feature Gates
+// tengu_log_datadog_events    — Datadog 管道总开关
+// tengu_frond_boric           — 管道级熔断（datadog | firstParty）
+// tengu_anti_distill_fake_tool_injection — 假工具注入开关
+// tengu_thinking_redaction    — 思维链脱敏开关
+// tengu_event_sampling_config — 事件采样率动态配置</code></pre>
+            </div>
+            <div class="info-box tip">差异化刷新频率体现了 Anthropic 的<strong>狗粮策略</strong>：内部用户 20 分钟刷新一次，意味着新特性可以在内部快速验证；外部用户 6 小时刷新，确保外部环境的稳定性。缓存到磁盘避免了每次启动都请求远程配置。</div>
+        </section>
+
+        <section id="metadata" class="card">
+            <h2><span class="icon" style="background:rgba(6,182,212,.15);color:var(--cyan);">⚙</span> 元数据收集引擎</h2>
+            <p>每个遥测事件都通过 <code>metadata.ts</code> 注入标准化的上下文信息，包括环境、进程、工具名称清洗和文件扩展名提取。</p>
+            <div class="component-box">
+                <div class="name">metadata.ts — 每事件自动注入</div>
+                <div class="desc">环境上下文 + 进程指标 + 工具名清洗 + 文件扩展名</div>
+                <pre><code>// services/analytics/metadata.ts
+
+interface EventMetadata {
+  // 环境上下文 (EnvContext)
+  env: {
+    platform: string           // darwin | linux | win32
+    arch: string               // x64 | arm64
+    nodeVersion: string        // Node.js 版本
+    terminal: string           // 终端类型
+    packageManagers: string[]  // 检测到的包管理器
+    runtimes: string[]         // Bun | Node
+    isCi: boolean              // 是否 CI 环境
+    version: string            // CC 版本
+    buildTime: string          // 构建时间
+    deploymentEnvironment: string
+    wslVersion?: string        // WSL 版本
+    linuxDistro?: string       // Linux 发行版
+    vcs?: string               // git | none
+    githubActions?: {          // GitHub Actions 元数据
+      eventName: string
+      repository: string
+      actor: string
+      ref: string
+      runnerOS: string
+    }
+    remoteEnvironmentType?: string  // 远程环境类型
+    containerId?: string            // 容器 ID
+  }
+
+  // 进程指标 (ProcessMetrics)
+  process: {
+    uptime: number             // 进程运行时间
+    rss: number                // 常驻内存集
+    heapTotal: number          // 堆总量
+    heapUsed: number           // 堆使用量
+    external: number           // 外部内存
+    arrayBuffers: number       // ArrayBuffer 内存
+    constrainedMemory?: number // 内存限制
+    cpuUsage: number           // CPU 使用率(%)
+  }
+
+  // Agent 标识
+  agentId?: string             // 当前 Agent ID
+  parentSessionId?: string     // 父会话 ID
+  agentType?: string           // teammate | subagent | standalone
+  teamName?: string            // 团队名称
+}
+
+// 工具名称清洗 — MCP 工具名统一归一化
+// 原始: "mcp__plugin_ecc_playwright__browser_click"
+// 清洗后: "mcp_tool"（防止泄漏自定义插件名）
+// 但存在白名单豁免：特定已知 MCP 工具保留原始名称
+
+// 文件扩展名提取 — 从 Bash 命令中提取
+// "sed -i 's/foo/bar/' config.yaml" → ".yaml"
+// "python3 train.py && python3 eval.py" → ".py,.py"</code></pre>
+            </div>
+            <div class="info-box warning">工具名称清洗存在一个<strong>设计矛盾</strong>：MCP 工具名统一替换为 <code>mcp_tool</code> 是为了保护用户隐私（防止泄漏自定义工具名），但白名单豁免又暴露了部分已知 MCP 工具。这说明完全匿名化会影响数据分析的实用性，需要在隐私和可观测性之间取舍。</div>
+        </section>
+
+        <section id="user-profile" class="card">
+            <h2><span class="icon" style="background:rgba(236,72,153,.15);color:var(--pink);">👤</span> 用户画像维度</h2>
+            <p>CC 收集的用户画像数据覆盖 5 个维度，用于产品分析、计费追踪和实验分组。所有 PII 数据通过 <code>_PROTO_</code> 前缀标记，仅在特权管道中传输。</p>
+
+            <h3>维度 1：身份标识</h3>
+            <pre><code>// utils/user.ts — CoreUserData
+{
+  deviceId: string            // 持久化设备 ID（~/.claude.json）
+  sessionId: string           // 会话 ID（每次启动生成）
+  email: string               // OAuth 邮箱
+  organizationUuid: string    // 组织 UUID
+  accountUuid: string         // 账户 UUID
+  userType: 'ant' | 'external'
+  subscriptionType: 'max' | 'pro' | 'enterprise' | 'team' | null
+  rateLimitTier: string       // 速率限制层级
+  firstTokenTime: string      // 首次使用时间
+}</code></pre>
+
+            <h3>维度 2：运行环境</h3>
+            <pre><code>// 从 process, os, env 自动采集
+{
+  platform: 'darwin' | 'linux' | 'win32'
+  arch: 'x64' | 'arm64'
+  nodeVersion: 'v22.x.x'
+  terminal: 'iTerm.app' | 'vscode' | 'jetbrains'
+  packageManagers: ['npm', 'yarn', 'pnpm']
+  runtimes: ['bun', 'node']
+  isCi: boolean               // CI 环境检测
+  containerId?: string        // Docker 容器 ID
+  wslVersion?: string         // WSL 版本
+  linuxDistro?: string        // Ubuntu 22.04 等
+  vcs: 'git' | 'none'
+}</code></pre>
+
+            <h3>维度 3：行为模式</h3>
+            <pre><code>// 664 种 tengu_ 事件覆盖的行为
+{
+  toolUsage: {                // 工具使用统计
+    toolName: string          // 具体工具名
+    success: boolean
+    duration: number
+    fileExtensions: string[]  // 操作的文件类型
+  }
+  gitOperations: {            // Git 操作追踪
+    operation: 'commit' | 'push' | 'pr_create' | 'merge' | 'rebase'
+    success: boolean
+  }
+  modelUsage: {               // 模型使用情况
+    model: string
+    tokenUsage: { input, output, cacheRead, cacheWrite, webSearch }
+    cost: number
+  }
+  sessionPattern: {           // 会话模式
+    interactionMode: string
+    autoModeEnabled: boolean
+    compactTriggered: boolean
+    resumeCount: number
+  }
+}</code></pre>
+
+            <h3>维度 4：系统资源</h3>
+            <pre><code>// 每事件注入的进程指标（base64 编码）
+{
+  rss: number                 // 常驻内存集
+  heapTotal: number           // 堆总量
+  heapUsed: number            // 堆使用量
+  cpuUsage: number            // CPU 使用率
+  uptime: number              // 进程运行时间
+}</code></pre>
+
+            <h3>维度 5：CI/CD 上下文</h3>
+            <pre><code>// GitHub Actions 环境自动采集
+{
+  githubActions: {
+    eventName: 'push' | 'pull_request' | 'workflow_dispatch'
+    repository: 'owner/repo'
+    actor: 'username'
+    ref: 'refs/heads/main'
+    runnerOS: 'ubuntu-latest'
+    runnerEnvironment: 'github-hosted' | 'self-hosted'
+  }
+}</code></pre>
+        </section>
+
+        <section id="privacy" class="card">
+            <h2><span class="icon" style="background:rgba(239,68,68,.15);color:var(--red);">🛡</span> 隐私保护机制</h2>
+            <p>CC 构建了多层隐私保护：类型级 PII 标记、管道级剥离、用户级 opt-out、组织级 metrics 控制。</p>
+
+            <h3>1. PII 分层标记与管道剥离</h3>
+            <div class="component-box">
+                <div class="name">stripProtoFields() — 非特权管道 PII 剥离</div>
+                <div class="desc">_PROTO_ 前缀字段仅在 1P 特权列可见</div>
+                <pre><code>// services/analytics/index.ts
+
+// PII 字段用 _PROTO_ 前缀标记
+interface PIIFields {
+  _PROTO_EMAIL?: string         // 用户邮箱
+  _PROTO_SKILL_NAME?: string    // Skill 名称
+  _PROTO_PLUGIN_NAME?: string   // 插件名称
+  _PROTO_MARKETPLACE_NAME?: string  // 市场名称
+}
+
+// Datadog 管道发送前：stripProtoFields() 剥离所有 _PROTO_* 字段
+// 1P 管道发送前：保留 _PROTO_* 字段，写入 BigQuery 特权列
+// 这确保 PII 数据只在内部数据仓库中可见，不会泄漏到 Datadog</code></pre>
+            </div>
+
+            <h3>2. 三级隐私控制</h3>
+            <div class="component-box">
+                <div class="name">privacyLevel.ts — 隐私分层</div>
+                <div class="desc">default → no-telemetry → essential-traffic</div>
+                <pre><code>// utils/privacyLevel.ts
+
+type PrivacyLevel = 'default' | 'no-telemetry' | 'essential-traffic'
+
+// default:       正常收集所有遥测数据
+// no-telemetry:  禁用分析事件，保留必要 API 调用
+// essential-traffic: 仅保留认证和 API 请求
+
+// 控制方式：
+// DISABLE_TELEMETRY=1 → no-telemetry
+// CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1 → essential-traffic
+
+// 配置入口：
+// commands/privacy-settings/privacy-settings.tsx
+// → "Help improve Claude" (Grove) 开关
+// → 记录 tengu_grove_policy_toggled 事件</code></pre>
+            </div>
+
+            <h3>3. 组织级 Metrics Opt-Out</h3>
+            <div class="component-box">
+                <div class="name">metricsOptOut.ts — 组织级控制</div>
+                <div class="desc">组织管理员可关闭指标上报</div>
+                <pre><code>// services/api/metricsOptOut.ts
+
+// 查询组织是否启用了指标记录
+// GET https://api.anthropic.com/api/claude_code/organizations/metrics_enabled
+// 响应: { enabled: boolean }
+
+// 缓存策略：
+// - 磁盘缓存: 24 小时
+// - 内存缓存: 1 小时
+// → 避免每次启动都查询 API</code></pre>
+            </div>
+
+            <h3>4. 第三方提供商排除</h3>
+            <p>Datadog 管道对 Bedrock/Vertex/Foundry 用户完全跳过 — 第三方 API 提供商的用户数据不会发送到 Anthropic 的 Datadog 实例。1P 事件日志仍然收集，但标记了提供商类型。</p>
+        </section>
+
+        <section id="events-taxonomy" class="card">
+            <h2><span class="icon" style="background:rgba(59,130,246,.15);color:var(--blue);">📋</span> 事件分类体系</h2>
+            <p>664 种 <code>tengu_</code> 前缀事件按功能域分为以下类别：</p>
+            <table>
+                <thead><tr><th>类别</th><th>事件前缀</th><th>典型事件</th><th>路由</th></tr></thead>
+                <tbody>
+                    <tr><td>API 层</td><td><code>tengu_api_*</code></td><td>query, error, success, retry, timeout</td><td>Datadog + 1P</td></tr>
+                    <tr><td>工具使用</td><td><code>tengu_tool_use_*</code></td><td>success, error, granted_in_prompt_*</td><td>Datadog + 1P</td></tr>
+                    <tr><td>会话管理</td><td><code>tengu_started/exit/resumed/continue</code></td><td>启动、退出、恢复、继续</td><td>1P</td></tr>
+                    <tr><td>Git 操作</td><td><code>tengu_git_operation</code></td><td>commit, push, pr_create, merge, rebase</td><td>1P</td></tr>
+                    <tr><td>模型管理</td><td><code>tengu_model_*</code></td><td>fallback_triggered, manual_config</td><td>1P</td></tr>
+                    <tr><td>自动模式</td><td><code>tengu_auto_*</code></td><td>mode_*, compact_*</td><td>1P</td></tr>
+                    <tr><td>MCP</td><td><code>tengu_mcp_*</code></td><td>channel_flags, tool_use</td><td>1P</td></tr>
+                    <tr><td>认证</td><td><code>tengu_oauth_*/tengu_api_key_*</code></td><td>login, refresh, token_exchange</td><td>1P</td></tr>
+                    <tr><td>Agent</td><td><code>tengu_agent_*</code></td><td>spawn, complete, tool_*</td><td>1P</td></tr>
+                    <tr><td>成本</td><td><code>tengu_advisor_*</code></td><td>tool_token_usage</td><td>1P</td></tr>
+                    <tr><td>隐私</td><td><code>tengu_grove_*</code></td><td>policy_toggled</td><td>1P</td></tr>
+                    <tr><td>初始化</td><td><code>tengu_init</code></td><td>启动初始化</td><td>Datadog + 1P</td></tr>
+                </tbody>
+            </table>
+        </section>
+
+        <section id="patterns" class="card">
+            <h2>设计模式与亮点</h2>
+
+            <h3>1. 延迟绑定队列 — 启动早期事件不丢失</h3>
+            <p>事件总线在 Sink 附加前将所有事件缓存在内存队列中。这解决了经典的"鸡和蛋"问题：遥测系统本身初始化时可能出错，这些错误事件也需要被记录。Sink 附加后一次性排空，确保无丢失。</p>
+
+            <h3>2. 类型级 PII 强制验证</h3>
+            <p><code>I_VERIFIED_THIS_IS_NOT_CODE_OR_FILEPATHS</code> 不是运行时检查，而是编译期类型标记。开发者必须显式声明才能调用 <code>logEvent</code>，这是一种低成本高效率的代码审查提示机制。</p>
+
+            <h3>3. 管道级熔断与动态配置</h3>
+            <p>GrowthBook 的 <code>tengu_frond_boric</code> 配置可以独立关闭 Datadog 或 1P 管道，<code>tengu_event_sampling_config</code> 可以动态调整采样率。这意味着 Anthropic 可以在不发版的情况下应对数据管道故障或成本压力。</p>
+
+            <h3>4. 用户桶代替用户 ID</h3>
+            <p>Datadog 管道将用户 ID 哈希到 30 个桶，实现了"知道多少人受影响，不知道是谁受影响"的隐私目标。这是差分隐私思想在实际工程中的轻量应用。</p>
+
+            <h3>5. 磁盘缓存保障数据不丢</h3>
+            <p>1P Exporter 的失败事件写入 <code>~/.claude/telemetry/</code>，配合指数退避重试（最多 8 次，总延迟约 4 分钟），确保网络抖动不会导致数据丢失。GrowthBook 配置也缓存到磁盘，离线启动时使用缓存值。</p>
+
+            <h3>6. 工具名清洗的取舍</h3>
+            <p>MCP 工具名统一替换为 <code>mcp_tool</code>，但已知安全工具保留原名。这种"默认匿名 + 白名单豁免"的模式是隐私保护与数据实用性之间的工程折衷。</p>
+        </section>
+
+        <section id="agent-practice" class="card">
+            <h2><span class="icon" style="background:rgba(34,197,94,.15);color:var(--green);">◈</span> Agent 实践借鉴 — 垂直 Agent 的遥测体系</h2>
+
+            <h3>场景映射：客服 Agent 的遥测需求</h3>
+            <p>客服 Agent 需要追踪：对话质量（解决率/满意度）、工具调用效率（API 成功率/延迟）、用户画像（使用频率/付费层级）、系统健康（内存/CPU/错误率）。CC 的遥测架构提供了完整的参考实现。</p>
+
+            <h3>借鉴 CC：三管道遥测架构</h3>
+            <pre><code>// 客服 Agent 遥测架构 — 借鉴 CC 的多管道设计
+class AgentTelemetry {
+
+  // 管道 1：实时告警（对应 CC 的 Datadog）
+  // 用 Prometheus + Grafana 替代 Datadog
+  async pushAlert(event: AlertEvent): Promise&lt;void&gt; {
+    // 白名单机制：仅告警类事件进此管道
+    if (!this.ALERT_EVENTS.has(event.name)) return
+    await this.prometheus.push(event)
+  }
+
+  // 管道 2：数据仓库（对应 CC 的 1P BigQuery）
+  // 用 ClickHouse 替代 BigQuery
+  async logToWarehouse(event: AgentEvent): Promise&lt;void&gt; {
+    // 全量事件 + 元数据丰富
+    const enriched = this.enrichMetadata(event)
+    await this.clickhouse.insert('agent_events', enriched)
+  }
+
+  // 管道 3：实验平台（对应 CC 的 GrowthBook）
+  // 用自建 AB Platform 或 LaunchDarkly
+  async trackExperiment(userId: string, experimentId: string): Promise&lt;void&gt; {
+    const variant = this.abPlatform.getVariant(userId, experimentId)
+    await this.logToWarehouse({
+      name: 'experiment_exposure',
+      properties: { experimentId, variant },
+    })
+  }
+
+  // 元数据丰富（对应 CC 的 metadata.ts）
+  private enrichMetadata(event: AgentEvent): EnrichedEvent {
+    return {
+      ...event,
+      env: this.collectEnvContext(),      // 平台、版本、运行时
+      process: this.collectProcessMetrics(), // 内存、CPU
+      user: this.collectUserContext(),     // 用户类型、订阅级别
+      session: this.collectSessionContext(), // 会话 ID、对话轮数
+    }
+  }
+
+  // 隐私控制（对应 CC 的 stripProtoFields）
+  private stripPII(event: EnrichedEvent): SafeEvent {
+    const { _PII_EMAIL, _PII_PHONE, ...safe } = event as any
+    return safe
+  }
+}</code></pre>
+
+            <h3>落地清单</h3>
+            <div class="two-col">
+                <div class="info-box tip">
+                    <strong>必须抄的：</strong>
+                    <ul>
+                        <li><strong>延迟绑定队列</strong>：确保启动早期事件不丢失。Agent 初始化过程中的错误最关键。</li>
+                        <li><strong>PII 分层标记</strong>：敏感字段用前缀标记，告警管道自动剥离，数据仓库管道保留。</li>
+                        <li><strong>管道级熔断</strong>：任一管道故障不影响其他管道。动态配置可以远程关闭。</li>
+                        <li><strong>工具名清洗</strong>：第三方集成工具名统一归一化，防止泄漏客户自定义工具。</li>
+                    </ul>
+                </div>
+                <div class="info-box warning">
+                    <strong>不需要抄的：</strong>
+                    <ul>
+                        <li><strong>Datadog 硬编码 Token</strong>：这是 CC 特有的，自建系统用环境变量注入。</li>
+                        <li><strong>用户桶哈希</strong>：客服场景用户数有限，直接用匿名 ID 即可，不需要桶。</li>
+                        <li><strong>GrowthBook 远程评估</strong>：初期用本地配置文件就够了，规模上来后再引入远程配置。</li>
+                    </ul>
+                </div>
+            </div>
+        </section>
+
+        <section id="code-index" class="card">
+            <h2>代码索引</h2>
+            <table>
+                <thead><tr><th>文件</th><th>行数</th><th>说明</th></tr></thead>
+                <tbody>
+                    <tr><td><code>services/analytics/index.ts</code></td><td>~200</td><td>事件总线入口：logEvent/logEventAsync、事件队列、PII 标记类型</td></tr>
+                    <tr><td><code>services/analytics/datadog.ts</code></td><td>~250</td><td>Datadog 管道：批量发送、白名单、用户桶、第三方排除</td></tr>
+                    <tr><td><code>services/analytics/firstPartyEventLogger.ts</code></td><td>~300</td><td>1P 事件日志：OTel LoggerProvider、事件结构、GrowthBook 集成</td></tr>
+                    <tr><td><code>services/analytics/firstPartyEventLoggingExporter.ts</code></td><td>~350</td><td>1P 导出器：Protobuf 序列化、失败缓存、指数退避重试</td></tr>
+                    <tr><td><code>services/analytics/growthbook.ts</code></td><td>~300</td><td>GrowthBook SDK：远程评估、用户属性、特性缓存、实验曝光</td></tr>
+                    <tr><td><code>services/analytics/metadata.ts</code></td><td>~400</td><td>元数据收集：环境上下文、进程指标、工具名清洗、文件扩展名</td></tr>
+                    <tr><td><code>services/analytics/sink.ts</code></td><td>~120</td><td>路由 Sink：Datadog + 1P 双管道分发、PII 剥离</td></tr>
+                    <tr><td><code>services/analytics/sinkKillswitch.ts</code></td><td>~50</td><td>管道熔断：GrowthBook 动态配置控制</td></tr>
+                    <tr><td><code>services/analytics/config.ts</code></td><td>~60</td><td>分析配置：禁用条件（测试/第三方/用户 opt-out）</td></tr>
+                    <tr><td><code>utils/user.ts</code></td><td>~200</td><td>用户核心数据：设备 ID、会话 ID、邮箱、组织、订阅类型</td></tr>
+                    <tr><td><code>utils/telemetryAttributes.ts</code></td><td>~50</td><td>OTel 遥测属性定义</td></tr>
+                    <tr><td><code>utils/telemetry/bigqueryExporter.ts</code></td><td>~150</td><td>BigQuery 指标导出器：OTel → Anthropic API</td></tr>
+                    <tr><td><code>utils/privacyLevel.ts</code></td><td>~60</td><td>隐私三级控制：default / no-telemetry / essential-traffic</td></tr>
+                    <tr><td><code>services/diagnosticTracking.ts</code></td><td>~100</td><td>诊断追踪：IDE 文件编辑前后的错误/警告</td></tr>
+                    <tr><td><code>tools/shared/gitOperationTracking.ts</code></td><td>~80</td><td>Git 操作追踪：commit/push/pr/merge/rebase</td></tr>
+                    <tr><td><code>cost-tracker.ts</code></td><td>~200</td><td>费用追踪：token 用量 + 成本统计</td></tr>
+                    <tr><td><code>services/api/metricsOptOut.ts</code></td><td>~80</td><td>组织级指标 opt-out：API 查询 + 双层缓存</td></tr>
+                    <tr><td><code>services/api/usage.ts</code></td><td>~100</td><td>使用量查询：速率限制利用率</td></tr>
+                    <tr><td><code>commands/privacy-settings/privacy-settings.tsx</code></td><td>~150</td><td>隐私设置 UI：Grove 开关</td></tr>
+                </tbody>
+            </table>
+        </section>
+        <footer style="text-align:center; padding:32px 0 20px; margin-top:48px; border-top:1px solid var(--border); color:var(--text-secondary); font-size:13px; line-height:2;">
+        <div style="margin-bottom:4px;">⚠️ 免责声明</div>
+        本文仅用于技术学习和架构分析目的。源码分析基于公开泄漏的代码，所有商标和版权归 <a href="https://www.anthropic.com" style="color:var(--indigo);">Anthropic</a> 所有。未经授权不得用于商业用途。
+    </footer>
+    </main>
+</body>
+</html>
