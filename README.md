@@ -52,6 +52,8 @@
 |------|------|
 | [12-external.html](12-external.html) | 外部集成 |
 | [14-native.html](14-native.html) | Native 能力 |
+| [16-anti-distillation.html](16-anti-distillation.html) | 反蒸馏与输出保护 |
+| [17-buddy.html](17-buddy.html) | Buddy 宠物系统 |
 
 ### 流程图
 | 文件 | 内容 |

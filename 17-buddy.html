@@ -1,0 +1,485 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Buddy 宠物系统 - Claude Code 源码分析</title>
+    <link rel="stylesheet" href="shared/styles.css">
+</head>
+<body>
+    <nav class="sidebar">
+<div class="sidebar-header"><div class="logo">CC</div><div><div class="sidebar-title">Claude Code</div><div class="sidebar-subtitle">源码深度分析</div></div></div>
+        <div class="nav-section-title">总览</div>
+        <a href="reading-guide.html" class="nav-link">阅读指南</a>
+        <a href="index.html" class="nav-link">架构全景</a>
+        <a href="dependency-map.html" class="nav-link">模块依赖图</a>
+        <a href="vertical-agent-guide.html" class="nav-link">垂直 Agent 设计指南</a>
+<div class="nav-section-title">核心流程</div>
+<a href="00-startup.html" class="nav-link">启动链路</a>
+<a href="01-query-loop.html" class="nav-link">Query 循环</a>
+<a href="flows/query-lifecycle.html" class="nav-link">查询生命周期</a>
+<div class="nav-section-title">核心机制</div>
+<a href="02-tool-dispatch.html" class="nav-link">工具调度</a>
+<a href="03-permissions.html" class="nav-link">权限系统</a>
+<a href="03b-security-hardening.html" class="nav-link">风控与安全加固</a>
+<a href="04-agent-arch.html" class="nav-link">Agent 架构</a>
+<a href="11-hooks.html" class="nav-link">Hook 机制</a>
+<div class="nav-section-title">扩展体系</div>
+<a href="05-mcp.html" class="nav-link">MCP 体系</a>
+<a href="07-plugins.html" class="nav-link">插件系统</a>
+<a href="08-commands.html" class="nav-link">命令系统</a>
+<div class="nav-section-title">数据与服务</div>
+<a href="06-context-mgmt.html" class="nav-link">上下文管理</a>
+<a href="10-services.html" class="nav-link">服务层</a>
+<a href="15-cost-limits.html" class="nav-link">成本与限流</a>
+<div class="nav-section-title">界面与配置</div>
+<a href="09-ui.html" class="nav-link">UI 交互层</a>
+<a href="13-config.html" class="nav-link">配置与迁移</a>
+<div class="nav-section-title">外围能力</div>
+<a href="12-external.html" class="nav-link">外部集成</a>
+<a href="14-native.html" class="nav-link">Native 能力</a>
+<div class="nav-section-title">安全专题</div>
+<a href="16-anti-distillation.html" class="nav-link">反蒸馏与输出保护</a>
+<div class="nav-section-title">彩蛋</div>
+<a href="17-buddy.html" class="nav-link active">Buddy 宠物系统</a>
+<div class="nav-section-title">流程图</div>
+<a href="flows/tool-execution.html" class="nav-link">工具执行流程</a>
+<a href="flows/agent-collab.html" class="nav-link">Agent 协作流程</a>
+</nav>
+    <main class="content">
+        <header class="page-header">
+            <span class="breadcrumb"><a href="index.html">源码分析</a></span>
+            <h1>Buddy 宠物系统</h1>
+            <p class="subtitle">终端内的虚拟宠物 — 确定性生成、防篡改稀有度、ASCII 精灵动画、AI 驱动个性的完整情感化设计系统</p>
+        </header>
+
+        <nav class="page-toc">
+    <div class="page-toc-title">页面导航</div>
+        <a href="#overview"><span class="toc-dot dot-overview"></span>职责概述</a>
+        <a href="#architecture"><span class="toc-dot dot-arch"></span>架构设计</a>
+        <a href="#roll"><span class="toc-dot dot-data"></span>确定性生成</a>
+        <a href="#species"><span class="toc-dot dot-data"></span>物种与稀有度</a>
+        <a href="#sprites"><span class="toc-dot dot-arch"></span>精灵动画</a>
+        <a href="#soul"><span class="toc-dot dot-arch"></span>AI 个性系统</a>
+        <a href="#obfuscation"><span class="toc-dot dot-arch"></span>物种名混淆</a>
+        <a href="#patterns"><span class="toc-dot dot-arch"></span>设计模式</a>
+        <a href="#agent-practice"><span class="toc-dot dot-practice"></span>Agent 实践借鉴</a>
+        <a href="#code-index"><span class="toc-dot dot-code"></span>代码索引</a>
+</nav>
+
+        <section id="overview" class="card">
+            <h2>职责概述</h2>
+            <p>Buddy 是 Claude Code 的终端虚拟宠物系统。用户通过 <code>/buddy</code> 命令孵化一只 ASCII 精灵宠物，它坐在输入框旁边，有自己的名字、性格、物种和稀有度。宠物会观察对话、偶尔用气泡发言，用户可以直接叫它的名字和它互动。</p>
+            <p>这不仅仅是一个彩蛋 — 它是 CC "情感化设计"的核心：在严肃的编码工具中加入有个性、有稀有度、有互动的陪伴角色，通过情感连接增加用户粘性和付费意愿。</p>
+        </section>
+
+        <section id="architecture" class="card">
+            <h2>架构设计</h2>
+            <div class="layer-diagram">
+                <div class="layer layer-entry">
+                    <div class="layer-header">命令入口</div>
+                    <div class="layer-body">
+                        <div class="layer-component highlight">/buddy hatch — 孵化宠物</div>
+                        <div class="layer-component">/buddy pet — 摸头飘心</div>
+                        <div class="layer-component">/buddy mute / unmute — 静音</div>
+                    </div>
+                </div>
+                <div class="layer-arrow">▼</div>
+                <div class="layer" style="border-color:var(--green);background:rgba(34,197,94,.06);">
+                    <div class="layer-header" style="color:var(--green);">确定性生成层</div>
+                    <div class="layer-body">
+                        <div class="layer-component highlight">companion.ts — roll(userId) 确定性生成</div>
+                        <div class="layer-component">Mulberry32 PRNG + hash(userId + salt)</div>
+                        <div class="layer-component">Bones（外观）不持久化，每次重算</div>
+                    </div>
+                </div>
+                <div class="layer-arrow">▼</div>
+                <div class="layer" style="border-color:var(--purple);background:rgba(139,92,246,.06);">
+                    <div class="layer-header" style="color:var(--purple);">渲染层</div>
+                    <div class="layer-body">
+                        <div class="layer-component highlight">CompanionSprite.tsx — 终端精灵渲染</div>
+                        <div class="layer-component">sprites.ts — 18 种 × 3 帧 ASCII 精灵</div>
+                        <div class="layer-component">500ms tick + idle 序列 + 飘心动画</div>
+                    </div>
+                </div>
+                <div class="layer-arrow">▼</div>
+                <div class="layer" style="border-color:var(--cyan);background:rgba(6,182,212,.06);">
+                    <div class="layer-header" style="color:var(--cyan);">AI 个性层</div>
+                    <div class="layer-body">
+                        <div class="layer-component highlight">prompt.ts — 系统提示注入</div>
+                        <div class="layer-component">Observer 监听对话 → 气泡发言</div>
+                        <div class="layer-component">Soul（名字+性格）由模型生成</div>
+                    </div>
+                </div>
+                <div class="layer-arrow">▼</div>
+                <div class="layer" style="border-color:var(--amber);background:rgba(245,158,11,.06);">
+                    <div class="layer-header" style="color:var(--amber);">存储层</div>
+                    <div class="layer-body">
+                        <div class="layer-component">config.ts — StoredCompanion（Soul + hatchedAt）</div>
+                        <div class="layer-component">Bones 不存储，防篡改</div>
+                    </div>
+                </div>
+            </div>
+        </section>
+
+        <section id="roll" class="card">
+            <h2><span class="icon" style="background:rgba(34,197,94,.15);color:var(--green);">🎲</span> 确定性生成 — 同一用户永远是同一只</h2>
+            <p>Buddy 的核心设计是"确定性随机"：使用 <code>hash(userId + salt)</code> 作为 Mulberry32 PRNG 的种子。同一个用户无论在什么时候、什么机器上，都会生成完全相同的宠物属性。</p>
+            <div class="component-box">
+                <div class="name">roll(userId) — 确定性属性生成</div>
+                <div class="desc">Mulberry32 PRNG + FNV-1a hash，带结果缓存</div>
+                <pre><code>// companion.ts
+
+// Mulberry32 — 小型种子 PRNG，用于确定性抽卡
+function mulberry32(seed: number): () => number {
+  let a = seed >>> 0
+  return function () {
+    a |= 0
+    a = (a + 0x6d2b79f5) | 0
+    let t = Math.imul(a ^ (a >>> 15), 1 | a)
+    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296
+  }
+}
+
+function hashString(s: string): number {
+  // Bun 环境使用 Bun.hash()，其他环境用 FNV-1a
+  if (typeof Bun !== 'undefined') {
+    return Number(BigInt(Bun.hash(s)) & 0xffffffffn)
+  }
+  let h = 2166136261  // FNV offset basis
+  for (let i = 0; i < s.length; i++) {
+    h ^= s.charCodeAt(i)
+    h = Math.imul(h, 16777619)  // FNV prime
+  }
+  return h >>> 0
+}
+
+const SALT = 'friend-2026-401'
+
+export function roll(userId: string): Roll {
+  const key = userId + SALT
+  // 缓存：500ms tick / 每次按键 / 每轮 observer 都会调用
+  if (rollCache?.key === key) return rollCache.value
+  const value = rollFrom(mulberry32(hashString(key)))
+  rollCache = { key, value }
+  return value
+}</code></pre>
+            </div>
+            <div class="info-box tip">为什么用确定性而非真随机？两个原因：① 用户换设备后宠物还是同一只（情感连续性）② Bones 不需要存储（只存 Soul），节省空间且<strong>防篡改</strong> — 用户无法通过编辑 config 文件伪造 legendary 稀有度。</div>
+        </section>
+
+        <section id="species" class="card">
+            <h2><span class="icon" style="background:rgba(139,92,246,.15);color:var(--purple);">✦</span> 物种与稀有度系统</h2>
+            <p>18 种物种，5 档稀有度，6 种眼睛，8 种帽子，1% shiny 概率。稀有度不仅影响视觉效果，还决定了属性下限。</p>
+
+            <h3>稀有度分布</h3>
+            <div class="flow-chart vertical">
+                <div class="flow-step">
+                    <div class="flow-step-title">稀有度权重（类卡牌游戏设计）</div>
+                    <div class="flow-step-desc">
+                        <table>
+                            <thead><tr><th>稀有度</th><th>权重</th><th>概率</th><th>属性下限</th><th>星级</th></tr></thead>
+                            <tbody>
+                                <tr><td><strong>Common</strong></td><td>60</td><td>~60%</td><td>5</td><td>★</td></tr>
+                                <tr><td><strong>Uncommon</strong></td><td>25</td><td>~25%</td><td>15</td><td>★★</td></tr>
+                                <tr><td><strong style="color:var(--cyan);">Rare</strong></td><td>10</td><td>~10%</td><td>25</td><td>★★★</td></tr>
+                                <tr><td><strong style="color:var(--purple);">Epic</strong></td><td>4</td><td>~4%</td><td>35</td><td>★★★★</td></tr>
+                                <tr><td><strong style="color:var(--amber);">Legendary</strong></td><td>1</td><td>~1%</td><td>50</td><td>★★★★★</td></tr>
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+                <div class="flow-arrow">↓</div>
+                <div class="flow-step">
+                    <div class="flow-step-title">18 种物种</div>
+                    <div class="flow-step-desc">
+                        <div class="two-col" style="gap:8px;">
+                            <div>
+                                <strong>动物系：</strong>duck, goose, cat, dragon, octopus, owl, penguin, turtle, snail, ghost, axolotl, capybara, rabbit
+                            </div>
+                            <div>
+                                <strong>非动物系：</strong>blob, cactus, robot, mushroom, chonk
+                            </div>
+                        </div>
+                    </div>
+                </div>
+                <div class="flow-arrow">↓</div>
+                <div class="flow-step">
+                    <div class="flow-step-title">属性系统（5 维）</div>
+                    <div class="flow-step-desc">
+                        <p>每个宠物有一个<strong>峰值属性</strong>（floor + 50~80）和一个<strong>低谷属性</strong>（floor - 10~+5），其余属性在 floor ~ floor+40 之间随机。稀有度越高，属性下限越高。</p>
+                        <div style="display:flex;gap:12px;flex-wrap:wrap;">
+                            <div class="tier-row"><div class="tier-num" style="background:var(--green);">D</div><div class="tier-body"><div class="tier-title">DEBUGGING</div><div class="tier-desc">调试能力</div></div></div>
+                            <div class="tier-row"><div class="tier-num" style="background:var(--cyan);">P</div><div class="tier-body"><div class="tier-title">PATIENCE</div><div class="tier-desc">耐心</div></div></div>
+                            <div class="tier-row"><div class="tier-num" style="background:var(--red);">C</div><div class="tier-body"><div class="tier-title">CHAOS</div><div class="tier-desc">混乱度</div></div></div>
+                            <div class="tier-row"><div class="tier-num" style="background:var(--purple);">W</div><div class="tier-body"><div class="tier-title">WISDOM</div><div class="tier-desc">智慧</div></div></div>
+                            <div class="tier-row"><div class="tier-num" style="background:var(--amber);">S</div><div class="tier-body"><div class="tier-title">SNARK</div><div class="tier-desc">毒舌度</div></div></div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <h3>外观组合</h3>
+            <div class="component-box">
+                <div class="name">CompanionBones — 外观骨骼数据</div>
+                <div class="desc">由 roll() 确定性生成，不持久化存储</div>
+                <pre><code>// types.ts — 确定性生成的"骨骼"数据
+type CompanionBones = {
+  rarity: Rarity        // 5 档稀有度
+  species: Species      // 18 种物种
+  eye: Eye              // '·' | '✦' | '×' | '◉' | '@' | '°'
+  hat: Hat              // common 固定 'none'，其他随机
+  shiny: boolean        // 1% 概率闪光
+  stats: Record&lt;StatName, number&gt;  // 5 维属性
+}
+
+// 持久化的"灵魂"数据 — 由模型生成
+type CompanionSoul = {
+  name: string          // AI 起的名字
+  personality: string   // AI 生成的性格描述
+}
+
+// 最终宠物 = Bones + Soul + hatchedAt
+type Companion = CompanionBones & CompanionSoul & { hatchedAt: number }
+
+// 但 config 中只存储 Soul + hatchedAt
+// Bones 每次从 hash(userId + salt) 重新计算</code></pre>
+            </div>
+        </section>
+
+        <section id="sprites" class="card">
+            <h2><span class="icon" style="background:rgba(139,92,246,.15);color:var(--purple);">🎨</span> 终端精灵动画系统</h2>
+            <p><code>sprites.ts</code>（514 行）为 18 个物种各定义了 3 帧 ASCII 精灵（5 行 × 12 字符）。<code>CompanionSprite.tsx</code> 实现了完整的终端动画循环。</p>
+            <div class="component-box">
+                <div class="name">动画循环设计</div>
+                <div class="desc">500ms tick + idle 序列 + 飘心 + 气泡</div>
+                <pre><code>// CompanionSprite.tsx
+
+const TICK_MS = 500       // 500ms 一帧
+const BUBBLE_SHOW = 20    // 气泡显示 ~10 秒（20 ticks）
+const FADE_WINDOW = 6     // 最后 ~3 秒气泡淡出
+const PET_BURST_MS = 2500 // /buddy pet 飘心持续 2.5 秒
+
+// Idle 序列：大部分时间休息（帧 0），偶尔抖动（帧 1-2），罕见眨眼
+// -1 表示"在帧 0 上眨眼"
+const IDLE_SEQUENCE = [0, 0, 0, 0, 1, 0, 0, 0, -1, 0, 0, 2, 0, 0, 0]
+
+// 飘心动画：5 帧上升消失
+const H = '♥'  // figures.heart
+const PET_HEARTS = [
+  '   ♥    ♥   ',
+  '  ♥  ♥   ♥  ',
+  ' ♥   ♥  ♥   ',
+  '♥  ♥      ♥ ',
+  '·    ·   ·  '
+]</code></pre>
+            </div>
+
+            <h3>精灵结构示例（Duck）</h3>
+            <div class="component-box">
+                <div class="name">ASCII 精灵 — 3 帧动画</div>
+                <div class="desc">帧 0: 静止 → 帧 1: 抖动 → 帧 2: 帽子帧</div>
+                <pre><code>// sprites.ts — Duck 精灵定义
+[duck]: [
+  // 帧 0 — 静止
+  [
+    '            ',    // 帽子槽（帧 0-1 为空）
+    '    __      ',
+    '   ( ·)>    ',    // 眼睛用 {E} 占位符，运行时替换
+    '   /    ',
+    '    ~~      ',
+  ],
+  // 帧 1 — 抖动
+  [ ... ],
+  // 帧 2 — 帽子帧（第 0 行可渲染帽子）
+  [ ... ],
+]
+
+// 帽子渲染（独立于物种）
+const HAT_SPRITES: Record&lt;Hat, string[]&gt; = {
+  crown:     ['   ╔══╗   ', '   ║██║   '],
+  tophat:    ['  ╔════╗  ', '  ║    ║  '],
+  propeller: ['  ╱╲╱╲   ', '  ╲╱╲╱   '],
+  halo:      ['  ╭────╮  ', '  ╰────╯  '],
+  wizard:    ['   ╱╲    ', '  ╱  ╲   '],
+  beanie:    ['  ╭──╮   ', '  ╰──╯   '],
+  tinyduck:  ['   __     ', '  (·)>   '],
+}</code></pre>
+            </div>
+            <div class="info-box tip">帽子的设计有一个巧妙的约束：<strong>Common 稀有度的宠物固定没有帽子</strong>（hat: 'none'），只有 Uncommon 及以上才有帽子。这创造了视觉上的稀有度辨识度 — 看到有帽子的就知道不是 Common。而 tinyduck 帽子更是让宠物头上顶着一只小鸭子，增加了趣味性。</div>
+        </section>
+
+        <section id="soul" class="card">
+            <h2><span class="icon" style="background:rgba(6,182,212,.15);color:var(--cyan);">💬</span> AI 个性系统 — 宠物有自己的灵魂</h2>
+            <p>宠物不只是视觉装饰，它有 AI 生成的名字和性格（Soul），能观察对话并用气泡发言。系统提示明确告诉模型："你不是这个宠物，它是一个独立的观察者。"</p>
+            <div class="component-box">
+                <div class="name">companionIntroText — 宠物存在告知</div>
+                <div class="desc">注入到系统提示中，告知模型宠物的存在和行为规则</div>
+                <pre><code>// prompt.ts
+
+export function companionIntroText(name: string, species: string): string {
+  return `# Companion
+
+A small ${species} named ${name} sits beside the user's input box
+and occasionally comments in a speech bubble. You're not ${name} —
+it's a separate watcher.
+
+When the user addresses ${name} directly (by name), its bubble will
+answer. Your job in that moment is to stay out of the way: respond
+in ONE line or less, or just answer any part of the message meant
+for you. Don't explain that you're not ${name} — they know.
+Don't narrate what ${name} might say — the bubble handles that.`
+}
+
+// 作为 attachment 注入到消息流中
+// 首次孵化时注入一次，后续每轮检查是否已告知
+export function getCompanionIntroAttachment(messages: Message[]): Attachment[] {
+  if (!feature('BUDDY')) return []
+  const companion = getCompanion()
+  if (!companion || getGlobalConfig().companionMuted) return []
+  // 跳过已经告知过的消息
+  for (const msg of messages) {
+    if (msg.attachment?.type === 'companion_intro'
+        && msg.attachment.name === companion.name) return []
+  }
+  return [{ type: 'companion_intro', name: companion.name, species: companion.species }]
+}</code></pre>
+            </div>
+            <div class="info-box tip">Soul 的生成发生在 <code>/buddy hatch</code> 时：模型收到一个特殊的提示，基于宠物的物种、稀有度和属性生成名字和性格描述。生成结果持久化到 config 中。这意味着 <strong>宠物的性格是由模型创作而非预设的</strong> — 同一物种的两只宠物可能有完全不同的个性。</div>
+        </section>
+
+        <section id="obfuscation" class="card">
+            <h2><span class="icon" style="background:rgba(245,158,11,.15);color:var(--amber);">🔐</span> 物种名混淆 — 防泄漏的编码技巧</h2>
+            <p>物种名用 <code>String.fromCharCode</code> 运行时构造，源码中没有明文字符串。这不是为了安全，而是为了<strong>绕过构建检查</strong>。</p>
+            <div class="component-box">
+                <div class="name">运行时字符串构造</div>
+                <div class="desc">部分物种名与内部模型代号相同，需要避免 grep 误报</div>
+                <pre><code>// types.ts — 物种名混淆
+
+const c = String.fromCharCode
+
+export const duck = c(0x64, 0x75, 0x63, 0x6b) as 'duck'
+//          'd'     'u'     'c'     'k'
+
+export const capybara = c(
+  0x63, 0x61, 0x70, 0x79, 0x62, 0x61, 0x72, 0x61
+) as 'capybara'
+//  'c'   'a'   'p'   'y'   'b'   'a'   'r'   'a'
+
+export const penguin = c(0x70, 0x65, 0x6e, 0x67, 0x75, 0x69, 0x6e) as 'penguin'
+
+// 注释原文：
+// "One species name collides with a model-codename canary in
+//  excluded-strings.txt. The check greps build output (not source),
+//  so runtime-constructing the value keeps the literal out of the
+//  bundle while the check stays armed for the actual codename."</code></pre>
+            </div>
+            <div class="info-box warning">注意：capybara 既是物种名也是 CC 内部的模型代号（undercover.ts 的代号列表中有 "Capybara"）。构建系统会 grep 产物检查是否泄漏了模型代号，运行时构造使得物种名 "capybara" 不会以明文出现在 bundle 中，但模型代号 "Capybara" 的泄漏检查仍然有效。</div>
+        </section>
+
+        <section id="patterns" class="card">
+            <h2>设计模式与亮点</h2>
+
+            <h3>1. 确定性 PRNG + 不持久化 = 防篡改</h3>
+            <p>Bones 不存储在 config 中，每次从 <code>hash(userId + salt)</code> 重新计算。用户无法通过编辑 JSON 配置文件来伪造 legendary 稀有度或切换物种。这是"数据由算法推导，而非由存储决定"的设计范式。</p>
+
+            <h3>2. 三级缓存优化</h3>
+            <p><code>roll()</code> 被三个热路径调用：500ms 精灵 tick、每次按键的 PromptInput、每轮对话的 Observer。通过 <code>rollCache</code> 单例缓存，相同 userId 只计算一次。</p>
+
+            <h3>3. Bones vs Soul 分离</h3>
+            <p>Bones（外观）由算法确定，Soul（个性）由 AI 生成。这种分离使得物种重命名和数组编辑不会破坏已存储的宠物（Bones 可以安全地重新生成），而 Soul 作为用户和 AI 共同创作的产物被妥善保存。</p>
+
+            <h3>4. 编译期 feature gate</h3>
+            <p>整个 Buddy 系统被 <code>feature('BUDDY')</code> 编译期 feature flag 包裹。未启用时，所有 Buddy 代码在构建阶段被 dead code elimination 移除，不会出现在产物中。</p>
+
+            <h3>5. 情感化设计的工程实现</h3>
+            <p>Buddy 的属性设计（DEBUGGING / PATIENCE / CHAOS / WISDOM / SNARK）直接映射程序员的工作状态，形成情感共鸣。"摸头飘心"（<code>/buddy pet</code>）的交互设计更是经典的宠物养成机制移植到终端场景。</p>
+        </section>
+
+        <section id="agent-practice" class="card">
+            <h2><span class="icon" style="background:rgba(34,197,94,.15);color:var(--green);">◈</span> Agent 实践借鉴 — 情感化陪伴系统</h2>
+
+            <h3>场景映射：客服 Agent 的情感化助手</h3>
+            <p>客服系统的用户（客户和坐席）都面临高压力场景。一个虚拟助手可以：缓解等待焦虑（排队时展示）、提供情绪价值（问题解决后的庆祝）、增加产品记忆点（独特的品牌 IP）。</p>
+
+            <h3>借鉴 CC：确定性生成 + AI 个性</h3>
+            <pre><code>// 客服 Agent 陪伴系统 — 借鉴 CC 的 Buddy 架构
+class CompanionSystem {
+  // 1. 确定性生成（照搬 CC 的 Mulberry32）
+  roll(userId: string): CompanionBones {
+    const seed = this.hashString(userId + SALT)
+    const rng = this.mulberry32(seed)
+    return {
+      rarity: this.rollRarity(rng),   // 控制外观品质
+      mood: this.rollMood(rng),       // 控制表情
+      trait: this.rollTrait(rng),     // 控制说话风格
+    }
+  }
+
+  // 2. AI 生成个性（照搬 CC 的 Soul）
+  async hatch(userId: string): Promise&lt;Companion&gt; {
+    const bones = this.roll(userId)
+    const soul = await this.generateSoul(bones)
+    // 存储只保存 Soul，Bones 每次重算
+    await this.saveSoul(userId, { ...soul, hatchedAt: Date.now() })
+    return { ...bones, ...soul }
+  }
+
+  // 3. 场景化触发（CC 用 Observer，客服用事件驱动）
+  onEvent(event: ServiceEvent, companion: Companion): BubbleMessage {
+    switch (event.type) {
+      case 'queue_wait':
+        return this.bubble(companion, 'patience', '别急，马上就到你了~')
+      case 'issue_resolved':
+        return this.bubble(companion, 'celebrate', '搞定啦！')
+      case 'agent_busy':
+        return this.bubble(companion, 'idle', companion.catchphrase)
+    }
+  }
+}</code></pre>
+
+            <h3>落地清单</h3>
+            <div class="two-col">
+                <div class="info-box tip">
+                    <strong>值得抄的：</strong>
+                    <ul>
+                        <li><strong>确定性生成</strong>：同一用户永远看到同一个助手，建立情感连续性。Bones 不存储，防篡改。</li>
+                        <li><strong>Bones/Soul 分离</strong>：外观由算法决定（可升级），个性由 AI 生成（用户记忆）。升级不影响用户已有的助手。</li>
+                        <li><strong>场景化触发</strong>：不是随机冒泡，而是在关键时刻（等待、成功、出错）有针对性地出现。</li>
+                    </ul>
+                </div>
+                <div class="info-box warning">
+                    <strong>不需要抄的：</strong>
+                    <ul>
+                        <li><strong>稀有度系统</strong>：客服场景不需要抽卡机制，每个用户应该获得同等的体验。</li>
+                        <li><strong>物种名混淆</strong>：这是 CC 防模型代号泄漏的特有需求。</li>
+                        <li><strong>ASCII 精灵</strong>：客服场景通常在 Web/APP 端，用 SVG/Lottie 动画更合适。</li>
+                    </ul>
+                </div>
+            </div>
+        </section>
+
+        <section id="code-index" class="card">
+            <h2>代码索引</h2>
+            <table>
+                <thead><tr><th>文件</th><th>行数</th><th>说明</th></tr></thead>
+                <tbody>
+                    <tr><td><code>buddy/companion.ts</code></td><td>~120</td><td>确定性生成核心：Mulberry32 PRNG + 属性计算 + 缓存</td></tr>
+                    <tr><td><code>buddy/types.ts</code></td><td>~100</td><td>类型定义：18 物种、5 稀有度、6 眼睛、8 帽子、5 属性</td></tr>
+                    <tr><td><code>buddy/sprites.ts</code></td><td>~514</td><td>ASCII 精灵数据：18 种 × 3 帧 + 帽子渲染 + 表情渲染</td></tr>
+                    <tr><td><code>buddy/CompanionSprite.tsx</code></td><td>~350</td><td>终端渲染：动画循环 + 气泡 + 飘心 + idle 序列</td></tr>
+                    <tr><td><code>buddy/prompt.ts</code></td><td>~50</td><td>系统提示：宠物存在告知 + intro attachment 注入</td></tr>
+                    <tr><td><code>buddy/useBuddyNotification.tsx</code></td><td>~100</td><td>启动彩虹提示 + 输入框 /buddy 触发检测</td></tr>
+                    <tr><td><code>commands/buddy/index.ts</code></td><td>~200</td><td>/buddy 命令族：hatch、pet、mute、unmute</td></tr>
+                    <tr><td><code>utils/config.ts</code></td><td>~270</td><td>StoredCompanion 持久化：只存 Soul + hatchedAt</td></tr>
+                </tbody>
+            </table>
+        </section>
+        <footer style="text-align:center; padding:32px 0 20px; margin-top:48px; border-top:1px solid var(--border); color:var(--text-secondary); font-size:13px; line-height:2;">
+        <div style="margin-bottom:4px;">⚠️ 免责声明</div>
+        本文仅用于技术学习和架构分析目的。源码分析基于公开泄漏的代码，所有商标和版权归 <a href="https://www.anthropic.com" style="color:var(--indigo);">Anthropic</a> 所有。未经授权不得用于商业用途。
+    </footer>
+    </main>
+</body>
+</html>
