@@ -67,6 +67,7 @@
         <a href="#core-flow"><span class="toc-dot dot-data"></span>核心流程详解</a>
         <a href="#design-essence"><span class="toc-dot dot-design"></span>设计精华</a>
         <a href="#agent-practice"><span class="toc-dot dot-practice"></span>Agent 实践借鉴</a>
+        <a href="#memory-creation"><span class="toc-dot dot-blue"></span>Memory 创建机制详解</a>
         <a href="#code-index"><span class="toc-dot dot-code"></span>代码索引</a>
 </nav>
 
@@ -821,6 +822,142 @@ async function loadContextForRepeatCustomer(customerId: string): Promise&lt;stri
             </div>
         </section>
 
+        <section id="memory-creation" class="card">
+            <h2><span class="icon" style="background:rgba(59,130,246,.15);color:var(--blue);">💡</span> Memory 文件创建机制详解</h2>
+
+            <h3>白话版：Memory 文件什么时候会被创建？</h3>
+            <p>CC 的 Memory 文件有<strong>两条创建路径</strong>：</p>
+
+            <div class="component-box">
+                <div class="name">路径一：对话中主动写入（随时可用）</div>
+                <div class="desc">CC 在对话过程中根据系统提示指引，自行判断是否需要写 memory 文件</div>
+                <pre><code>用户："记住我喜欢用 TypeScript"
+  → CC 判断这是值得持久化的用户偏好
+  → 调用 Write 工具写入 ~/.claude/projects/.../memory/user_role.md
+
+触发条件：无特殊条件，只要 autoMemoryEnabled 没关就行
+常见场景：用户说"记住..."、CC 发现重要的项目上下文、用户偏好等</code></pre>
+            </div>
+
+            <div class="component-box">
+                <div class="name">路径二：后台自动提取（有严格前置条件）</div>
+                <div class="desc">每轮对话结束后，后台 Agent 回顾对话内容，提取值得记忆的信息</div>
+                <pre><code>触发时机：每轮对话结束（模型回复完，没有要调工具了）
+执行者：后台 forked Agent（5 轮预算）
+写入位置：~/.claude/projects/&lt;项目路径&gt;/memory/*.md
+
+必须同时满足的 5 个条件：
+┌─────────────────────────────────────────────────────┐
+│ ① EXTRACT_MEMORIES 编译期 feature flag = true       │ ← 基本都有
+│ ② tengu_passport_quail 服务端开关 = true            │ ← 关键门控！
+│ ③ isAutoMemoryEnabled() = true                      │ ← 默认 true
+│ ④ 当前是主 Agent（不是子 Agent）                     │ ← 主对话才触发
+│ ⑤ 对话轮数达到阈值（默认每轮都检查）                  │ ← tengu_bramble_lintel
+└─────────────────────────────────────────────────────┘
+
+条件 ② 是服务端 GrowthBook 远程配置控制的灰度开关。
+如果 Anthropic 没有对你的账户开启，后台提取永远不会执行。</code></pre>
+            </div>
+
+            <h3>源码级触发链路</h3>
+            <pre><code>用户发送消息 → Query 循环执行 → 模型回复完成（无工具调用）
+                                    │
+                                    ▼
+                         query/stopHooks.ts:handleStopHooks()
+                                    │
+                    ┌───────────────┼───────────────┐
+                    │  检查 5 个前置条件               │
+                    │  ① feature('EXTRACT_MEMORIES')  │
+                    │  ② !toolUseContext.agentId       │
+                    │  ③ isExtractModeActive()         │ ← tengu_passport_quail
+                    │  ④ !isBareMode                   │
+                    │  ⑤ turnsSinceLastExtraction >= N │
+                    └───────────────┼───────────────┘
+                                    │ 全部通过
+                                    ▼
+              services/extractMemories/extractMemories.ts
+              executeExtractMemories()
+                                    │
+                                    ▼
+                    runForkedAgent（后台 Agent，5 轮预算）
+                    工具权限：Read/Grep/Glob 不限
+                              Edit/Write 仅限 memory 目录
+                                    │
+                                    ▼
+                    后台 Agent 读取对话历史 + 现有 memory 文件
+                    决定是否写入/更新 memory 文件
+                                    │
+                                    ▼
+                    ~/.claude/projects/&lt;path&gt;/memory/*.md</code></pre>
+
+            <h3>isAutoMemoryEnabled() 判断优先级</h3>
+            <div class="component-box">
+                <div class="name">memdir/paths.ts — 本地配置检查</div>
+                <pre><code>优先级从高到低：
+1. CLAUDE_CODE_DISABLE_AUTO_MEMORY=1    → 直接关闭
+2. CLAUDE_CODE_SIMPLE (--bare 模式)     → 直接关闭
+3. CCR 远程模式且无 REMOTE_MEMORY_DIR   → 直接关闭
+4. settings.json 中 autoMemoryEnabled   → 显式配置
+5. 默认                                → true（开启）</code></pre>
+            </div>
+
+            <h3>isExtractModeActive() 判断 — 服务端开关</h3>
+            <div class="component-box">
+                <div class="name">memdir/paths.ts — 服务端配置检查</div>
+                <pre><code>export function isExtractModeActive(): boolean {
+  // 门控：GrowthBook 远程配置 tengu_passport_quail
+  if (!getFeatureValue_CACHED_MAY_BE_STALE('tengu_passport_quail', false)) {
+    return false  // ← 默认 false，需要服务端开启
+  }
+  // 非交互模式也需要额外开关
+  return !getIsNonInteractiveSession() ||
+    getFeatureValue_CACHED_MAY_BE_STALE('tengu_slate_thimble', false)
+}</code></pre>
+            </div>
+
+            <h3>相关 GrowthBook Feature Flags</h3>
+            <table>
+                <thead><tr><th>Flag</th><th>默认值</th><th>作用</th></tr></thead>
+                <tbody>
+                    <tr><td><code>tengu_passport_quail</code></td><td>false</td><td>后台自动提取的总开关（最关键）</td></tr>
+                    <tr><td><code>tengu_bramble_lintel</code></td><td>1</td><td>每 N 轮对话触发一次提取</td></tr>
+                    <tr><td><code>tengu_onyx_plover</code></td><td>24h/5 sessions</td><td>Auto-Dream 后台整合：每小时数/会话数</td></tr>
+                    <tr><td><code>tengu_slate_thimble</code></td><td>false</td><td>允许非交互模式下的提取</td></tr>
+                    <tr><td><code>tengu_moth_copse</code></td><td>false</td><td>跳过 MEMORY.md 索引，用附件召回</td></tr>
+                </tbody>
+            </table>
+
+            <div class="info-box tip">
+                <strong>诊断你的 Memory 是否正常工作：</strong><br>
+                ① 检查 memory 目录：<code>ls ~/.claude/projects/*/memory/</code><br>
+                ② 检查本地配置：<code>cat ~/.claude/settings.json | grep autoMemory</code><br>
+                ③ 检查环境变量：<code>env | grep CLAUDE_CODE_DISABLE</code><br>
+                ④ 如果本地配置正常但 memory 目录为空 → 服务端开关 <code>tengu_passport_quail</code> 未对你开启<br>
+                ⑤ Memory 文件分布不均是正常的——只有对话内容值得记忆时才会写入
+            </div>
+
+            <h3>Memory 目录结构</h3>
+            <pre><code>~/.claude/
+  CLAUDE.md                              # 全局用户指令（手动创建）
+  projects/-Users-apple-...-project/
+    memory/                              # 自动记忆目录
+      MEMORY.md                          # 索引入口（200 行上限）
+      user_role.md                       # 用户画像
+      feedback_agent.md                  # 反馈记录
+      project_state.md                   # 项目状态
+      team/                              # 团队共享记忆
+        MEMORY.md
+    settings.json                        # 项目级设置
+
+项目根目录/
+  CLAUDE.md                              # 项目指令（可 git 提交）
+  CLAUDE.local.md                        # 本地私有指令（gitignore）
+  .claude/
+    CLAUDE.md
+    rules/*.md                           # 条件/无条件规则
+    settings.json                        # 项目设置（不可信 autoMemoryDirectory）</code></pre>
+        </section>
+
         <section id="code-index" class="card">
             <h2>代码索引</h2>
             <table>
@@ -842,6 +979,12 @@ async function loadContextForRepeatCustomer(customerId: string): Promise&lt;stri
                     <tr><td><code>services/extractMemories/extractMemories.ts</code></td><td>~616</td><td>持久化记忆提取：闭包状态、尾随提取、工具权限</td></tr>
                     <tr><td><code>services/extractMemories/prompts.ts</code></td><td>~155</td><td>记忆提取提示词：自动/团队记忆变体</td></tr>
                     <tr><td><code>utils/memory/types.ts</code></td><td>~12</td><td>记忆类型定义：User/Project/Local/Managed/AutoMem/TeamMem</td></tr>
+                    <tr><td><code>memdir/paths.ts</code></td><td>~90</td><td>Memory 路径解析：isAutoMemoryEnabled、isExtractModeActive、目录结构</td></tr>
+                    <tr><td><code>memdir/memdir.ts</code></td><td>~510</td><td>Memory 提示词构建：loadMemoryPrompt、ensureMemoryDirExists</td></tr>
+                    <tr><td><code>memdir/memoryTypes.ts</code></td><td>~60</td><td>四种记忆类型：user/feedback/project/reference 及 frontmatter 规范</td></tr>
+                    <tr><td><code>services/autoDream/autoDream.ts</code></td><td>~250</td><td>后台整合 Agent：24h/5 sessions 周期性重整记忆文件</td></tr>
+                    <tr><td><code>utils/backgroundHousekeeping.ts</code></td><td>~50</td><td>启动时初始化：extractMemories + autoDream 后台服务</td></tr>
+                    <tr><td><code>query/stopHooks.ts</code></td><td>~160</td><td>每轮结束触发：extractMemories + autoDream 入口</td></tr>
                 </tbody>
             </table>
         </section>

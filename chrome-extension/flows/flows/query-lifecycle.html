@@ -1,0 +1,491 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>查询的完整生命周期 - Claude Code 源码分析</title>
+    <link rel="stylesheet" href="../shared/styles.css">
+</head>
+<body>
+    <nav class="sidebar">
+<div class="sidebar-header"><div class="logo">CC</div><div><div class="sidebar-title">Claude Code</div><div class="sidebar-subtitle">源码深度分析</div></div></div>
+        <div class="nav-section-title">总览</div>
+        <a href="../reading-guide.html" class="nav-link">阅读指南</a>
+        <a href="../index.html" class="nav-link">架构全景</a>
+        <a href="../dependency-map.html" class="nav-link">模块依赖图</a>
+        <a href="../vertical-agent-guide.html" class="nav-link">垂直 Agent 设计指南</a>
+<div class="nav-section-title">核心流程</div>
+<a href="../00-startup.html" class="nav-link">启动链路</a>
+<a href="../01-query-loop.html" class="nav-link">Query 循环</a>
+<a href="query-lifecycle.html" class="nav-link active">查询生命周期</a>
+<div class="nav-section-title">核心机制</div>
+<a href="../02-tool-dispatch.html" class="nav-link">工具调度</a>
+<a href="../03-permissions.html" class="nav-link">权限系统</a>
+<a href="../04-agent-arch.html" class="nav-link">Agent 架构</a>
+<a href="../11-hooks.html" class="nav-link">Hook 机制</a>
+<div class="nav-section-title">扩展体系</div>
+<a href="../05-mcp.html" class="nav-link">MCP 体系</a>
+<a href="../07-plugins.html" class="nav-link">插件系统</a>
+<a href="../08-commands.html" class="nav-link">命令系统</a>
+<div class="nav-section-title">数据与服务</div>
+<a href="../06-context-mgmt.html" class="nav-link">上下文管理</a>
+<a href="../10-services.html" class="nav-link">服务层</a>
+<a href="../15-cost-limits.html" class="nav-link">成本与限流</a>
+<div class="nav-section-title">界面与配置</div>
+<a href="../09-ui.html" class="nav-link">UI 交互层</a>
+<a href="../13-config.html" class="nav-link">配置与迁移</a>
+<div class="nav-section-title">外围能力</div>
+<a href="../12-external.html" class="nav-link">外部集成</a>
+<a href="../14-native.html" class="nav-link">Native 能力</a>
+<div class="nav-section-title">安全专题</div>
+<a href="../16-anti-distillation.html" class="nav-link">反蒸馏与输出保护</a>
+<a href="../17-buddy.html" class="nav-link">Buddy 宠物系统</a>
+<div class="nav-section-title">数据专题</div>
+<a href="../18-telemetry.html" class="nav-link">遥测与用户画像</a>
+<div class="nav-section-title">流程图</div>
+<a href="tool-execution.html" class="nav-link">工具执行流程</a>
+<a href="agent-collab.html" class="nav-link">Agent 协作流程</a>
+</nav>
+    <main class="content">
+        <header class="page-header">
+            <span class="breadcrumb"><a href="../index.html">源码分析</a></span>
+            <h1>查询的完整生命周期</h1>
+            <p class="subtitle">从用户按下 Enter 键到终端渲染最终响应的端到端流程，集成所有子系统</p>
+        </header>
+
+        <section id="overview" class="card">
+            <h2>职责概述</h2>
+            <p>本文档追踪一次查询从用户输入到最终响应渲染的完整生命周期。它跨越 REPL 的 <code>ask()</code> 函数、<code>QueryEngine.submitMessage()</code>、<code>query()</code> 生成器、API 流式传输、工具调度、状态管理、转录持久化等多个子系统。与 <a href="../01-query-loop.html">Query 循环</a> 页面关注内部机制不同，本页面聚焦于所有子系统的端到端协作，包括错误路径和恢复机制。</p>
+        </section>
+
+        <section id="architecture" class="card">
+            <h2>架构设计</h2>
+            <div class="layer-diagram">
+                <div class="layer layer-ui">
+                    <div class="layer-header">用户界面层</div>
+                    <div class="layer-body">
+                        <div class="layer-component highlight">screens/REPL.js</div>
+                        <div class="layer-component">hooks/useLogMessages.ts</div>
+                        <div class="layer-component">components/App.js</div>
+                    </div>
+                </div>
+                <div class="layer-arrow">▼</div>
+                <div class="layer layer-orchestration">
+                    <div class="layer-header">查询编排层</div>
+                    <div class="layer-body">
+                        <div class="layer-component">ask() (REPL)</div>
+                        <div class="layer-component highlight">QueryEngine.submitMessage()</div>
+                    </div>
+                </div>
+                <div class="layer-arrow">▼</div>
+                <div class="layer layer-engine">
+                    <div class="layer-header">核心循环层</div>
+                    <div class="layer-body">
+                        <div class="layer-component highlight">query.ts queryLoop()</div>
+                        <div class="layer-component">processUserInput()</div>
+                    </div>
+                </div>
+                <div class="layer-arrow">▼</div>
+                <div class="layer layer-tool">
+                    <div class="layer-header">API 与工具层</div>
+                    <div class="layer-body">
+                        <div class="layer-component">services/api/claude.ts</div>
+                        <div class="layer-component">StreamingToolExecutor</div>
+                        <div class="layer-component">runTools()</div>
+                    </div>
+                </div>
+                <div class="layer-arrow">▼</div>
+                <div class="layer layer-infra">
+                    <div class="layer-header">基础设施层</div>
+                    <div class="layer-body">
+                        <div class="layer-component">compact/autocompact</div>
+                        <div class="layer-component">permissions/canUseTool</div>
+                        <div class="layer-component">hooks (SessionStart/Stop)</div>
+                        <div class="layer-component">transcript 持久化</div>
+                    </div>
+                </div>
+            </div>
+        </section>
+
+        <section id="dataflow" class="card">
+            <h2>核心数据流</h2>
+            <div class="flow-chart vertical">
+
+                <div class="flow-step">
+                    <div class="flow-step-title">Stage 1: 用户输入捕获</div>
+                    <div class="flow-step-desc">
+                        用户在 REPL 输入框中键入提示词并按下 Enter。REPL 组件捕获输入文本，构建 <code>UserMessage</code>，并传递给 <code>ask()</code> 函数。在非交互模式（<code>-p</code>）中，输入通过 stdin 读取（支持 <code>text</code> 和 <code>stream-json</code> 格式）。
+                        <pre><code>// main.tsx:857-868
+async function getInputPrompt(prompt, inputFormat) {
+  if (!process.stdin.isTTY && !process.argv.includes('mcp')) {
+    if (inputFormat === 'stream-json') return process.stdin;
+    process.stdin.setEncoding('utf8');
+    // ... 从 stdin 读取完整输入
+  }
+}</code></pre>
+                    </div>
+                </div>
+                <div class="flow-arrow">▼</div>
+
+                <div class="flow-step">
+                    <div class="flow-step-title">Stage 2: processUserInput — 输入预处理</div>
+                    <div class="flow-step-desc">
+                        <code>QueryEngine.ts:410-428</code> 调用 <code>processUserInput()</code> 处理用户输入。此阶段：
+                        <ul>
+                            <li>检测并执行斜杠命令（如 <code>/compact</code>、<code>/clear</code>）</li>
+                            <li>加载附件消息（CLAUDE.md、memory 文件、图片等）</li>
+                            <li>更新 <code>allowedTools</code>（来自 <code>--allowedTools</code> 标志）</li>
+                            <li>返回 <code>messagesFromUserInput</code>、<code>shouldQuery</code>、<code>resultText</code></li>
+                        </ul>
+                        如果 <code>shouldQuery</code> 为 false（斜杠命令已处理完毕），直接 yield 本地结果并返回。
+                    </div>
+                </div>
+                <div class="flow-arrow">▼</div>
+
+                <div class="flow-step">
+                    <div class="flow-step-title">Stage 3: 消息持久化（转录写入）</div>
+                    <div class="flow-step-desc">
+                        <code>QueryEngine.ts:450-463</code> 在进入查询循环之前将用户消息写入转录文件。这确保即使在 API 请求之前进程被杀死，会话仍然可以通过 <code>--resume</code> 恢复：
+                        <pre><code>// QueryEngine.ts:450-463
+if (persistSession && messagesFromUserInput.length > 0) {
+  const transcriptPromise = recordTranscript(messages);
+  if (isBareMode()) { void transcriptPromise; }
+  else { await transcriptPromise; }
+}</code></pre>
+                        在 <code>--bare</code> 模式下异步写入（非阻塞），正常模式下同步等待。
+                    </div>
+                </div>
+                <div class="flow-arrow">▼</div>
+
+                <div class="flow-step">
+                    <div class="flow-step-title">Stage 4: 系统提示与技能加载</div>
+                    <div class="flow-step-desc">
+                        <code>QueryEngine.ts:288-551</code> 并行执行系统提示构建和技能/插件加载：
+                        <pre><code>// QueryEngine.ts:534-537
+const [skills, { enabled: enabledPlugins }] = await Promise.all([
+  getSlashCommandToolSkills(getCwd()),
+  loadAllPluginsCacheOnly(),
+]);</code></pre>
+                        然后构建 <code>SystemInitMessage</code>（包含工具列表、MCP 客户端、模型、权限模式等信息）并 yield。
+                    </div>
+                </div>
+                <div class="flow-arrow">▼</div>
+
+                <div class="flow-step">
+                    <div class="flow-step-title">Stage 5: 进入 query() 循环</div>
+                    <div class="flow-step-desc">
+                        <code>QueryEngine.ts:675-686</code> 开始消费 <code>query()</code> 生成器：
+                        <pre><code>// QueryEngine.ts:675-686
+for await (const message of query({
+  messages, systemPrompt, userContext, systemContext,
+  canUseTool: wrappedCanUseTool,
+  toolUseContext: processUserInputContext,
+  fallbackModel, querySource: 'sdk', maxTurns, taskBudget,
+})) { ... }</code></pre>
+                        <code>query()</code> 的 <code>while(true)</code> 循环开始第一次迭代。
+                    </div>
+                </div>
+                <div class="flow-arrow">▼</div>
+
+                <div class="flow-step">
+                    <div class="flow-step-title">Stage 6: 上下文压缩管道</div>
+                    <div class="flow-step-desc">
+                        <code>query.ts:365-549</code> 按序执行四层压缩：
+                        <div class="two-col">
+                            <div>
+                                <strong>工具结果预算</strong><br>
+                                <code>applyToolResultBudget()</code><br>
+                                限制大型工具结果大小
+                            </div>
+                            <div>
+                                <strong>Snip</strong><br>
+                                <code>snipCompactIfNeeded()</code><br>
+                                裁剪历史尾部，释放 token
+                            </div>
+                        </div>
+                        <div class="two-col">
+                            <div>
+                                <strong>Microcompact</strong><br>
+                                <code>deps.microcompact()</code><br>
+                                缓存编辑级压缩
+                            </div>
+                            <div>
+                                <strong>Autocompact</strong><br>
+                                <code>deps.autocompact()</code><br>
+                                全文摘要（达到阈值时）
+                            </div>
+                        </div>
+                        <div class="info-box info">Context Collapse 在 Microcompact 和 Autocompact 之间执行。如果折叠成功将上下文降到 autocompact 阈值以下，autocompact 跳过——保留粒度上下文。</div>
+                    </div>
+                </div>
+                <div class="flow-arrow">▼</div>
+
+                <div class="flow-step">
+                    <div class="flow-step-title">Stage 7: 阻塞限制检查</div>
+                    <div class="flow-step-desc">
+                        <code>query.ts:628-648</code> 检查是否达到硬阻塞限制。当自动压缩关闭且上下文超过模型限制时，阻止 API 调用并返回错误。跳过条件：刚完成压缩、compact/session_memory 查询源、reactive compact 启用、context collapse 启用。
+                    </div>
+                </div>
+                <div class="flow-arrow">▼</div>
+
+                <div class="flow-step">
+                    <div class="flow-step-title">Stage 8: API 流式请求</div>
+                    <div class="flow-step-desc">
+                        <code>query.ts:654-659</code> 发起流式 API 请求。模型逐块返回响应，每块可能是文本、thinking、或 tool_use。系统：
+                        <ul>
+                            <li>收集 <code>assistantMessages</code> 用于后续工具执行</li>
+                            <li>检测 <code>tool_use</code> 块并设置 <code>needsFollowUp = true</code></li>
+                            <li>对每个 tool_use 块，StreamingToolExecutor 立即开始执行</li>
+                            <li> withhold 可恢复错误（prompt-too-long、max-output-tokens）</li>
+                        </ul>
+                        <pre><code>// query.ts:799-825 withhold 逻辑
+let withheld = false;
+if (contextCollapse?.isWithheldPromptTooLong(message, ...)) withheld = true;
+if (reactiveCompact?.isWithheldPromptTooLong(message)) withheld = true;
+if (isWithheldMaxOutputTokens(message)) withheld = true;
+if (!withheld) yield yieldMessage;</code></pre>
+                    </div>
+                </div>
+                <div class="flow-arrow">▼</div>
+
+                <div class="flow-step">
+                    <div class="flow-step-title">Stage 9: 恢复决策（无工具调用时）</div>
+                    <div class="flow-step-desc">
+                        当模型不请求工具时（<code>!needsFollowUp</code>），进入恢复决策树：
+                        <pre><code>// 决策优先级
+if (isWithheld413) {
+  // 1. 尝试 Context Collapse drain → continue
+  // 2. 尝试 Reactive Compact → continue
+  // 3. 都失败 → yield 错误，终止
+}
+if (isWithheldMaxOutputTokens) {
+  // 1. 首次：提升 max_output_tokens 到 64k → continue
+  // 2. 后续：注入恢复消息 → continue
+  // 3. 达到限制 → yield 错误
+}
+if (lastMessage?.isApiErrorMessage) {
+  // 其他 API 错误 → 执行失败 hooks → 终止
+}
+// Stop Hooks 检查 → 可能 continue
+// Token Budget 检查 → 可能 continue
+// 正常完成 → return { reason: 'completed' }</code></pre>
+                    </div>
+                </div>
+                <div class="flow-arrow">▼</div>
+
+                <div class="flow-step">
+                    <div class="flow-step-title">Stage 10: 工具执行与结果收集</div>
+                    <div class="flow-step-desc">
+                        <code>query.ts:1366-1408</code> 当模型请求工具时：
+                        <ol>
+                            <li><strong>权限检查</strong>：<code>canUseTool()</code> 根据权限模式决定允许/拒绝/询问用户</li>
+                            <li><strong>工具执行</strong>：每个工具实现 <code>execute()</code> 方法，返回结构化结果</li>
+                            <li><strong>结果规范化</strong>：<code>normalizeMessagesForAPI()</code> 将工具结果转换为 API 可消费的格式</li>
+                            <li><strong>上下文更新</strong>：工具可能返回新的 <code>toolUseContext</code>（如新的文件状态）</li>
+                        </ol>
+                        <pre><code>// query.ts:1380-1408
+const toolUpdates = streamingToolExecutor
+  ? streamingToolExecutor.getRemainingResults()
+  : runTools(toolUseBlocks, assistantMessages, canUseTool, toolUseContext);
+for await (const update of toolUpdates) {
+  if (update.message) {
+    yield update.message;
+    toolResults.push(...normalizeMessagesForAPI([update.message], tools));
+  }
+  if (update.newContext) updatedToolUseContext = { ...update.newContext, queryTracking };
+}</code></pre>
+                    </div>
+                </div>
+                <div class="flow-arrow">▼</div>
+
+                <div class="flow-step">
+                    <div class="flow-step-title">Stage 11: 状态更新与循环继续</div>
+                    <div class="flow-step-desc">
+                        工具执行完成后，构建新的 <code>State</code> 对象并 <code>continue</code> 回到 Stage 6：
+                        <pre><code>// query.ts 简化的 continue 模式
+state = {
+  messages: [...messagesForQuery, ...assistantMessages, ...toolResults],
+  toolUseContext: updatedToolUseContext,
+  autoCompactTracking: tracking,
+  maxOutputTokensRecoveryCount: 0,
+  // ...
+  transition: { reason: 'tool_execution' },
+};
+continue; // → 回到 Stage 6 的压缩管道</code></pre>
+                        循环继续，带着工具结果再次调用 API，模型基于工具输出决定是否继续使用工具或完成回复。
+                    </div>
+                </div>
+                <div class="flow-arrow">▼</div>
+
+                <div class="flow-step">
+                    <div class="flow-step-title">Stage 12: 终止与结果交付</div>
+                    <div class="flow-step-desc">
+                        当循环终止时（模型不请求工具且无恢复条件），<code>query()</code> 返回 <code>Terminal</code> 对象。<code>QueryEngine.submitMessage()</code> 处理终止：
+                        <ol>
+                            <li>yield <code>SDKResultMessage</code>（包含成本、持续时间、使用量统计）</li>
+                            <li>更新 <code>this.mutableMessages</code>（会话消息历史）</li>
+                            <li>记录最终转录</li>
+                        </ol>
+                        REPL 端的 <code>useLogMessages</code> hook 消费 yield 的消息并更新 React 状态，触发终端 UI 重渲染，显示最终响应。
+                    </div>
+                </div>
+
+            </div>
+        </section>
+
+        <section id="interfaces" class="card">
+            <h2>关键类型与接口</h2>
+
+            <h3>query() 的 yield 类型联合</h3>
+            <pre><code>// query.ts:222-228
+AsyncGenerator&lt;
+  | StreamEvent           // 流式内容块（text、tool_use、thinking 等）
+  | RequestStartEvent     // 请求开始信号
+  | Message               // 完整消息（assistant、user、system）
+  | TombstoneMessage      // 消息移除控制信号
+  | ToolUseSummaryMessage, // 工具使用摘要（Haiku 生成）
+  Terminal                // 返回值：终止原因
+&gt;</code></pre>
+
+            <h3>Terminal 返回类型</h3>
+            <pre><code>// query.ts 中的终止原因
+{ reason: 'completed' }
+{ reason: 'blocking_limit' }
+{ reason: 'aborted_streaming' }
+{ reason: 'prompt_too_long' }
+{ reason: 'image_error' }
+{ reason: 'model_error', error }
+{ reason: 'stop_hook_prevented' }</code></pre>
+
+            <h3>Continue（transition 原因）</h3>
+            <pre><code>// query.ts State.transition 的可能值
+type Continue =
+  | { reason: 'reactive_compact_retry' }
+  | { reason: 'collapse_drain_retry', committed: number }
+  | { reason: 'max_output_tokens_recovery', attempt: number }
+  | { reason: 'max_output_tokens_escalate' }
+  | { reason: 'stop_hook_blocking' }
+  | { reason: 'token_budget_continuation' }
+  | { reason: 'model_fallback' }</code></pre>
+
+            <h3>QueryEngine 消息消费模式</h3>
+            <pre><code>// QueryEngine.ts:675-780 消费 query() yield 的消息
+for await (const message of query({ messages, systemPrompt, ... })) {
+  if (message.type === 'assistant' || message.type === 'user' ||
+      (message.type === 'system' && message.subtype === 'compact_boundary')) {
+    messages.push(message);
+    if (persistSession) void recordTranscript(messages);
+  }
+  switch (message.type) {
+    case 'assistant': yield* normalizeMessage(message); break;
+    case 'progress':  // 记录工具执行进度
+    case 'system':    // 处理 compact_boundary、local_command
+    case 'result':    // SDK 结果消息
+    case 'tombstone': // 跳过
+  }
+}</code></pre>
+        </section>
+
+        <section id="patterns" class="card">
+            <h2>设计模式与亮点</h2>
+
+            <h3>1. Withhold-Recover 模式</h3>
+            <p>query 循环对可恢复错误使用"抑制-恢复"模式：API 返回 prompt-too-long 或 max-output-tokens 错误时，不立即 yield 给消费者，而是 withheld 并尝试恢复（压缩、提升限制）。只有当所有恢复路径都失败时才 yield 错误。这避免了消费者看到瞬态错误，提供更流畅的用户体验。</p>
+
+            <h3>2. Fire-and-Forget 转录写入</h3>
+            <p>Assistant 消息的转录写入使用 fire-and-forget（<code>void recordTranscript(messages)</code>），因为写入队列的 100ms 延迟字符串化确保了不阻塞生成器。User 消息和 compact_boundary 则同步等待，确保转录的完整性。</p>
+            <div class="info-box tip">这种设计的关键是 <code>enqueueWrite</code> 的顺序保证——即使 fire-and-forget，消息仍然按序写入磁盘。</div>
+
+            <h3>3. 权限拒绝追踪</h3>
+            <p><code>QueryEngine</code> 在 <code>wrappedCanUseTool</code> 中包装了原始的 <code>canUseTool</code>，记录所有权限拒绝事件。这些拒绝在终止时作为 <code>permission_denials</code> 包含在结果消息中，SDK 消费者可以据此决定是否重试。</p>
+
+            <h3>4. 命令生命周期通知</h3>
+            <p><code>query()</code> 跟踪所有消费的斜杠命令 UUID，在正常终止时通过 <code>notifyCommandLifecycle(uuid, 'completed')</code> 通知。这确保了命令的状态机正确转换。</p>
+
+            <h3>5. Post-Sampling Hooks</h3>
+            <p>模型响应完成后，<code>query.ts:1000-1009</code> 异步执行 post-sampling hooks，用于分析和日志记录。这些 hooks 不阻塞查询循环，在后台运行。</p>
+        </section>
+
+        <section id="dev-guide" class="card developer">
+            <h2>开发者实践指南</h2>
+            <div class="info-box tip">在 <code>query.ts</code> 中有多个 <code>queryCheckpoint()</code> 调用点。在开发环境中设置 <code>CLAUDE_CODE_DEBUG=1</code> 可以看到每个检查点的执行时间和顺序。</div>
+
+            <h3>调试查询循环中的问题</h3>
+            <p>常见调试场景：</p>
+            <ul>
+                <li><strong>查询卡住</strong>：检查 <code>AbortController.signal</code> 是否被触发，查看 <code>transition</code> 历史确认是否进入了恢复循环</li>
+                <li><strong>上下文丢失</strong>：检查 autocompact 是否触发（<code>tengu_auto_compact_succeeded</code> 事件），确认 compact 后的消息是否正确传递</li>
+                <li><strong>工具不执行</strong>：确认 <code>streamingToolExecutor</code> 是否启用（<code>config.gates.streamingToolExecution</code>），检查 <code>toolUseBlocks</code> 是否被正确收集</li>
+                <li><strong>权限被意外拒绝</strong>：查看 <code>wrappedCanUseTool</code> 中的 <code>permissionDenials</code> 记录</li>
+            </ul>
+
+            <h3>添加新的消息处理阶段</h3>
+            <p>在 QueryEngine.submitMessage() 的 <code>for await</code> 循环中添加新的 switch case。确保：</p>
+            <ol>
+                <li>新消息类型添加到 query() 的 yield 联合类型中</li>
+                <li>如果需要持久化，在 <code>messages.push(message)</code> 条件中包含</li>
+                <li>考虑对转录写入的影响（是否需要同步等待）</li>
+            </ol>
+
+            <h3>扩展恢复机制</h3>
+            <p>新的恢复机制应该：</p>
+            <ol>
+                <li>在 <code>!needsFollowUp</code> 分支中添加检测逻辑</li>
+                <li>设置 <code>State.transition</code> 记录原因</li>
+                <li>使用递增计数器或标志防止无限循环</li>
+                <li>在 <code>withheld</code> 检查中添加对应的抑制逻辑</li>
+                <li>添加 <code>logEvent</code> 用于遥测</li>
+            </ol>
+        </section>
+
+        <section id="arch-guide" class="card architect">
+            <h2>架构师决策指南</h2>
+
+            <h3>端到端延迟的关键路径</h3>
+            <p>从用户按下 Enter 到看到第一个字符，关键路径是：</p>
+            <ol>
+                <li><strong>processUserInput</strong> (~5ms) — 输入解析和附件加载</li>
+                <li><strong>系统提示构建</strong> (~50ms) — fetchSystemPromptParts 并行加载技能和插件</li>
+                <li><strong>转录写入</strong> (~4-30ms) — 磁盘 I/O</li>
+                <li><strong>压缩管道</strong> (0-5000ms) — 取决于上下文大小和压缩触发</li>
+                <li><strong>API 首字节延迟</strong> (~200-500ms) — 网络 + 模型推理</li>
+            </ol>
+            <div class="info-box info">最影响用户感知延迟的是压缩管道和 API 首字节。对于长会话，autocompact 可能需要 2-5 秒（额外的 API 调用）。这是上下文长度和延迟之间的根本权衡。</div>
+
+            <h3>错误处理的分层策略</h3>
+            <p>系统采用三层错误处理：</p>
+            <ul>
+                <li><strong>可恢复层</strong>（query 循环内部）：prompt-too-long → 压缩重试；max-output-tokens → 提升限制；model overload → fallback 模型。这些对用户透明。</li>
+                <li><strong>可报告层</strong>（yield 错误消息）：不可恢复的 API 错误、图片大小错误。这些作为 Assistant 消息中的错误内容呈现。</li>
+                <li><strong>致命层</strong>（throw/catch）：运行时异常。这些触发 <code>yieldMissingToolResultBlocks</code> 补齐未匹配的 tool_use，然后 yield 错误消息。</li>
+            </ul>
+
+            <h3>转录持久化的一致性保证</h3>
+            <p>系统提供"至少一次"的转录持久化保证：用户消息在 API 调用前同步写入；assistant 消息异步写入但有顺序保证；compact_boundary 前的 preservedSegment 尾部同步刷新。在进程崩溃时，可能丢失最后一个 assistant 消息，但用户消息和之前的对话历史是安全的。</p>
+
+            <h3>流式 vs 批量工具执行的权衡</h3>
+            <p><code>StreamingToolExecutor</code> 减少了多工具调用的延迟（工具在模型流式输出时就开始执行），但引入了复杂性：需要 <code>discard()</code> 在 fallback 时清理、需要 <code>getRemainingResults()</code> 在循环末尾收集未完成的结果、需要处理部分工具结果与后续消息的交错。对于工具数量少（1-2 个）的场景，收益有限；对于大量并行工具调用的场景，收益显著。</p>
+        </section>
+
+        <section id="code-index" class="card">
+            <h2>代码索引</h2>
+            <table>
+                <thead><tr><th>文件</th><th>行数</th><th>说明</th></tr></thead>
+                <tbody>
+                    <tr><td><code>QueryEngine.ts</code></td><td>~1296</td><td>会话管理、submitMessage 入口、SDK 消息 yield 与转录</td></tr>
+                    <tr><td><code>query.ts</code></td><td>~1730</td><td>query()/queryLoop() 核心循环、压缩管道、API 调用、工具调度</td></tr>
+                    <tr><td><code>main.tsx</code></td><td>~4684</td><td>getInputPrompt()、print 模式查询消费、REPL ask() 调用</td></tr>
+                    <tr><td><code>entrypoints/init.ts</code></td><td>~341</td><td>全局初始化（配置、网络、遥测）</td></tr>
+                    <tr><td><code>setup.ts</code></td><td>~478</td><td>环境设置（权限、worktree、后台预取）</td></tr>
+                    <tr><td><code>state/AppStateStore.ts</code></td><td>~1200+</td><td>AppState 类型、工具权限上下文、MCP 状态</td></tr>
+                    <tr><td><code>state/store.ts</code></td><td>~35</td><td>不可变状态容器</td></tr>
+                    <tr><td><code>state/onChangeAppState.ts</code></td><td>~120</td><td>状态变更副作用（权限同步、遥测通知）</td></tr>
+                    <tr><td><code>coordinator/coordinatorMode.ts</code></td><td>~370</td><td>协调器模式提示词生成（多 Agent 场景）</td></tr>
+                    <tr><td><code>interactiveHelpers.tsx</code></td><td>~366</td><td>设置对话框序列、renderAndRun</td></tr>
+                    <tr><td><code>replLauncher.tsx</code></td><td>~23</td><td>REPL 启动（App + REPL 组件动态加载）</td></tr>
+                </tbody>
+            </table>
+        </section>
+    </main>
+</body>
+</html>
