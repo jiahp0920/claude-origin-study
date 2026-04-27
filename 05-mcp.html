@@ -72,7 +72,10 @@
 
         <section id="overview" class="card">
             <h2>职责概述</h2>
-            <p>MCP（Model Context Protocol）体系是 Claude Code 的核心扩展机制，负责与外部 MCP 服务器建立连接、发现工具/资源/命令、管理认证流程，并将远程工具封装为统一的 Tool 接口供查询循环调用。整个体系横跨 <code>services/mcp/</code>（客户端连接、认证、配置）和 <code>server/</code>（服务端会话管理）两大模块，支持 stdio、SSE、HTTP、WebSocket、SDK 等六种传输方式，实现了 OAuth 2.0 + PKCE 认证流、XAA（Cross-App Access）企业免浏览器认证、Elicitation 交互式确认、Channel 消息推送等高级特性。它是 Claude Code 从单一工具 CLI 演进为可扩展平台的关键基础设施。</p>
+
+            <p><strong>解决的问题：</strong>CC 内置了 30 多个工具，但用户总会有新需求——连接公司的数据库、调用内部 API、操作特定格式的文件。不可能每次都改源码。MCP（Model Context Protocol）就是 CC 的"应用商店"机制，让第三方可以开发插件工具，CC 自动发现和调用。</p>
+            <p><strong>应用场景：</strong>① 安装一个 MCP 插件后，CC 突然能查 PostgreSQL 了 ② 团队共享的内部工具（如部署脚本）打包成 MCP Server 给全组用 ③ 第三方开发者发布工具到市场，用户一键安装 ④ 企业内网服务通过 OAuth 认证安全接入。</p>
+            <p><strong>一句话理解：</strong>就像手机的 App Store——手机出厂自带一些功能，但你想加新功能就装 App。MCP 就是 CC 的 App 安装协议。</p>
         </section>
 
         <section id="architecture" class="card">

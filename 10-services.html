@@ -72,7 +72,10 @@
 
         <section id="overview" class="card">
             <h2>职责概述</h2>
-            <p>服务层是 Claude Code 的"内脏器官系统"——一系列松耦合的后台服务，各自负责一个明确的横向关注点。它们在主 REPL 循环之外异步运行，通过 GrowthBook feature flags 控制启用/禁用，遵循"fail open"原则（失败时不阻塞主流程）。服务之间通过 <code>logEvent()</code> 共享遥测数据，通过 <code>runForkedAgent()</code> 共享 prompt cache，但彼此没有直接依赖关系。</p>
+
+            <p><strong>解决的问题：</strong>CC 主循环忙着处理用户对话，但还有很多事需要在后台持续做——检查订阅状态、同步团队记忆、监控 MCP 连接健康、预缓存 Prompt。这些事不能阻塞主流程，需要一套后台服务框架让它们各跑各的。</p>
+            <p><strong>应用场景：</strong>① 用户在对话时，后台默默同步团队共享的记忆文件 ② 订阅到期前自动提醒 ③ MCP Server 断连后自动重连 ④ 定期把 Prompt 模板预热到 API 缓存，减少首次响应延迟 ⑤ 后台服务挂了不影响主对话——"fail open"原则。</p>
+            <p><strong>一句话理解：</strong>就像手机的后台 App 刷新——你在用微信的时候，邮件在后台同步、天气在后台更新，各干各的，互不干扰。</p>
         </section>
 
         <section id="architecture" class="card">

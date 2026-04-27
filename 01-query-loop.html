@@ -72,7 +72,10 @@
 
         <section id="overview" class="card">
             <h2>职责概述</h2>
-            <p>Query 循环是 Claude Code 的核心引擎，由 <code>QueryEngine</code> 类和 <code>query()</code> 生成器函数组成。<code>QueryEngine</code>（<code>QueryEngine.ts</code>）管理会话级别的状态和消息历史，其 <code>submitMessage()</code> 方法处理用户输入并驱动查询循环。<code>query()</code>（<code>query.ts</code>）是一个 <code>AsyncGenerator</code>，实现了无限循环的"API 调用 → 工具执行 → 继续或终止"模式。每次迭代代表一次 API 请求和可能的工具调用周期，直到模型不再请求工具、达到 token 预算、或被用户中断。</p>
+
+            <p><strong>解决的问题：</strong>大模型不会自己调用工具——它只返回文本。需要一个循环引擎反复调用 API、解析模型请求的工具调用、执行工具、把结果喂回模型，直到任务完成。这就是 Query 循环干的事。</p>
+            <p><strong>应用场景：</strong>① 用户输入一条消息后，引擎自动驱动"模型思考→调工具→再思考"的多轮循环 ② 处理需要多次工具调用的复杂任务（如跨文件重构） ③ 在 token 预算耗尽、用户中断或模型表示"完成"时优雅终止。</p>
+            <p><strong>一句话理解：</strong>就像你和 AI 下棋——你走一步（用户输入），AI 走一步（模型回复），AI 可能需要查棋谱（调工具），查完再想，直到分出胜负（任务完成）。</p>
         </section>
 
         <section id="architecture" class="card">

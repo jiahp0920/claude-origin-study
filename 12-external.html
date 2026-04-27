@@ -72,7 +72,10 @@
 
         <section id="overview" class="card">
             <h2>职责概述</h2>
-            <p>Claude Code 的外部集成层是连接 CLI 与外部世界的桥梁。它覆盖了从底层 Shell 执行到高层 GUI 自动化的完整栈：<strong>vim/</strong> 提供类 Vim 编辑体验的状态机；<strong>voice/</strong> 管理语音输入的认证与功能开关；<strong>utils/github/</strong> 检测 gh CLI 认证状态；<strong>utils/telemetry/</strong> 实现基于 OpenTelemetry 的完整可观测性（指标、日志、链路追踪、Perfetto 性能分析）；<strong>utils/git/</strong> 通过纯文件系统读取实现零子进程的 Git 状态缓存；<strong>utils/shell/</strong> 和 <strong>utils/bash/</strong> 构建 Shell 命令解析与执行基础设施；<strong>utils/deepLink/</strong> 实现 <code>claude-cli://</code> 自定义 URI 协议；<strong>utils/claudeInChrome/</strong> 通过 Native Messaging / WebSocket Bridge 将 Claude Code 能力扩展到浏览器；<strong>utils/computerUse/</strong> 通过 macOS 原生模块实现屏幕截图、键盘鼠标控制等 GUI 自动化。</p>
+
+            <p><strong>解决的问题：</strong>CC 不只是一个终端聊天工具——它还需要执行 Shell 命令、操作 Git 仓库、连接浏览器做 GUI 自动化、处理语音输入、生成深度链接。这些"和外部世界交互"的能力需要一个统一的集成层来管理。</p>
+            <p><strong>应用场景：</strong>① 执行用户系统上的 Shell 命令（编译、测试、部署）② 解析 Git 仓库状态（当前分支、未提交变更）③ 通过浏览器扩展操作网页（自动化测试）④ 语音输入转文字 ⑤ <code>claude-cli://</code> 链接从 IDE 跳转到终端 ⑥ Vim 模式的键盘映射和状态管理。</p>
+            <p><strong>一句话理解：</strong>就像 CC 的"手脚"——大脑（模型）想干什么，都通过这一层和外部世界交互。</p>
         </section>
 
         <section id="architecture" class="card">

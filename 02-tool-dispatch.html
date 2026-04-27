@@ -72,7 +72,10 @@
 
         <section id="overview" class="card">
             <h2>职责概述</h2>
-            <p>工具调度系统是 Claude Code 的能力引擎。它定义了统一的 <code>Tool</code> 抽象接口，管理 30+ 内置工具和动态加载的 MCP 工具的生命周期——从注册、过滤、模式匹配到权限校验、执行和结果处理。整个系统通过 <code>buildTool()</code> 工厂函数统一构建，以 <code>getAllBaseTools()</code> 为工具注册表入口，经由 <code>getTools()</code> → <code>assembleToolPool()</code> → <code>getMergedTools()</code> 的分层组装管线，最终将可用工具列表提供给 LLM API。每个工具遵循 <code>validateInput → checkPermissions → call → ToolResult</code> 的标准生命周期。</p>
+
+            <p><strong>解决的问题：</strong>模型说"我要读文件 X"或"我要运行命令 Y"，但这些意图只是一段文本。需要一个调度系统把模型的文本意图翻译成真实的文件操作、Shell 命令、网络请求，并把执行结果格式化后返回给模型。</p>
+            <p><strong>应用场景：</strong>① 模型请求读取代码文件 → 调度 FileRead 工具 → 返回文件内容 ② 模型请求运行测试 → 调度 Bash 工具 → 返回执行结果 ③ MCP 插件注册的自定义工具（如数据库查询）的统一调度 ④ 多工具并发执行时的读写分离和并发控制。</p>
+            <p><strong>一句话理解：</strong>就像餐厅里的服务员——客人（模型）点菜（工具调用），服务员把单子传给厨房（执行引擎），菜做好了端回去（返回结果）。</p>
         </section>
 
         <section id="architecture" class="card">

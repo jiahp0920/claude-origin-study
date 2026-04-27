@@ -72,11 +72,10 @@
 
         <section id="overview" class="card">
             <h2>职责概述</h2>
-            <p>
-                配置与迁移系统管理 Claude Code 的全部用户可定制行为。它实现了 <strong>五层配置层级</strong>（用户 → 项目 → 本地 → CLI 标志 → 管理策略），
-                使用 <strong>Zod Schema</strong> 做运行时验证，并通过 <strong>migrations/</strong> 目录下的迁移函数在版本升级时自动转换旧配置。
-                此外，系统还包括两个独立的定制子系统：<strong>输出样式</strong>（控制模型的输出风格）和<strong>快捷键绑定</strong>（可自定义的键盘映射）。
-            </p>
+
+            <p><strong>解决的问题：</strong>每个用户、每个项目对 CC 的行为偏好都不同——允许哪些工具、用哪个模型、什么格式输出、哪些快捷键。需要一个配置系统记住这些偏好，并且在不同版本升级时自动迁移旧配置，不会因为格式变了就挂掉。</p>
+            <p><strong>应用场景：</strong>① 用户设置"总是允许读文件但写文件要确认" ② 项目级配置 <code>.claude/settings.json</code> 定义团队共享的工具权限 ③ CC 升级后自动把旧格式配置迁移到新格式 ④ 用户自定义快捷键映射 ⑤ 组织管理员下发统一策略覆盖个人配置。</p>
+            <p><strong>一句话理解：</strong>就像 VS Code 的 settings.json——个人设置、项目设置、工作区设置分层叠加，升级时自动迁移。</p>
         </section>
 
         <section id="architecture" class="card">

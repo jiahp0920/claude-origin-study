@@ -72,7 +72,10 @@
 
         <section id="overview" class="card">
             <h2>职责概述</h2>
-            <p>Agent 架构是 Claude Code 实现复杂任务分解和并行执行的核心。它由三层组成：<strong>（1）Task 抽象层</strong>——<code>Task.ts</code> 定义了统一的任务类型系统（7 种 <code>TaskType</code>、5 种 <code>TaskStatus</code>），通过 <code>tasks.ts</code> 注册表管理所有任务实现；<strong>（2）AgentTool 调度层</strong>——作为唯一的 agent 入口工具，支持同步子 agent、异步后台 agent、Fork 子 agent、In-process teammate 和远程 agent 五种运行模式；<strong>（3）通信协调层</strong>——<code>SendMessageTool</code> 实现 agent 间点对点消息、广播、关闭协商和计划审批，<code>TeamCreateTool</code>/<code>TeamDeleteTool</code> 管理 agent 团队生命周期。</p>
+
+            <p><strong>解决的问题：</strong>单个 AI 对话很难处理"重构整个微服务架构"这种大任务。需要一种机制把大任务拆成小任务，分配给多个 AI Agent 并行执行，再汇总结果。Agent 架构就是 CC 的"多 AI 协作"方案。</p>
+            <p><strong>应用场景：</strong>① 用户说"把这个项目从 JS 迁移到 TS" → 主 Agent 拆分出多个子 Agent 分别处理不同模块 ② 后台 Agent 异步执行耗时任务（如全量测试），不阻塞主对话 ③ 代码审查 Agent 在完成后自动触发 review ④ 多个 Agent 组成团队，通过消息传递协调工作。</p>
+            <p><strong>一句话理解：</strong>就像一个项目经理带着几个开发——经理拆任务、分配给组员、收集结果，组员各自独立干活，有事儿互相喊。</p>
         </section>
 
         <section id="architecture" class="card">

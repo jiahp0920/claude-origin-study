@@ -72,7 +72,10 @@
 
         <section id="overview" class="card">
             <h2>职责概述</h2>
-            <p>Native 能力层由五个独立模块组成，它们原本依赖 Rust/C++ 原生模块（通过 NAPI 绑定），现已全部用纯 TypeScript 重写为平台无关实现，消除了原生二进制依赖：<strong>native-ts/color-diff/</strong> 提供语法高亮与彩色差异渲染（替代 syntect + bat + similar）；<strong>native-ts/file-index/</strong> 提供高性能模糊文件搜索（替代 nucleo）；<strong>native-ts/yoga-layout/</strong> 提供 CSS Flexbox 布局引擎（替代 Facebook Yoga WASM/C++）；<strong>upstreamproxy/</strong> 在 CCR 容器环境中设置 MITM 代理与 CONNECT→WebSocket 中继；<strong>bridge/</strong> 实现远程会话桥接，让 Claude Code 可以在容器中运行而由本地 IDE 驱动。</p>
+
+            <p><strong>解决的问题：</strong>CC 的一些核心能力需要高性能——语法高亮要快、文件搜索要快、终端布局计算要快。以前这些用 Rust/C++ 原生模块实现，但原生二进制导致跨平台分发困难。这一层把所有原生模块用纯 TypeScript 重写，消除了原生依赖，同时保持性能可接受。</p>
+            <p><strong>应用场景：</strong>① 代码差异的彩色渲染（新增行绿色、删除行红色）② 输入文件路径时的模糊搜索补全 ③ 终端界面的 Flexbox 布局计算 ④ 容器环境中的 MITM 代理设置 ⑤ 远程开发时本地 IDE 驱动容器内的 CC。</p>
+            <p><strong>一句话理解：</strong>就像 Electron 之于桌面 App——用 Web 技术替代原生开发，牺牲一点极致性能，换来跨平台和可维护性。</p>
         </section>
 
         <section id="architecture" class="card">

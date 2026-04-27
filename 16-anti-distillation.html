@@ -70,11 +70,10 @@
 
         <section id="overview" class="card">
             <h2>职责概述</h2>
-            <p>反蒸馏（Anti-Distillation）是 Claude Code 防止其模型输出被用于训练竞品模型的核心防线。CC 采用了"服务端为主、客户端配合"的架构：API 侧执行输出变换（假工具注入、思维链脱敏、文本摘要），客户端侧负责身份认证（Native Attestation）、请求追踪（Fingerprint）、环境检测（Gateway Detection）。这种分层设计使得即使客户端被逆向，服务端的防护仍然有效。</p>
-            <div class="component-box">
-                <div class="name">7 层防御全景</div>
-                <div class="desc">从假工具注入到客户端认证的纵深防御</div>
-            </div>
+
+            <p><strong>解决的问题：</strong>竞争对手可以通过批量调用 Claude API，收集大量"输入→输出"对，然后用这些数据训练自己的模型（蒸馏）。反蒸馏系统通过在输出中注入噪声、脱敏推理过程、验证客户端真实性等手段，使得收集到的输出无法有效用于训练竞品模型。</p>
+            <p><strong>应用场景：</strong>① 竞品通过中间代理批量采集 CC 输出 → 网关检测识别并标记 ② 逆向工程者分析 CC 输出模式 → 假工具注入让蒸馏数据包含噪声 ③ 思维链被截获 → 脱敏为不可读的占位符 ④ 伪造 CC 客户端发送请求 → Native Attestation 验证失败拒绝服务。</p>
+            <p><strong>一句话理解：</strong>就像钞票的防伪——水印、安全线、变色油墨、微缩文字，每一层都让造假更难。蒸馏者拿到的数据就像假钞上印着"样本"两个字。</p>
         </section>
 
         <section id="architecture" class="card">

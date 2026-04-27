@@ -73,13 +73,10 @@
 
         <section id="overview" class="card">
             <h2>职责概述</h2>
-            <p>
-                命令系统是 Claude Code CLI 用户交互的核心入口之一。用户在 PromptInput 中输入 <code>/</code> 前缀即可触发斜杠命令。
-                系统管理着 <strong>70+</strong> 条命令，涵盖配置管理、模型切换、上下文压缩、代码审查、权限管理等方方面面。
-                命令来源包括：<strong>内置命令</strong>（硬编码在 <code>commands.ts</code> 中）、<strong>技能目录命令</strong>（<code>.claude/commands/</code>）、
-                <strong>打包技能</strong>（bundled skills）、<strong>插件命令</strong>、<strong>MCP 技能</strong> 和 <strong>工作流命令</strong>。
-                每条命令都是 <code>Command</code> 类型联合体的一员，分为 <code>prompt</code>、<code>local</code>、<code>local-jsx</code> 三种执行模式。
-            </p>
+
+            <p><strong>解决的问题：</strong>用户在 CC 中能做的不只是聊天——还要切换模型、压缩上下文、查看配置、审查代码等等。需要一个命令系统把这些操作统一为 <code>/xxx</code> 斜杠命令，让用户快速触发而不需要记住复杂的操作路径。</p>
+            <p><strong>应用场景：</strong>① <code>/model sonnet</code> 快速切换模型 ② <code>/compact</code> 手动触发上下文压缩 ③ <code>/review</code> 对当前变更做代码审查 ④ <code>/permissions</code> 管理工具权限规则 ⑤ <code>/buddy</code> 孵化一只宠物 ⑥ 团队自定义的 <code>/deploy</code>、<code>/test</code> 等工作流命令。</p>
+            <p><strong>一句话理解：</strong>就像微信的斜杠命令——输入 <code>/</code> 就弹出所有可用操作，选一个直接执行。</p>
         </section>
 
         <section id="architecture" class="card">

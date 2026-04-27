@@ -72,7 +72,10 @@
 
         <section id="overview" class="card">
             <h2>职责概述</h2>
-            <p>上下文管理是 Claude Code 最核心的工程子系统之一。它负责管理对话历史的 token 预算，决定何时以及如何压缩上下文，确保对话在模型上下文窗口限制内持续运行而不丢失关键信息。该系统包含四个层次的压缩策略：<strong>Microcompact</strong>（细粒度工具结果清除）、<strong>Session Memory</strong>（后台会话笔记提取）、<strong>Auto Compact</strong>（全自动对话摘要）和 <strong>Memory Extraction</strong>（持久化记忆写入），形成了一个从"轻量清除"到"全量重建"的渐进式上下文管理体系。</p>
+
+            <p><strong>解决的问题：</strong>大模型有上下文窗口限制（200K token），但一个复杂的编程任务很容易超过这个限制——几十轮对话、几十个文件的内容、各种工具返回结果。需要一个智能的"内存管理器"，在窗口快满时决定保留什么、丢弃什么，确保对话不会因为超限而崩溃。</p>
+            <p><strong>应用场景：</strong>① 对话进行到第 20 轮，上下文快满了 → 自动压缩早期对话，保留关键决策 ② 用户打开一个大文件进行分析 → 文件内容占满窗口 → 智能截断只保留相关部分 ③ 长期记忆：把重要信息写入 ~/.claude/ 文件，下次对话还能用 ④ 工具返回的冗长输出自动精简。</p>
+            <p><strong>一句话理解：</strong>就像你的工作记忆——你不能同时记住所有事，所以你会做笔记（Memory）、丢掉不重要的细节（Microcompact）、定期总结（Auto Compact），确保脑子不被撑爆。</p>
         </section>
 
         <section id="architecture" class="card">
