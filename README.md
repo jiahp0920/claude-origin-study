@@ -1,10 +1,10 @@
 # Claude Code CLI 源码深度分析
 
+> **[在线阅读 → https://jiahp0920.github.io/claude-origin-study/](https://jiahp0920.github.io/claude-origin-study/)**
+>
+> 点击上方链接即可在浏览器中查看完整的交互式文档（暗色主题 + 侧边栏导航 + 流程图）
+
 基于 Claude Code CLI 泄漏源码的系统性架构分析文档，涵盖启动链路、核心循环、工具调度、权限系统、Agent 架构、MCP 体系等 17 个核心模块。
-
-## 在线浏览
-
-推荐直接打开 `index.html` 开始浏览，或使用 GitHub Pages。
 
 ## 文档结构
 
