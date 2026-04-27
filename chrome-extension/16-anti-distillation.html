@@ -1,0 +1,429 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>反蒸馏与输出保护 - Claude Code 源码分析</title>
+    <link rel="stylesheet" href="shared/styles.css">
+</head>
+<body>
+    <nav class="sidebar">
+<div class="sidebar-header"><div class="logo">CC</div><div><div class="sidebar-title">Claude Code</div><div class="sidebar-subtitle">源码深度分析</div></div></div>
+        <div class="nav-section-title">总览</div>
+        <a href="reading-guide.html" class="nav-link">阅读指南</a>
+        <a href="index.html" class="nav-link">架构全景</a>
+        <a href="dependency-map.html" class="nav-link">模块依赖图</a>
+        <a href="vertical-agent-guide.html" class="nav-link">垂直 Agent 设计指南</a>
+<div class="nav-section-title">核心流程</div>
+<a href="00-startup.html" class="nav-link">启动链路</a>
+<a href="01-query-loop.html" class="nav-link">Query 循环</a>
+<a href="flows/query-lifecycle.html" class="nav-link">查询生命周期</a>
+<div class="nav-section-title">核心机制</div>
+<a href="02-tool-dispatch.html" class="nav-link">工具调度</a>
+<a href="03-permissions.html" class="nav-link">权限系统</a>
+<a href="03b-security-hardening.html" class="nav-link">风控与安全加固</a>
+<a href="04-agent-arch.html" class="nav-link">Agent 架构</a>
+<a href="11-hooks.html" class="nav-link">Hook 机制</a>
+<div class="nav-section-title">扩展体系</div>
+<a href="05-mcp.html" class="nav-link">MCP 体系</a>
+<a href="07-plugins.html" class="nav-link">插件系统</a>
+<a href="08-commands.html" class="nav-link">命令系统</a>
+<div class="nav-section-title">数据与服务</div>
+<a href="06-context-mgmt.html" class="nav-link">上下文管理</a>
+<a href="10-services.html" class="nav-link">服务层</a>
+<a href="15-cost-limits.html" class="nav-link">成本与限流</a>
+<div class="nav-section-title">界面与配置</div>
+<a href="09-ui.html" class="nav-link">UI 交互层</a>
+<a href="13-config.html" class="nav-link">配置与迁移</a>
+<div class="nav-section-title">外围能力</div>
+<a href="12-external.html" class="nav-link">外部集成</a>
+<a href="14-native.html" class="nav-link">Native 能力</a>
+<div class="nav-section-title">安全专题</div>
+<a href="16-anti-distillation.html" class="nav-link active">反蒸馏与输出保护</a>
+<div class="nav-section-title">流程图</div>
+<a href="flows/tool-execution.html" class="nav-link">工具执行流程</a>
+<a href="flows/agent-collab.html" class="nav-link">Agent 协作流程</a>
+</nav>
+    <main class="content">
+        <header class="page-header">
+            <span class="breadcrumb"><a href="index.html">源码分析</a></span>
+            <h1>反蒸馏与输出保护</h1>
+            <p class="subtitle">Claude Code 的 7 层反蒸馏纵深防御 — 假工具注入、思维链脱敏、输出摘要、客户端认证、请求指纹、网关检测、Undercover 模式的完整实现</p>
+        </header>
+
+        <nav class="page-toc">
+    <div class="page-toc-title">页面导航</div>
+        <a href="#overview"><span class="toc-dot dot-overview"></span>职责概述</a>
+        <a href="#architecture"><span class="toc-dot dot-arch"></span>架构设计</a>
+        <a href="#fake-tool"><span class="toc-dot dot-data"></span>假工具注入</a>
+        <a href="#connector-text"><span class="toc-dot dot-data"></span>Connector Text 摘要</a>
+        <a href="#thinking-redact"><span class="toc-dot dot-arch"></span>思维链脱敏</a>
+        <a href="#streamlined"><span class="toc-dot dot-arch"></span>蒸馏抵抗输出</a>
+        <a href="#attestation"><span class="toc-dot dot-arch"></span>客户端认证</a>
+        <a href="#fingerprint"><span class="toc-dot dot-code"></span>请求指纹</a>
+        <a href="#gateway"><span class="toc-dot dot-data"></span>网关检测</a>
+        <a href="#undercover"><span class="toc-dot dot-design"></span>Undercover 模式</a>
+        <a href="#patterns"><span class="toc-dot dot-arch"></span>设计模式</a>
+        <a href="#agent-practice"><span class="toc-dot dot-practice"></span>Agent 实践借鉴</a>
+        <a href="#code-index"><span class="toc-dot dot-code"></span>代码索引</a>
+</nav>
+
+        <section id="overview" class="card">
+            <h2>职责概述</h2>
+
+            <p><strong>解决的问题：</strong>竞争对手可以通过批量调用 Claude API，收集大量"输入→输出"对，然后用这些数据训练自己的模型（蒸馏）。反蒸馏系统通过在输出中注入噪声、脱敏推理过程、验证客户端真实性等手段，使得收集到的输出无法有效用于训练竞品模型。</p>
+            <p><strong>应用场景：</strong>① 竞品通过中间代理批量采集 CC 输出 → 网关检测识别并标记 ② 逆向工程者分析 CC 输出模式 → 假工具注入让蒸馏数据包含噪声 ③ 思维链被截获 → 脱敏为不可读的占位符 ④ 伪造 CC 客户端发送请求 → Native Attestation 验证失败拒绝服务。</p>
+            <p><strong>一句话理解：</strong>就像钞票的防伪——水印、安全线、变色油墨、微缩文字，每一层都让造假更难。蒸馏者拿到的数据就像假钞上印着"样本"两个字。</p>
+        </section>
+
+        <section id="architecture" class="card">
+            <h2>架构设计</h2>
+            <div class="layer-diagram">
+                <div class="layer" style="border-color:var(--red);background:rgba(239,68,68,.06);">
+                    <div class="layer-header" style="color:var(--red);">Layer 1 — API 侧输出变换（服务端执行）</div>
+                    <div class="layer-body">
+                        <div class="layer-component highlight" style="border-color:var(--red);">Fake Tool Injection — 注入虚假工具定义</div>
+                        <div class="layer-component" style="border-color:var(--red);">Thinking Redaction — 思维链脱敏</div>
+                        <div class="layer-component" style="border-color:var(--red);">Connector Text Summarization — 文本摘要+签名</div>
+                    </div>
+                </div>
+                <div class="layer-arrow">▼</div>
+                <div class="layer" style="border-color:var(--amber);background:rgba(245,158,11,.06);">
+                    <div class="layer-header" style="color:var(--amber);">Layer 2 — 客户端侧输出处理</div>
+                    <div class="layer-body">
+                        <div class="layer-component" style="border-color:var(--amber);">Streamlined Output — 蒸馏抵抗输出格式</div>
+                        <div class="layer-component" style="border-color:var(--amber);">Strip Signature Blocks — 签名块清理</div>
+                    </div>
+                </div>
+                <div class="layer-arrow">▼</div>
+                <div class="layer" style="border-color:var(--purple);background:rgba(139,92,246,.06);">
+                    <div class="layer-header" style="color:var(--purple);">Layer 3 — 请求认证与追踪</div>
+                    <div class="layer-body">
+                        <div class="layer-component" style="border-color:var(--purple);">Native Client Attestation — 密码学客户端认证</div>
+                        <div class="layer-component" style="border-color:var(--purple);">Request Fingerprint — SHA256 请求指纹</div>
+                        <div class="layer-component" style="border-color:var(--purple);">Attribution Header — 归因头</div>
+                    </div>
+                </div>
+                <div class="layer-arrow">▼</div>
+                <div class="layer" style="border-color:var(--cyan);background:rgba(6,182,212,.06);">
+                    <div class="layer-header" style="color:var(--cyan);">Layer 4 — 环境检测</div>
+                    <div class="layer-body">
+                        <div class="layer-component" style="border-color:var(--cyan);">Gateway Fingerprinting — AI 代理检测</div>
+                        <div class="layer-component" style="border-color:var(--cyan);">Undercover Mode — 隐身模式</div>
+                    </div>
+                </div>
+            </div>
+        </section>
+
+        <section id="fake-tool" class="card">
+            <h2><span class="icon" style="background:rgba(239,68,68,.15);color:var(--red);">⚔</span> Layer 1: Fake Tool Injection — 假工具注入 ★ 核心</h2>
+            <p>这是反蒸馏最核心的机制。当启用时，API 在模型的上下文中注入<strong>不存在的工具定义</strong>。模型输出的 tool_use 调用中会包含对这些假工具的引用，使得蒸馏出的学生模型学到的是包含噪声的工具调用模式，无法正常工作。</p>
+            <div class="component-box">
+                <div class="name">anti_distillation: ['fake_tools'] 请求参数</div>
+                <div class="desc">客户端只发送 flag，假工具注入在 API 侧执行</div>
+                <pre><code>// services/api/claude.ts:301-313
+// Anti-distillation: send fake_tools opt-in for 1P CLI only
+if (
+  feature('ANTI_DISTILLATION_CC')
+    ? process.env.CLAUDE_CODE_ENTRYPOINT === 'cli' &&
+      shouldIncludeFirstPartyOnlyBetas() &&
+      getFeatureValue_CACHED_MAY_BE_STALE(
+        'tengu_anti_distill_fake_tool_injection',
+        false,
+      )
+    : false
+) {
+  result.anti_distillation = ['fake_tools']
+}</code></pre>
+            </div>
+            <div class="info-box tip">三个前置条件缺一不可：① 构建时 <code>ANTI_DISTILLATION_CC</code> feature flag 开启 ② 运行时是 CLI 入口（非 SDK） ③ GrowthBook 远程配置 <code>tengu_anti_distill_fake_tool_injection</code> 为 true。这种"编译期 + 运行期 + 远程配置"三重门控确保了精确的灰度控制。</div>
+        </section>
+
+        <section id="connector-text" class="card">
+            <h2><span class="icon" style="background:rgba(239,68,68,.15);color:var(--red);">⚔</span> Layer 2: Connector Text Summarization (Slate Prism)</h2>
+            <p>POC 级别的反蒸馏机制。API 在工具调用之间缓存 assistant 文本，用摘要替换原文，并附加<strong>加密签名</strong>。原文不再出现在 transcript 中，但后续轮次可以通过签名恢复完整上下文。蒸馏者拿到的是摘要而非原始输出。</p>
+            <div class="component-box">
+                <div class="name">Beta Header: summarize-connector-text-2026-03-13</div>
+                <div class="desc">服务端摘要 + 密码学签名，客户端透传</div>
+                <pre><code>// utils/betas.ts:279-298 — POC: server-side connector-text summarization
+// When enabled, the API buffers assistant text between tool calls,
+// summarizes it, and returns the summary with a cryptographic signature
+// so the original text can be restored on subsequent turns.
+
+// 启用条件：内部用户 + CONNECTOR_TEXT feature flag + GrowthBook flag
+if (process.env.USER_TYPE === 'ant'
+    && feature('CONNECTOR_TEXT')
+    && (getFeatureValue_CACHED_MAY_BE_STALE('tengu_slate_prism', false)
+        || isEnvTruthy(process.env.USE_CONNECTOR_TEXT_SUMMARIZATION))) {
+  result.betas.push('summarize-connector-text-2026-03-13')
+}
+
+// services/api/claude.ts:2055-2134 — 流式处理 connector_text 块
+// 累积文本和签名，在 stripSignatureBlocks 中按需清理</code></pre>
+            </div>
+            <div class="info-box tip">签名块的清理在 <code>utils/messages.ts:5060-5078</code> 的 <code>stripSignatureBlocks</code> 函数中执行：当凭证变更时（用户切换账号），thinking、redacted_thinking、connector_text 三种签名块会被统一清除，防止旧凭证的签名数据泄露。</div>
+        </section>
+
+        <section id="thinking-redact" class="card">
+            <h2><span class="icon" style="background:rgba(239,68,68,.15);color:var(--red);">⚔</span> Layer 3: Thinking Redaction — 思维链脱敏</h2>
+            <p>API 返回 <code>redacted_thinking</code> 块而非明文 <code>thinking</code> 块。模型的推理过程在 transcript 中不可见，只保留脱敏后的占位符。CLI 用户端跳过思维链摘要器，直接渲染为 stub。</p>
+            <div class="component-box">
+                <div class="name">Beta Header: redact-thinking-2026-02-12</div>
+                <div class="desc">思维链对蒸馏者完全不可见</div>
+                <pre><code>// utils/betas.ts:266-277
+if (getFeatureValue_CACHED_MAY_BE_STALE('tengu_thinking_redaction', true)) {
+  result.betas.push('redact-thinking-2026-02-12')
+}
+
+// constants/betas.ts:20 — beta header 定义
+// 'redact-thinking-2026-02-12' → API 返回 redacted_thinking 块
+
+// CLI 端处理：跳过 thinking summarizer，直接渲染为 stub
+// 模型的推理链路在 transcript 中完全不可见</code></pre>
+            </div>
+            <div class="info-box warning">思维链脱敏是一个<strong>双刃剑</strong>：它保护了推理过程不被蒸馏，但也意味着用户无法看到模型的思考过程来调试问题。CC 通过 GrowthBook 远程配置实现了按用户/场景的灰度控制，而非一刀切。</div>
+        </section>
+
+        <section id="streamlined" class="card">
+            <h2><span class="icon" style="background:rgba(245,158,11,.15);color:var(--amber);">⇉</span> Layer 4: Streamlined Output — 蒸馏抵抗输出格式</h2>
+            <p>当 <code>CLAUDE_CODE_STREAMLINED_OUTPUT=true</code> 且 <code>STREAMLINED_OUTPUT</code> feature flag 启用时，SDK 输出的消息经过变换：文本消息保留，工具调用只显示累计计数（遇到文本重置），thinking 内容省略，工具列表和模型信息移除。输出变为 <code>streamlined_text</code> 和 <code>streamlined_tool_use_summary</code> 两种类型。</p>
+            <div class="component-box">
+                <div class="name">createStreamlinedTransformer()</div>
+                <div class="desc">有状态变换器：累计工具计数，文本出现时重置</div>
+                <pre><code>// utils/streamlinedTransform.ts — 蒸馏抵抗输出格式
+export function createStreamlinedTransformer(): (
+  message: StdoutMessage,
+) => StdoutMessage | null {
+  let cumulativeCounts = createEmptyToolCounts()
+
+  return function transformToStreamlined(message: StdoutMessage) {
+    switch (message.type) {
+      case 'assistant': {
+        const text = extractTextContent(content, '\n').trim()
+        accumulateToolUses(message, cumulativeCounts)
+
+        if (text.length > 0) {
+          // 文本消息：输出文本，重置计数
+          cumulativeCounts = createEmptyToolCounts()
+          return { type: 'streamlined_text', text, ... }
+        }
+        // 纯工具消息：输出累计摘要
+        // 例："Searched 3 patterns, read 5 files, wrote 2 files"
+        return { type: 'streamlined_tool_use_summary', tool_summary, ... }
+      }
+      case 'result': return message    // 结果消息透传
+      default:    return null          // 其他全部丢弃
+    }
+  }
+}</code></pre>
+            </div>
+            <div class="info-box tip">工具分类为 5 个桶：searches（Grep/Glob/WebSearch/LSP）、reads（FileRead/ListMcpResources）、writes（FileWrite/FileEdit/NotebookEdit）、commands（Shell/Tmux）、other。摘要文本用自然语言描述："Searched 3 patterns, read 5 files, wrote 2 files, ran 4 commands"。</div>
+        </section>
+
+        <section id="attestation" class="card">
+            <h2><span class="icon" style="background:rgba(139,92,246,.15);color:var(--purple);">🔒</span> Layer 5: Native Client Attestation — 客户端认证</h2>
+            <p>Attribution header 中嵌入 <code>cch=00000</code> 占位符。Bun 的 native HTTP 栈（用 Zig 实现）在发送请求前将其替换为<strong>密码学哈希</strong>。服务端验证这个 token 来确认请求来自真正的 Claude Code 客户端，而非第三方 wrapper 或爬虫。</p>
+            <div class="component-box">
+                <div class="name">Attribution Header 构造</div>
+                <div class="desc">cch 占位符在 HTTP 栈中被替换，服务端验证真实性</div>
+                <pre><code>// constants/system.ts:49-94 — Attribution Header
+const header = [
+  `cc_version=${VERSION}.${fingerprint}`,    // 版本 + 3字符指纹
+  `cc_entrypoint=${entrypoint}`,              // cli | sdk | unknown
+  `cch=00000`,                                // ← 占位符
+  `cc_workload=${tag}`,                       // QoS 路由
+].join('&')
+
+// 当 NATIVE_CLIENT_ATTESTATION feature flag 启用时：
+// Bun native HTTP 栈 (bun-anthropic/src/http/Attestation.zig)
+// 在发送前将 cch=00000 替换为密码学哈希
+// 关键：同长度替换，不改变 Content-Length</code></pre>
+            </div>
+            <div class="info-box tip">同长度替换（same-length replacement）是精妙的实现细节：用哈希值替换 <code>00000</code> 不会改变 HTTP 请求的 Content-Length，避免了触发 HTTP 管道化问题或中间代理的异常行为。实现在 Zig 层而非 TypeScript 层，使得逆向工程者无法在 JS 代码中找到哈希算法。</div>
+        </section>
+
+        <section id="fingerprint" class="card">
+            <h2><span class="icon" style="background:rgba(139,92,246,.15);color:var(--purple);">🔑</span> Layer 6: Request Fingerprint — 请求指纹</h2>
+            <p>基于用户首条消息计算 3 字符 hex 指纹，用于 API 请求归因、OAuth token 验证和计费追踪。算法固定且被 1P/3P API 共同依赖，注释明确警告"不要随意修改"。</p>
+            <div class="component-box">
+                <div class="name">computeFingerprint()</div>
+                <div class="desc">SHA256 + 硬编码盐值，取前 3 位 hex</div>
+                <pre><code>// utils/fingerprint.ts
+export const FINGERPRINT_SALT = '59cf53e54c78'  // 硬编码盐值
+
+export function computeFingerprint(
+  messageText: string,
+  version: string,
+): string {
+  // 提取索引 [4, 7, 20] 处的字符，越界用 "0"
+  const indices = [4, 7, 20]
+  const chars = indices.map(i => messageText[i] || '0').join('')
+
+  const fingerprintInput = `${FINGERPRINT_SALT}${chars}${version}`
+
+  // SHA256 哈希，取前 3 个 hex 字符
+  const hash = createHash('sha256')
+    .update(fingerprintInput).digest('hex')
+  return hash.slice(0, 3)
+}
+
+// IMPORTANT: Do not change this method without careful coordination
+// with 1P and 3P (Bedrock, Vertex, Azure) APIs.</code></pre>
+            </div>
+        </section>
+
+        <section id="gateway" class="card">
+            <h2><span class="icon" style="background:rgba(6,182,212,.15);color:var(--cyan);">📡</span> Layer 7: Gateway Detection — AI 网关指纹识别</h2>
+            <p>检测并记录 AI 网关代理，防止通过中间代理批量采集 CC 的输出用于蒸馏。通过匹配响应头前缀和 URL host 后缀识别 7 种主流网关。</p>
+            <div class="component-box">
+                <div class="name">网关指纹识别</div>
+                <div class="desc">7 种主流 AI 网关的自动检测</div>
+                <pre><code>// services/api/logging.ts:65-135
+// 检测方式 1：响应头前缀匹配
+'x-litellm-'    → LiteLLM
+'helicone-'     → Helicone
+'x-portkey-'    → Portkey
+'cf-aig-'       → Cloudflare AI Gateway
+'x-kong-'       → Kong
+'x-bt-'         → Braintrust
+
+// 检测方式 2：URL host 后缀匹配
+'.cloud.databricks.com' → Databricks
+
+// 检测结果写入分析事件
+logEvent('tengu_api_success', { gateway_type })
+logEvent('tengu_api_failure', { gateway_type })</code></pre>
+            </div>
+        </section>
+
+        <section id="undercover" class="card">
+            <h2><span class="icon" style="background:rgba(6,182,212,.15);color:var(--cyan);">🕵</span> 附加: Undercover Mode — 隐身模式</h2>
+            <p>当 Anthropic 内部员工（<code>USER_TYPE=ant</code>）在公开仓库工作时自动激活。移除所有归因信息（Co-Authored-By、Claude Code 标识、模型名称），系统提示不告知模型自己的身份。防止内部代号泄露到公开 commit 中。</p>
+            <div class="component-box">
+                <div class="name">isUndercover()</div>
+                <div class="desc">自动检测：不在内部仓库白名单中就激活</div>
+                <pre><code>// utils/undercover.ts
+export function isUndercover(): boolean {
+  if (process.env.USER_TYPE === 'ant') {
+    if (isEnvTruthy(process.env.CLAUDE_CODE_UNDERCOVER)) return true
+    // 自动模式：除非确认在内部仓库白名单中，否则默认激活
+    return getRepoClassCached() !== 'internal'
+  }
+  return false  // 外部用户永远不激活
+}
+
+// 系统提示注入（undercover 时）：
+// "You are operating UNDERCOVER in a PUBLIC repository.
+//  NEVER include: internal codenames, version numbers,
+//  project names, 'Claude Code', Co-Authored-By, or any
+//  hint of what model you are."</code></pre>
+            </div>
+            <div class="info-box warning">Undercover 模式<strong>没有强制关闭选项</strong> — 如果不确定是否在内部仓库，就保持隐身。这是安全优先的设计：宁可误杀（在内部仓库也隐身），不可漏放（在公开仓库泄露代号）。外部用户构建的 CC 在编译期通过 <code>USER_TYPE</code> 的 dead code elimination，所有 undercover 函数退化为空返回。</div>
+        </section>
+
+        <section id="patterns" class="card">
+            <h2>设计模式与亮点</h2>
+
+            <h3>1. 编译期 + 运行期 + 远程配置 三重门控</h3>
+            <p>假工具注入需要三个条件同时满足：构建时 feature flag <code>ANTI_DISTILLATION_CC</code>、运行时 CLI 入口检测、远程 GrowthBook <code>tengu_anti_distill_fake_tool_injection</code>。这种三层控制使得 Anthropic 可以精确控制哪些用户/场景启用反蒸馏，而非一刀切。</p>
+
+            <h3>2. 服务端执行 + 客户端配合</h3>
+            <p>假工具注入、思维链脱敏、Connector Text 摘要都在 API 侧执行。客户端只发送 flag（如 <code>anti_distillation: ['fake_tools']</code>），不参与实际的输出变换。即使客户端被逆向工程，攻击者也无法绕过服务端的保护。</p>
+
+            <h3>3. Dead Code Elimination 保护</h3>
+            <p>Undercover 模式通过 <code>process.env.USER_TYPE === 'ant'</code> 的编译期常量折叠，在非 Anthropic 构建中所有内部函数退化为 <code>return false</code> / <code>return ''</code>。外部用户看不到任何 undercover 相关的逻辑。</p>
+
+            <h3>4. 同长度替换避免 HTTP 副作用</h3>
+            <p>Native Attestation 使用 <code>cch=00000</code> 占位符，在 Zig 层替换为等长哈希，不改变 Content-Length。这种底层实现避免了中间代理的异常行为。</p>
+
+            <h3>5. 签名块统一管理</h3>
+            <p>thinking、redacted_thinking、connector_text 三种签名块在 <code>stripSignatureBlocks</code> 中统一清理。凭证变更时一次性清除所有签名数据，防止跨用户的签名泄露。</p>
+        </section>
+
+        <section id="agent-practice" class="card">
+            <h2><span class="icon" style="background:rgba(34,197,94,.15);color:var(--green);">◈</span> Agent 实践借鉴 — 垂直 Agent 的输出保护</h2>
+
+            <h3>场景映射：客服 Agent 的输出保护需求</h3>
+            <p>客服 Agent 的对话输出包含敏感信息：业务逻辑决策路径、工具调用链路、内部系统架构。这些输出如果被采集用于蒸馏竞品 Agent，等同于泄露核心竞争力。</p>
+
+            <h3>借鉴 CC：三层输出保护策略</h3>
+            <pre><code>// 客服 Agent 输出保护 — 借鉴 CC 的反蒸馏架构
+class OutputProtection {
+  // 策略 1：服务端输出变换（对应 CC 的 Fake Tool Injection）
+  // 在返回给客户端前，对工具调用链路做脱敏
+  transformForDelivery(rawResponse: AgentResponse): DeliveryResponse {
+    return {
+      text: rawResponse.text,                    // 文本保留
+      toolSummary: this.summarizeTools(rawResponse.tools), // 工具只返回摘要
+      thinking: undefined,                        // 推理过程不暴露
+    }
+  }
+
+  // 策略 2：请求指纹（对应 CC 的 Fingerprint）
+  computeRequestFingerprint(sessionId: string, userId: string): string {
+    const input = `${SALT}${sessionId.slice(0, 8)}${userId.slice(0, 4)}`
+    return crypto.createHash('sha256').update(input).digest('hex').slice(0, 8)
+  }
+
+  // 策略 3：网关检测（对应 CC 的 Gateway Detection）
+  detectProxy(headers: Record&lt;string, string&gt;): string | null {
+    const proxySignatures = {
+      'x-litellm-': 'LiteLLM',
+      'cf-aig-': 'Cloudflare',
+      'x-custom-proxy-': 'CustomProxy',
+    }
+    for (const [prefix, name] of Object.entries(proxySignatures)) {
+      if (Object.keys(headers).some(h => h.startsWith(prefix))) return name
+    }
+    return null
+  }
+}</code></pre>
+
+            <h3>落地清单</h3>
+            <div class="two-col">
+                <div class="info-box tip">
+                    <strong>必须抄的：</strong>
+                    <ul>
+                        <li><strong>服务端执行输出变换</strong>：工具调用脱敏、推理过程隐藏，全部在服务端完成。客户端只拿摘要。</li>
+                        <li><strong>请求指纹</strong>：每个会话计算唯一指纹，用于归因和异常检测。盐值硬编码，算法与多方协调。</li>
+                        <li><strong>网关检测</strong>：通过响应头特征识别中间代理，检测结果写入审计日志。</li>
+                    </ul>
+                </div>
+                <div class="info-box warning">
+                    <strong>不需要抄的：</strong>
+                    <ul>
+                        <li><strong>Fake Tool Injection</strong>：这是 LLM 输出保护特有的，客服 Agent 输出的是结构化数据，不存在"假工具"的场景。</li>
+                        <li><strong>Undercover Mode</strong>：内部员工专用，外部 Agent 不需要。</li>
+                        <li><strong>Native Attestation</strong>：需要 Zig 层的客户端认证，客服场景用 OAuth token 就够了。</li>
+                    </ul>
+                </div>
+            </div>
+        </section>
+
+        <section id="code-index" class="card">
+            <h2>代码索引</h2>
+            <table>
+                <thead><tr><th>文件</th><th>行数</th><th>说明</th></tr></thead>
+                <tbody>
+                    <tr><td><code>services/api/claude.ts</code></td><td>~2130</td><td>API 调用核心：anti_distillation 参数注入、connector_text 流式处理</td></tr>
+                    <tr><td><code>utils/betas.ts</code></td><td>~300</td><td>Beta header 管理：connector text 摘要、thinking redaction 配置</td></tr>
+                    <tr><td><code>constants/betas.ts</code></td><td>~25</td><td>Beta header 常量定义</td></tr>
+                    <tr><td><code>utils/streamlinedTransform.ts</code></td><td>~180</td><td>蒸馏抵抗输出变换器：工具分类 + 累计计数 + 摘要</td></tr>
+                    <tr><td><code>utils/fingerprint.ts</code></td><td>~75</td><td>请求指纹：SHA256 + 盐值，3 字符 hex</td></tr>
+                    <tr><td><code>constants/system.ts</code></td><td>~94</td><td>Attribution header：版本、入口、cch 认证、workload</td></tr>
+                    <tr><td><code>services/api/logging.ts</code></td><td>~135</td><td>网关指纹识别：7 种 AI 代理检测</td></tr>
+                    <tr><td><code>utils/undercover.ts</code></td><td>~90</td><td>隐身模式：自动激活、代号保护、commit 归因移除</td></tr>
+                    <tr><td><code>utils/messages.ts</code></td><td>~5070</td><td>stripSignatureBlocks：签名块统一清理</td></tr>
+                    <tr><td><code>services/api/client.ts</code></td><td>~129</td><td>x-anthropic-additional-protection 头</td></tr>
+                    <tr><td><code>utils/sanitization.ts</code></td><td>~100</td><td>Unicode 清理：防御隐藏 prompt 注入</td></tr>
+                    <tr><td><code>utils/commitAttribution.ts</code></td><td>~300</td><td>Commit 归因：Claude 贡献率计算、Co-Authored-By</td></tr>
+                </tbody>
+            </table>
+        </section>
+        <footer style="text-align:center; padding:32px 0 20px; margin-top:48px; border-top:1px solid var(--border); color:var(--text-secondary); font-size:13px; line-height:2;">
+        <div style="margin-bottom:4px;">⚠️ 免责声明</div>
+        本文仅用于技术学习和架构分析目的。源码分析基于公开泄漏的代码，所有商标和版权归 <a href="https://www.anthropic.com" style="color:var(--indigo);">Anthropic</a> 所有。未经授权不得用于商业用途。
+    </footer>
+    </main>
+</body>
+</html>

@@ -1,0 +1,829 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Native 能力层 - Claude Code 源码分析</title>
+    <link rel="stylesheet" href="shared/styles.css">
+</head>
+<body>
+    <nav class="sidebar">
+<div class="sidebar-header"><div class="logo">CC</div><div><div class="sidebar-title">Claude Code</div><div class="sidebar-subtitle">源码深度分析</div></div></div>
+        <div class="nav-section-title">总览</div>
+        <a href="reading-guide.html" class="nav-link">阅读指南</a>
+        <a href="index.html" class="nav-link">架构全景</a>
+        <a href="dependency-map.html" class="nav-link">模块依赖图</a>
+        <a href="vertical-agent-guide.html" class="nav-link">垂直 Agent 设计指南</a>
+<div class="nav-section-title">核心流程</div>
+<a href="00-startup.html" class="nav-link">启动链路</a>
+<a href="01-query-loop.html" class="nav-link">Query 循环</a>
+<a href="flows/query-lifecycle.html" class="nav-link">查询生命周期</a>
+<div class="nav-section-title">核心机制</div>
+<a href="02-tool-dispatch.html" class="nav-link">工具调度</a>
+<a href="03-permissions.html" class="nav-link">权限系统</a>
+<a href="03b-security-hardening.html" class="nav-link">风控与安全加固</a>
+<a href="04-agent-arch.html" class="nav-link">Agent 架构</a>
+<a href="11-hooks.html" class="nav-link">Hook 机制</a>
+<div class="nav-section-title">扩展体系</div>
+<a href="05-mcp.html" class="nav-link">MCP 体系</a>
+<a href="07-plugins.html" class="nav-link">插件系统</a>
+<a href="08-commands.html" class="nav-link">命令系统</a>
+<div class="nav-section-title">数据与服务</div>
+<a href="06-context-mgmt.html" class="nav-link">上下文管理</a>
+<a href="10-services.html" class="nav-link">服务层</a>
+<a href="15-cost-limits.html" class="nav-link">成本与限流</a>
+<div class="nav-section-title">界面与配置</div>
+<a href="09-ui.html" class="nav-link">UI 交互层</a>
+<a href="13-config.html" class="nav-link">配置与迁移</a>
+<div class="nav-section-title">外围能力</div>
+<a href="12-external.html" class="nav-link">外部集成</a>
+<a href="14-native.html" class="nav-link active">Native 能力</a>
+<div class="nav-section-title">安全专题</div>
+<a href="16-anti-distillation.html" class="nav-link">反蒸馏与输出保护</a>
+<a href="17-buddy.html" class="nav-link">Buddy 宠物系统</a>
+<div class="nav-section-title">数据专题</div>
+<a href="18-telemetry.html" class="nav-link">遥测与用户画像</a>
+<div class="nav-section-title">流程图</div>
+<a href="flows/tool-execution.html" class="nav-link">工具执行流程</a>
+<a href="flows/agent-collab.html" class="nav-link">Agent 协作流程</a>
+</nav>
+    <main class="content">
+        <header class="page-header">
+            <span class="breadcrumb"><a href="index.html">源码分析</a></span>
+            <h1>Native 能力层</h1>
+            <p class="subtitle">color-diff 语法高亮、file-index 模糊搜索、yoga-layout 终端布局引擎、upstreamproxy 代理中继、bridge 远程会话桥接</p>
+        </header>
+
+        <nav class="page-toc">
+    <div class="page-toc-title">页面导航</div>
+        <a href="#overview"><span class="toc-dot dot-overview"></span>职责概述</a>
+        <a href="#architecture"><span class="toc-dot dot-arch"></span>架构设计</a>
+        <a href="#dataflow"><span class="toc-dot dot-data"></span>数据流</a>
+        <a href="#interfaces"><span class="toc-dot dot-arch"></span>核心接口</a>
+        <a href="#patterns"><span class="toc-dot dot-arch"></span>设计模式</a>
+        <a href="#dev-guide"><span class="toc-dot dot-code"></span>开发者指南</a>
+        <a href="#arch-guide"><span class="toc-dot dot-arch"></span>架构师指南</a>
+        <a href="#topology"><span class="toc-dot dot-data"></span>处理拓扑图</a>
+        <a href="#core-flow"><span class="toc-dot dot-data"></span>核心流程详解</a>
+        <a href="#design-essence"><span class="toc-dot dot-design"></span>设计精华</a>
+        <a href="#agent-practice"><span class="toc-dot dot-practice"></span>Agent 实践借鉴</a>
+        <a href="#code-index"><span class="toc-dot dot-code"></span>代码索引</a>
+</nav>
+
+        <section id="overview" class="card">
+            <h2>职责概述</h2>
+
+            <p><strong>解决的问题：</strong>CC 的一些核心能力需要高性能——语法高亮要快、文件搜索要快、终端布局计算要快。以前这些用 Rust/C++ 原生模块实现，但原生二进制导致跨平台分发困难。这一层把所有原生模块用纯 TypeScript 重写，消除了原生依赖，同时保持性能可接受。</p>
+            <p><strong>应用场景：</strong>① 代码差异的彩色渲染（新增行绿色、删除行红色）② 输入文件路径时的模糊搜索补全 ③ 终端界面的 Flexbox 布局计算 ④ 容器环境中的 MITM 代理设置 ⑤ 远程开发时本地 IDE 驱动容器内的 CC。</p>
+            <p><strong>一句话理解：</strong>就像 Electron 之于桌面 App——用 Web 技术替代原生开发，牺牲一点极致性能，换来跨平台和可维护性。</p>
+        </section>
+
+        <section id="architecture" class="card">
+            <h2>架构设计</h2>
+            <div class="layer-diagram">
+                <div class="layer layer-ui">
+                    <div class="layer-header">UI 渲染层</div>
+                    <div class="layer-body">
+                        <div class="layer-component highlight">yoga-layout — Flexbox 布局引擎</div>
+                        <div class="layer-component highlight">color-diff — 语法高亮与 diff 渲染</div>
+                    </div>
+                </div>
+                <div class="layer-arrow">&#9660;</div>
+                <div class="layer layer-engine">
+                    <div class="layer-header">搜索引擎层</div>
+                    <div class="layer-body">
+                        <div class="layer-component highlight">file-index — 模糊文件搜索</div>
+                    </div>
+                </div>
+                <div class="layer-arrow">&#9660;</div>
+                <div class="layer layer-infra">
+                    <div class="layer-header">网络基础设施层</div>
+                    <div class="layer-body">
+                        <div class="layer-component highlight">upstreamproxy — MITM 代理中继</div>
+                        <div class="layer-component highlight">bridge — 远程会话桥接 API</div>
+                    </div>
+                </div>
+            </div>
+
+            <h3 style="margin-top:2em;">Native 模块架构图</h3>
+            <div class="diagram-container">
+                <div class="diagram-row">
+                    <div class="diagram-node" style="background:#dbeafe;border:2px solid #3b82f6;min-width:160px;text-align:center">
+                        <strong>yoga-layout</strong><br><small>~2580 行纯 TS</small><br>
+                        <span class="tag tag-blue">Flexbox 引擎</span>
+                        <div style="margin-top:4px;font-size:0.8em">flex-direction / grow-shrink<br>justify / align / wrap<br>多级布局缓存</div>
+                    </div>
+                    <div class="diagram-connector" style="padding:0 8px">&#8596;</div>
+                    <div class="diagram-node" style="background:#dcfce7;border:2px solid #22c55e;min-width:160px;text-align:center">
+                        <strong>color-diff</strong><br><small>~500+ 行纯 TS</small><br>
+                        <span class="tag tag-green">差异渲染</span>
+                        <div style="margin-top:4px;font-size:0.8em">highlight.js 语法着色<br>word-diff 算法<br>ANSI TrueColor 输出</div>
+                    </div>
+                </div>
+                <div class="diagram-row" style="margin-top:1em;">
+                    <div class="diagram-node" style="background:#fef3c7;border:2px solid #f59e0b;min-width:160px;text-align:center">
+                        <strong>file-index</strong><br><small>~300+ 行纯 TS</small><br>
+                        <span class="tag tag-orange">模糊搜索</span>
+                        <div style="margin-top:4px;font-size:0.8em">nucleo 风格评分<br>边界/驼峰/连续加分<br>异步分块构建</div>
+                    </div>
+                    <div class="diagram-connector" style="padding:0 8px">&#8596;</div>
+                    <div class="diagram-node" style="background:#f0fdf4;border:2px solid #16a34a;min-width:160px;text-align:center">
+                        <strong>upstreamproxy</strong><br><small>relay + config</small><br>
+                        <span class="tag tag-green">网络代理</span>
+                        <div style="margin-top:4px;font-size:0.8em">CONNECT→WebSocket<br>CA 证书链拼接<br>NO_PROXY 白名单</div>
+                    </div>
+                </div>
+                <div class="diagram-row" style="margin-top:1em;">
+                    <div class="diagram-node" style="background:#e0e7ff;border:2px solid #6366f1;min-width:340px;text-align:center">
+                        <strong>bridge/</strong><br><small>20+ 文件</small><br>
+                        <span class="tag tag-purple">远程会话</span>
+                        <div style="margin-top:4px;font-size:0.8em">REST API 客户端 | JWT 认证 | 权限回调 | 远程 Bridge 核心 | 会话运行器 | 可信设备</div>
+                    </div>
+                </div>
+            </div>
+        </section>
+
+        <section id="dataflow" class="card">
+            <h2>核心数据流</h2>
+
+            <h3>1. Yoga Layout 计算流程</h3>
+            <div class="flow-chart">
+                <div class="flow-step">
+                    <div class="flow-step-title">calculateLayout()</div>
+                    <div class="flow-step-desc">根节点入口，重置计数器，递增 generation</div>
+                </div>
+                <div class="flow-arrow">&#8594;</div>
+                <div class="flow-step">
+                    <div class="flow-step-title">缓存检查</div>
+                    <div class="flow-step-desc">单条目 (_hasL) → 多条目 (_cIn) → measure 缓存 (_hasM) 三级缓存查找</div>
+                </div>
+                <div class="flow-arrow">&#8594;</div>
+                <div class="flow-step">
+                    <div class="flow-step-title">computeFlexBasis()</div>
+                    <div class="flow-step-desc">计算每个子节点的 flex-basis，受 flex-grow/shrink/min/max 约束</div>
+                </div>
+                <div class="flow-arrow">&#8594;</div>
+                <div class="flow-step">
+                    <div class="flow-step-title">resolveFlexibleLengths()</div>
+                    <div class="flow-step-desc">多轮迭代分配剩余空间，冻结违反 min/max 的子节点</div>
+                </div>
+                <div class="flow-arrow">&#8594;</div>
+                <div class="flow-step">
+                    <div class="flow-step-title">定位子节点</div>
+                    <div class="flow-step-desc">justify-content + align-items + auto margin + 相对定位</div>
+                </div>
+            </div>
+
+            <h3 style="margin-top:1.5em;">2. Upstream Proxy 初始化流程</h3>
+            <div class="flow-chart">
+                <div class="flow-step">
+                    <div class="flow-step-title">环境检测</div>
+                    <div class="flow-step-desc"><code>CLAUDE_CODE_REMOTE=1</code> && <code>CCR_UPSTREAM_PROXY_ENABLED=1</code></div>
+                </div>
+                <div class="flow-arrow">&#8594;</div>
+                <div class="flow-step">
+                    <div class="flow-step-title">读取 Session Token</div>
+                    <div class="flow-step-desc">从 <code>/run/ccr/session_token</code> 读取，设置 <code>prctl(PR_SET_DUMPABLE, 0)</code></div>
+                </div>
+                <div class="flow-arrow">&#8594;</div>
+                <div class="flow-step">
+                    <div class="flow-step-title">CA 证书拼接</div>
+                    <div class="flow-step-desc">下载 upstreamproxy CA，与系统 bundle 合并，设置 <code>SSL_CERT_FILE</code></div>
+                </div>
+                <div class="flow-arrow">&#8594;</div>
+                <div class="flow-step">
+                    <div class="flow-step-title">启动 CONNECT 中继</div>
+                    <div class="flow-step-desc"><code>startUpstreamProxyRelay()</code> — 本地 CONNECT→WebSocket 代理</div>
+                </div>
+                <div class="flow-arrow">&#8594;</div>
+                <div class="flow-step">
+                    <div class="flow-step-title">暴露环境变量</div>
+                    <div class="flow-step-desc"><code>HTTPS_PROXY</code> + <code>NO_PROXY</code>（排除 Anthropic API、GitHub、npm 等域名）</div>
+                </div>
+            </div>
+        </section>
+
+        <section id="interfaces" class="card">
+            <h2>关键类型与接口</h2>
+
+            <h3>FileIndex API (<code>native-ts/file-index/index.ts</code>)</h3>
+            <pre><code>// native-ts/file-index/index.ts — 核心接口
+export type SearchResult = {
+  path: string
+  score: number  // 越低越好，最佳匹配 = 0.0
+}
+
+export class FileIndex {
+  loadFromFileList(fileList: string[]): void
+  loadFromFileListAsync(fileList: string[]): {
+    queryable: Promise&lt;void&gt;  // 首个 chunk 就绪即可搜索
+    done: Promise&lt;void&gt;       // 全部索引构建完成
+  }
+  search(query: string, limit: number): SearchResult[]
+}</code></pre>
+
+            <h3>Yoga Node 核心 (<code>native-ts/yoga-layout/index.ts</code>)</h3>
+            <pre><code>// native-ts/yoga-layout/index.ts:403-466 — Node 类（核心字段）
+export class Node {
+  style: Style
+  layout: Layout
+  children: Node[]
+  measureFunc: MeasureFunction | null
+  isDirty_: boolean
+  // 多级布局缓存
+  _hasL: boolean         // 单条目 layout 缓存
+  _cIn: Float64Array     // 多条目缓存输入（4 slot × 8 float）
+  _cOut: Float64Array    // 多条目缓存输出（4 slot × 2 float）
+  _fbGen: number         // flexBasis 缓存的 generation
+  // 快速跳过标志
+  _hasAutoMargin: boolean
+  _hasPosition: boolean
+  _hasPadding: boolean
+  _hasBorder: boolean
+  _hasMargin: boolean
+
+  calculateLayout(ownerWidth?: number, ownerHeight?: number): void
+}</code></pre>
+
+            <h3>Color Diff 接口 (<code>native-ts/color-diff/index.ts</code>)</h3>
+            <pre><code>// native-ts/color-diff/index.ts:52-69
+export type Hunk = {
+  oldStart: number; oldLines: number
+  newStart: number; newLines: number
+  lines: string[]
+}
+export type NativeModule = {
+  ColorDiff: typeof ColorDiff
+  ColorFile: typeof ColorFile
+  getSyntaxTheme: (themeName: string) => SyntaxTheme
+}</code></pre>
+
+            <h3>Bridge API (<code>bridge/bridgeApi.ts</code>)</h3>
+            <pre><code>// bridge/bridgeApi.ts:68 — 工厂函数签名
+export function createBridgeApiClient(deps: BridgeApiDeps): BridgeApiClient
+// deps 包含: baseUrl, getAccessToken, runnerVersion,
+//   onAuth401 (OAuth 刷新), getTrustedDeviceToken</code></pre>
+        </section>
+
+        <section id="patterns" class="card">
+            <h2>设计模式与亮点</h2>
+
+            <div class="two-col">
+                <div>
+                    <h3>1. 多级布局缓存（Yoga）</h3>
+                    <p>Yoga 实现了三层缓存策略：<strong>单条目 _hasL</strong>（layout pass 结果）、<strong>四条目 _cIn/_cOut</strong>（覆盖 scroll 场景下同一节点看到多组不同输入的情况）、<strong>flexBasis _fbGen</strong>（基于 generation 的跨计算缓存）。CPU Profile 显示，1000 节点基准测试中 ~67% 的 <code>resolveEdges4Into</code> 调用操作全零边数组——快速路径通过 <code>_hasPadding/_hasBorder/_hasMargin</code> 标志单分支跳过。</p>
+
+                    <h3>2. 时间分块异步索引（FileIndex）</h3>
+                    <p><code>loadFromFileListAsync()</code> 不按数量分块而是按<strong>时间</strong>分块（<code>CHUNK_MS = 4</code>ms）：慢速机器自动获得更小的分块，保持 UI 响应性。首个 chunk 就绪即返回 <code>queryable</code> promise——270K 文件索引中约 5-10ms 即可开始搜索部分结果。</p>
+                </div>
+                <div>
+                    <h3>3. 失败开放设计（UpstreamProxy）</h3>
+                    <p><code>initUpstreamProxy()</code> 的每一步都失败开放：token 文件缺失、CA 下载失败、relay 启动失败——任何错误仅记录日志并返回 <code>{ enabled: false }</code>。一个破损的代理配置绝不会中断正常工作会话。Token 文件在 relay 确认启动后才 unlink，确保 supervisor 重启可重试。</p>
+
+                    <h3>4. Generation-based 缓存新鲜度</h3>
+                    <p>Yoga 和 FileIndex 都使用 generation 标记缓存有效性。Yoga 的 <code>_generation</code> 在每次 <code>calculateLayout()</code> 时递增，允许同一 generation 内的缓存命中（即使节点仍标记 dirty——virtual scroll 的新挂载项）。跨 generation 的 dirty 节点缓存被视为陈旧。这种设计将 1593 节点新鲜挂载的 105K 次 <code>layoutNode</code> 访问降至约 10K 次。</p>
+
+                    <h3>5. Highlight.js 惰性加载（Color-Diff）</h3>
+                    <p>Color-diff 通过闭包惰性加载 highlight.js（190+ 语言语法，~50MB），避免模块评估时即加载。这是解决 Windows CI 上 <code>beforeEach/afterEach</code> 超时问题的关键优化——测试文件通过间接依赖引入 color-diff 时不再付出启动成本。</p>
+                </div>
+            </div>
+        </section>
+
+        <section id="dev-guide" class="card developer">
+            <h2>开发者实践指南</h2>
+
+            <h3>如何扩展 Yoga 布局能力</h3>
+            <ol>
+                <li>在 <code>native-ts/yoga-layout/enums.ts</code> 中添加新的枚举值</li>
+                <li>在 <code>defaultStyle()</code> 中添加默认值</li>
+                <li>在 <code>Node</code> 类中添加对应的 setter/getter</li>
+                <li>在 <code>layoutNode()</code> 的对应 STEP 中添加处理逻辑</li>
+                <li>更新缓存比较逻辑——确保新维度参与缓存键匹配</li>
+            </ol>
+
+            <div class="info-box warning">
+                <strong>Yoga 缓存调试：</strong> 布局错误通常源于缓存陈旧。可通过 <code>getYogaCounters()</code> 检查 visited/measured/cacheHits/live 计数。如果 cacheHits 远低于预期，检查 <code>_hasL</code>/<code>_cN</code> 是否在 dirty 时被正确清除。
+            </div>
+
+            <h3>如何添加新的 FileIndex 评分规则</h3>
+            <ol>
+                <li>修改 <code>native-ts/file-index/index.ts</code> 中的评分常量（<code>SCORE_MATCH</code>, <code>BONUS_BOUNDARY</code> 等）</li>
+                <li>在搜索函数中添加新的 bonus/penalty 计算</li>
+                <li>注意 <code>posBuf</code> 是 <code>Int32Array(MAX_QUERY_LEN)</code>——查询长度上限为 64 字符</li>
+            </ol>
+
+            <h3>如何调试 UpstreamProxy</h3>
+            <ol>
+                <li>设置 <code>CLAUDE_CODE_REMOTE=1</code> + <code>CCR_UPSTREAM_PROXY_ENABLED=1</code></li>
+                <li>检查 <code>/run/ccr/session_token</code> 是否存在且可读</li>
+                <li>查看 relay 日志——所有步骤都有 <code>logForDebugging()</code> 输出</li>
+                <li>验证 <code>NO_PROXY</code> 列表是否覆盖了不应代理的目标（Anthropic API、GitHub 等）</li>
+            </ol>
+        </section>
+
+        <section id="arch-guide" class="card architect">
+            <h2>架构师决策指南</h2>
+
+            <h3>纯 TS 重写 vs 原生模块的决策</h3>
+            <p>三个 native-ts 模块都经历了从 Rust/C++ NAPI 到纯 TypeScript 的迁移。这一决策的核心权衡：</p>
+            <ul>
+                <li><strong>优势：</strong> 消除平台特定二进制（不再需要 Linux x64/arm64、macOS arm64/x64、Windows 的分别编译和分发）；安装体积减少；调试更简单（无 dlopen 失败、无 ABI 兼容性问题）。</li>
+                <li><strong>代价：</strong> 性能降低——Yoga 的 C++ 实现在 1000 节点基准上约 2-3ms，纯 TS 版约 6-7ms（通过缓存优化到可用范围）。FileIndex 的 nucleo 是 Rust 实现，纯 TS 版在大索引（270K+ 文件）上首次构建更慢（通过异步分块缓解）。</li>
+                <li><strong>决策点：</strong> 当性能成为瓶颈时，可通过 <code>feature()</code> gate 在 Ant 内部构建中保留原生模块路径，外部构建使用纯 TS。</li>
+            </ul>
+
+            <h3>Bridge 模块的职责边界</h3>
+            <p><code>bridge/</code> 包含 20+ 文件，覆盖了 REST API 客户端、JWT 工具、权限回调、远程会话运行、调试工具等。关键的设计决策是<strong>将 bridge 定位为 API 层而非业务逻辑层</strong>——它不包含任何 Claude Code 的核心逻辑，仅负责将本地操作转发到远程执行环境。这使得 bridge 可以被 IDE 插件、CCR 容器、Desktop App 等不同场景复用。</p>
+
+            <h3>NO_PROXY 的维护负担</h3>
+            <p><code>upstreamproxy.ts</code> 中的 <code>NO_PROXY_LIST</code> 是硬编码的域名列表。每次添加新的第三方依赖（如新的包管理器仓库），都需要考虑是否加入排除列表。更健壮的方案是通过配置文件管理，但这与 CCR 容器的无状态设计冲突——当前硬编码是合理的折衷。</p>
+        </section>
+
+        <section id="topology" class="card">
+            <h2><span class="icon" style="background:rgba(139,92,246,.15);color:var(--purple);">◈</span> 可视化处理拓扑图</h2>
+
+            <!-- Phase 1: Color-Diff 管线 -->
+            <h3 style="margin-top:8px;">Phase 1 — Color-Diff 差异渲染管线</h3>
+            <p>从终端颜色检测到语法高亮再到 ANSI 输出的完整渲染管线，支持 truecolor/256色/ANSI 三种终端模式。</p>
+            <div class="fc">
+                <div class="fc-center">
+                    <div class="fn n-start">ColorDiff.render()<span class="sub">color-diff/index.ts:860</span></div>
+                    <div class="vc s20"></div>
+
+                    <div class="fn n-check w">终端颜色能力检测<span class="sub">detectColorMode() → truecolor / 256色 / ANSI</span><span class="sub">color-diff/index.ts:95-99</span></div>
+                    <div class="vc s20"></div>
+
+                    <div class="fc-row">
+                        <div class="fn n-auto" style="font-size:11px;">TrueColor<span class="sub">38;2;r;g;b</span></div>
+                        <div class="hc s20"></div>
+                        <div class="fn n-process" style="font-size:11px;">256 色<span class="sub">38;5;index</span></div>
+                        <div class="hc s20"></div>
+                        <div class="fn n-process" style="font-size:11px;">ANSI<span class="sub">3/4 位码</span></div>
+                    </div>
+                    <div class="vc s20"></div>
+
+                    <div class="fn n-check w">语法主题构建<span class="sub">buildTheme() — 前景/背景/装饰色完整映射</span><span class="sub">color-diff/index.ts:282-362</span></div>
+                    <div class="vc s20"></div>
+
+                    <div class="fn n-process w">语言检测<span class="sub">detectLanguage() — 扩展名 + 首行内容推断</span><span class="sub">color-diff/index.ts:422-451</span></div>
+                    <div class="vc s20"></div>
+
+                    <div class="fn n-check ww">语法高亮 + word-diff 叠加<span class="sub">highlightLine() → hljs 语法着色 → wordDiffStrings() 字符级差异</span><span class="sub">color-diff/index.ts:504-636</span></div>
+                    <div class="vc s20"></div>
+
+                    <div class="fn n-process w">差异范围渲染<span class="sub">applyBackground() — 差异背景叠加到语法高亮之上</span><span class="sub">color-diff/index.ts:768-817</span></div>
+                    <div class="vc s20"></div>
+
+                    <div class="fn n-allow w">ANSI 转义序列输出<span class="sub">colorToEscape() → intoLines() — 行号+标记+背景+语法</span><span class="sub">color-diff/index.ts:129-162</span></div>
+                </div>
+            </div>
+
+            <!-- Phase 2: File-Index + Yoga -->
+            <h3 style="margin-top:1.5em;">Phase 2 — File-Index 模糊搜索与 Yoga 布局计算</h3>
+            <div class="fc">
+                <div class="fc-center">
+                    <div class="fc-row" style="gap:40px;">
+                        <!-- File-Index 路径 -->
+                        <div style="display:flex;flex-direction:column;align-items:center;gap:0;">
+                            <div class="fn n-start" style="font-size:11px;">FileIndex<span class="sub">file-index/index.ts</span></div>
+                            <div class="vc s16"></div>
+                            <div class="fn n-process" style="max-width:160px;">异步分 chunk 构建<span class="sub">CHUNK_SIZE=8192, CHUNK_MS=4ms</span><span class="sub">index.ts:95-133</span></div>
+                            <div class="vc s16"></div>
+                            <div class="fn n-auto" style="max-width:160px;">位图预计算<span class="sub">indexPath() — 26位 a-z 字母位图</span><span class="sub">index.ts:156-167</span></div>
+                            <div class="vc s16"></div>
+                            <div class="fn n-check" style="max-width:160px;">位图快速过滤<span class="sub">AND 运算 O(1) 拒绝 ~89% 路径</span></div>
+                            <div class="vc s16"></div>
+                            <div class="fn n-process" style="max-width:160px;">模糊匹配评分<span class="sub">边界加分 + camelCase 加分</span><span class="sub">index.ts:173-290</span></div>
+                            <div class="vc s16"></div>
+                            <div class="fn n-allow" style="max-width:160px;">SearchResult[]<span class="sub">score 越低越好</span></div>
+                        </div>
+
+                        <!-- Yoga 路径 -->
+                        <div style="display:flex;flex-direction:column;align-items:center;gap:0;">
+                            <div class="fn n-start" style="font-size:11px;">calculateLayout()<span class="sub">yoga-layout/index.ts:927</span></div>
+                            <div class="vc s16"></div>
+                            <div class="fn n-check" style="max-width:160px;">三级缓存查找<span class="sub">_hasL → _cIn → _hasM</span></div>
+                            <div class="vc s16"></div>
+
+                            <div class="fc-row" style="gap:6px;">
+                                <div class="fn n-allow" style="font-size:10px;max-width:90px;">缓存命中<span class="sub">直接返回</span></div>
+                                <div class="hc s20"></div>
+                                <div class="fn n-process" style="font-size:10px;max-width:90px;">缓存未命中<span class="sub">重新计算</span></div>
+                            </div>
+                            <div class="vc s16"></div>
+
+                            <div class="fn n-process" style="max-width:160px;">computeFlexBasis()<span class="sub">flex-grow/shrink/min/max 约束</span><span class="sub">index.ts:2059-2172</span></div>
+                            <div class="vc s16"></div>
+                            <div class="fn n-process" style="max-width:160px;">resolveFlexibleLengths()<span class="sub">多轮迭代冻结违反 min/max 子节点</span><span class="sub">index.ts:2182-2282</span></div>
+                            <div class="vc s16"></div>
+                            <div class="fn n-auto" style="max-width:160px;">定位子节点<span class="sub">justify + align + auto margin</span></div>
+                            <div class="vc s16"></div>
+                            <div class="fn n-process" style="max-width:160px;">cacheWrite() 写入缓存<span class="sub">style快照 + 父约束哈希</span></div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Phase 3: Upstream Proxy -->
+            <h3 style="margin-top:1.5em;">Phase 3 — UpstreamProxy 代理中继</h3>
+            <p>CCR 容器环境下的透明代理建立流程，每步失败开放。</p>
+            <div class="fc">
+                <div class="fc-center">
+                    <div class="fn n-start">initUpstreamProxy()<span class="sub">upstreamproxy.ts:79-153</span></div>
+                    <div class="vc s20"></div>
+
+                    <div class="fn n-check w">三前置条件检查<span class="sub">CLAUDE_CODE_REMOTE → CCR_UPSTREAM_PROXY_ENABLED → session token 文件</span></div>
+                    <div class="vc s20"></div>
+
+                    <div class="fc-row">
+                        <div class="fn n-deny" style="font-size:11px;">不满足<span class="sub">→ { enabled: false }</span></div>
+                        <div class="hc s20"></div>
+                        <div class="fn n-allow" style="font-size:11px;">全部通过<span class="sub">继续初始化</span></div>
+                    </div>
+                    <div class="vc s20"></div>
+
+                    <div class="fn n-process w">CA 证书拼接<span class="sub">下载 upstreamproxy CA + 系统 bundle → SSL_CERT_FILE</span></div>
+                    <div class="vc s20"></div>
+
+                    <div class="fn n-process w">PR_SET_DUMPABLE=0<span class="sub">libc FFI 阻止 ptrace — 安全加固</span><span class="sub">upstreamproxy.ts:112</span></div>
+                    <div class="vc s20"></div>
+
+                    <div class="fn n-check w">CONNECT→WebSocket 中继<span class="sub">startUpstreamProxyRelay() — 本地 TCP 监听</span><span class="sub">relay.ts:155-174</span></div>
+                    <div class="vc s20"></div>
+
+                    <div class="fn n-process w">帧协议双向转发<span class="sub">encodeChunk / decodeChunk — 轻量帧封装</span><span class="sub">relay.ts:66-103</span></div>
+                    <div class="vc s20"></div>
+
+                    <div class="fn n-auto w">环境变量注入<span class="sub">HTTPS_PROXY + NO_PROXY + NODE_EXTRA_CA_CERTS</span><span class="sub">upstreamproxy.ts:160-199</span></div>
+                </div>
+            </div>
+
+            <div class="info-box info"><strong>拓扑总结</strong>：Color-Diff 构建了从终端能力检测到 ANSI 输出的完整渲染管线；File-Index 通过位图预过滤将搜索空间降低一个数量级；Yoga 用三级缓存将布局计算从 O(全树) 降至 O(脏路径)；UpstreamProxy 以失败开放设计确保透明代理不中断工作流。</div>
+        </section>
+
+        <section id="core-flow" class="card">
+            <h2><span class="icon" style="background:rgba(6,182,212,.15);color:var(--cyan);">⇉</span> 核心处理流程详解</h2>
+            <p>Native 能力层的五个模块各自独立，但共享一个核心设计理念：<strong>从原生二进制依赖迁移到纯 TypeScript 实现</strong>，消除跨平台编译和 NAPI 绑定的复杂性。以下以 <strong>color-diff 差异渲染</strong>、<strong>file-index 模糊搜索</strong>、<strong>yoga-layout 布局计算</strong> 和 <strong>upstreamproxy 代理中继</strong> 四条核心流程展开。</p>
+            <div class="flow-chart vertical">
+                <div class="flow-step highlight">
+                    <div class="flow-step-title">1. Color-Diff: 语法检测与主题构建</div>
+                    <div class="flow-step-desc"><code>ColorDiff.render()</code>（L860-932）首先调用 <code>detectColorMode()</code>（L95-99）检测终端颜色能力（truecolor/256色/ANSI），然后调用 <code>buildTheme()</code>（L282-362）根据主题名构建包含前景/背景/装饰色的完整主题映射。最后 <code>detectLanguage()</code>（L422-451）根据文件扩展名和首行内容推断语法语言 — <code>color-diff/index.ts:860-868</code></div>
+                </div>
+                <div class="flow-arrow">↓</div>
+                <div class="flow-step">
+                    <div class="flow-step-title">2. Color-Diff: 语法高亮 + word-diff 叠加</div>
+                    <div class="flow-step-desc">每个 hunk 行经 <code>highlightLine()</code>（L504-538）处理：先通过 highlight.js 语法高亮（使用 hljs 10.x/11.x 兼容的 <code>scope</code>/<code>kind</code> 字段），然后对修改行执行 <code>wordDiffStrings()</code>（L604-636）的字符级差异计算。差异范围通过 <code>applyBackground()</code>（L768-817）叠加到语法高亮之上 — <code>color-diff/index.ts:504-636</code></div>
+                </div>
+                <div class="flow-arrow">↓</div>
+                <div class="flow-step">
+                    <div class="flow-step-title">3. Color-Diff: ANSI 转义序列输出</div>
+                    <div class="flow-step-desc">最终通过 <code>intoLines()</code>（L819-826）将 Block 数组转换为 ANSI 转义序列字符串。<code>colorToEscape()</code>（L129-145）根据颜色模式（truecolor 用 <code>38;2;r;g;b</code>，256 色用 <code>38;5;index</code>，ANSI 用 3/4 位码）生成终端转义序列。每行包含行号 + 标记（+/-/ ）+ 背景 + 语法高亮的完整信息 — <code>color-diff/index.ts:129-162</code></div>
+                </div>
+                <div class="flow-arrow">↓</div>
+                <div class="flow-step highlight">
+                    <div class="flow-step-title">4. File-Index: 异步分 chunk 构建</div>
+                    <div class="flow-step-desc"><code>FileIndex</code> 的 <code>buildAsync()</code>（L95-133）将文件列表按 ~8-12k 条分 chunk，每处理一个 chunk 后通过 <code>yieldToEventLoop()</code>（L325-327）让出事件循环，避免阻塞 UI。<code>indexPath()</code>（L156-167）为每个路径预计算：小写形式 + a-z 字母位图 + 路径长度。位图提供了 O(1) 的快速拒绝能力 — <code>file-index/index.ts:95-167</code></div>
+                </div>
+                <div class="flow-arrow">↓</div>
+                <div class="flow-step highlight">
+                    <div class="flow-step-title">5. File-Index: 模糊搜索与评分</div>
+                    <div class="flow-step-desc"><code>search()</code>（L173-290）先通过字母位图快速过滤（O(1) 拒绝不含查询字符的路径），然后对幸存路径执行模糊匹配。智能大小写：全小写查询不区分大小写，含大写则区分。匹配评分考虑路径边界加分（<code>scoreBonusAt</code> L297-303）和 camelCase 加分 — <code>file-index/index.ts:173-303</code></div>
+                </div>
+                <div class="flow-arrow">↓</div>
+                <div class="flow-step">
+                    <div class="flow-step-title">6. Yoga-Layout: Flexbox 布局计算</div>
+                    <div class="flow-step-desc"><code>calculateLayout()</code>（L927-963）是布局入口。它调用 <code>layoutNode()</code>（L1058-1902）递归计算每个节点的尺寸和位置。热路径上的多级缓存：<code>cacheWrite()</code>（L969-1012）比较当前 style + 约束的哈希，命中时直接返回缓存布局。<code>computeFlexBasis()</code>（L2059-2172）和 <code>resolveFlexibleLengths()</code>（L2182-2282）处理弹性布局核心算法 — <code>yoga-layout/index.ts:927-963, 1058-1902</code></div>
+                </div>
+                <div class="flow-arrow">↓</div>
+                <div class="flow-step">
+                    <div class="flow-step-title">7. UpstreamProxy: CCR 环境检测</div>
+                    <div class="flow-step-desc"><code>initUpstreamProxy()</code>（L79-153）首先检查三个前置条件：<code>CLAUDE_CODE_REMOTE</code>（必须在 CCR 容器中）→ <code>CCR_UPSTREAM_PROXY_ENABLED</code>（服务端通过 StartupContext 注入）→ session token 文件存在。通过后下载 CA 证书包并设置 <code>PR_SET_DUMPABLE=0</code>（L112, 通过 libc FFI 阻止 ptrace）— <code>upstreamproxy.ts:79-153</code></div>
+                </div>
+                <div class="flow-arrow">↓</div>
+                <div class="flow-step">
+                    <div class="flow-step-title">8. UpstreamProxy: CONNECT→WebSocket 中继</div>
+                    <div class="flow-step-desc"><code>startUpstreamProxyRelay()</code>（relay.ts:155-174）启动本地 TCP 监听，每个连接先累积 HTTP CONNECT 请求（handleData L295-342），解析目标地址后通过 <code>openTunnel()</code>（relay.ts:344-428）建立到 Anthropic 的 WebSocket 通道。后续数据通过 <code>encodeChunk/decodeChunk</code>（relay.ts:66-103）的轻量帧协议双向转发 — <code>relay.ts:155-428</code></div>
+                </div>
+            </div>
+            <div class="info-box info">这四个模块共同展示了纯 TypeScript 重写原生模块的设计哲学：color-diff 用 highlight.js 替代 syntect + bat，file-index 用位图预计算替代 nucleo 的 FFI，yoga-layout 用 ~2600 行纯 TS 实现了 Facebook Yoga 的完整 Flexbox 算法。核心收益是消除了跨平台二进制分发（N-API、WASM）的复杂性，代价是 CPU 密集场景（大文件 diff、万级文件搜索）的性能可能略低于原生实现。</div>
+        </section>
+        <section id="design-essence" class="card">
+            <h2><span class="icon" style="background:rgba(245,158,11,.15);color:var(--amber);">★</span> 设计精华</h2>
+
+            <h3>1. 位图快速拒绝——O(1) 路径过滤</h3>
+            <p><code>FileIndex.indexPath()</code>（L156-167）为每个文件路径预计算一个 26 位整数位图，每一位对应 a-z 中的一个字母。搜索时先对查询字符串做位图 AND 操作，如果结果的位图是查询位图的子集，才进入昂贵的模糊匹配。这一步可以拒绝约 89% 的路径（对于常见查询如"test"），将实际需要评分的路径数量降低一个数量级。</p>
+            <div class="component-box">
+                <div class="name">a-z 字母位图</div>
+                <div class="desc">26 位 Int32 位图，每位表示路径中是否包含对应字母。O(1) 的 AND 运算替代 O(n) 的字符串扫描</div>
+                <pre><code>// file-index/index.ts:156-167
+private indexPath(i: number): void {
+  const lp = this.paths[i]!.toLowerCase()
+  this.lowerPaths[i] = lp
+  this.pathLens[i] = len
+  let bits = 0
+  for (let j = 0; j < len; j++) {
+    const c = lp.charCodeAt(j)
+    if (c >= 97 && c <= 122) bits |= 1 << (c - 97)  // a-z 映射到 bit 0-25
+  }
+  this.charBits[i] = bits
+}
+// 搜索时：if ((charBits[i] & needleBits) !== needleBits) → 跳过</code></pre>
+            </div>
+            <div class="info-box tip">位图预过滤是信息检索中 Bloom filter 思想的简化应用。它没有 false negative（被拒绝的路径确实不含所需字符），但有 false positive（通过过滤的路径不一定能模糊匹配）。在这个场景下 false positive 的代价只是一次评分计算，而 true negative 带来的节省是巨大的——特别是对于 10 万级文件的 monorepo。</div>
+
+            <h3>2. Yoga 多级布局缓存——热路径优化</h3>
+            <p><code>yoga-layout/index.ts</code> 实现了多级缓存策略：<code>calculateLayout()</code> 在 L932-934 重置访问计数器，<code>layoutNode()</code> 通过 <code>cacheWrite()</code>（L969-1012）比较当前 style 快照 + 父约束是否匹配缓存。命中时跳过整个布局递归，直接返回缓存的 Layout 对象。<code>sameFloat()</code>（L113-115）使用 <code>a === b || (isNaN(a) && isNaN(b))</code> 做 NaN 安全的浮点比较。</p>
+            <div class="component-box">
+                <div class="name">多级布局缓存</div>
+                <div class="desc">比较 style + 约束的哈希决定是否命中缓存，避免每次渲染都递归整棵布局树</div>
+                <pre><code>// yoga-layout/index.ts:969-1012
+function cacheWrite(node: Node, performLayout: boolean, ...): boolean {
+  // 比较 style 快照 + 父约束
+  if (sameFloat(cached.ownerWidth, ownerWidth) &&
+      sameFloat(cached.ownerHeight, ownerHeight) &&
+      // ... 所有 style 字段一致
+     ) {
+    commitCacheOutputs(node, performLayout)  // 命中：直接返回
+    return true
+  }
+  // 未命中：更新缓存并重新计算
+}</code></pre>
+            </div>
+            <div class="info-box tip">终端 UI 的布局计算有一个特殊性质：大部分情况下只有少量节点的 style 或约束发生变化（如用户输入导致文本宽度变化）。多级缓存利用了这一特性——未变化的子树直接返回缓存结果，只重新计算脏路径。这使得每次按键的布局计算从 O(全树) 降低到 O(脏路径)。</div>
+
+            <h3>3. 异步分 chunk 构建——不阻塞事件循环</h3>
+            <p><code>FileIndex.buildAsync()</code>（L95-133）将文件列表索引化过程拆分为多个 chunk，每处理约 8-12k 条路径后调用 <code>yieldToEventLoop()</code> 让出控制权。这使得即使有 10 万级文件，索引构建也不会阻塞 UI 渲染和用户输入。</p>
+            <div class="component-box">
+                <div class="name">事件循环让步模式</div>
+                <div class="desc">每处理一个 chunk 后 await 一个微任务，确保 UI 渲染和用户输入可以穿插执行</div>
+                <pre><code>// file-index/index.ts:95-133
+private async buildAsync(
+  fileList: string[], markQueryable: () => void,
+): Promise<void> {
+  const CHUNK_SIZE = 8192
+  for (let i = 0; i < fileList.length; i += CHUNK_SIZE) {
+    const end = Math.min(i + CHUNK_SIZE, fileList.length)
+    const chunk = fileList.slice(i, end)
+    this.buildIndex(chunk)
+    if (i === 0) markQueryable()  // 首个 chunk 后即可查询
+    await yieldToEventLoop()       // 让出事件循环
+  }
+}</code></pre>
+            </div>
+            <div class="info-box tip">这种模式在 Node.js 单线程环境中至关重要。<code>yieldToEventLoop()</code> 的实现通常是一个 <code>Promise.resolve().then()</code> 的微任务——它比 <code>setTimeout(fn, 0)</code> 更轻量，但仍然允许渲染和 I/O 回调在 chunk 之间执行。首个 chunk 后调用 <code>markQueryable()</code> 实现了"渐进可用"——用户不需要等待全部文件索引完成就能开始搜索。</div>
+
+            <h3>4. CONNECT→WebSocket 中继——代理透明化</h3>
+            <p><code>upstreamproxy</code> 在 CCR 容器中建立透明代理：本地工具（Bash/MCP/LSP）通过 <code>HTTP_PROXY=http://127.0.0.1:{port}</code> 发出请求，proxy 拦截 CONNECT 请求，通过 WebSocket 隧道转发到 Anthropic 的 egress 网关。工具代码无需知道代理的存在——<code>getUpstreamProxyEnv()</code>（upstreamproxy.ts:160-199）将代理环境变量注入到每个子进程。</p>
+            <div class="component-box">
+                <div class="name">透明代理注入</div>
+                <div class="desc">通过环境变量将代理配置注入子进程，工具代码零修改即可在 CCR 容器中工作</div>
+                <pre><code>// upstreamproxy.ts:160-199
+export function getUpstreamProxyEnv(): Record<string, string> {
+  if (!state.enabled) return {}
+  return {
+    HTTP_PROXY:  `http://127.0.0.1:${state.port}`,
+    HTTPS_PROXY: `http://127.0.0.1:${state.port}`,
+    NO_PROXY: NO_PROXY_LIST.join(','),  // 排除 Anthropic 内部域名
+    NODE_EXTRA_CA_CERTS: state.caBundlePath,
+  }
+}</code></pre>
+            </div>
+            <div class="info-box tip">透明代理的设计精髓在于"环境变量即配置"——Node.js 的 <code>HTTP_PROXY</code> / <code>HTTPS_PROXY</code> / <code>NODE_EXTRA_CA_CERTS</code> 是事实标准环境变量，几乎所有 HTTP 库都自动尊重。这意味着 Bash/MCP/LSP/hooks 等子进程无需任何代码修改就能通过代理通信。<code>NO_PROXY_LIST</code> 硬编码排除 Anthropic 内部域名，避免循环代理。</div>
+        </section>
+
+        <section id="agent-practice" class="card">
+            <h2><span class="icon" style="background:rgba(34,197,94,.15);color:var(--green);">◈</span> Agent 实践借鉴 — 客服 Agent 平台能力设计</h2>
+
+            <h3>一、场景映射：客服 agent 的跨平台部署挑战</h3>
+            <p>客服 agent 可能部署在三种截然不同的环境：云端 Docker 容器（有完整的语音识别 API、大模型服务、弹性扩缩容）、本地服务器（GPU 有限、网络可能受限、但有局域网 CRM 系统直连）、门店智能终端（有摄像头可扫条码、有本地数据库、但没有云端语音 API）。CC 用纯 TS 重写消除原生依赖以实现跨平台一致性，客服 agent 也面临同样的问题——同一个 agent 在不同环境下必须有统一的表现。</p>
+
+            <h3>二、借鉴 CC + 客服改造</h3>
+
+            <h4>实践 1：平台能力检测 + 优雅降级（借鉴 CC 的 UpstreamProxy 环境检测）</h4>
+            <p>CC 的 <code>initUpstreamProxy()</code> 检测 CCR 环境变量，每一步都失败开放。客服 agent 启动时也需要检测所在环境的能力——没有语音 API 就纯文字模式，没有摄像头就禁用扫码功能，没有本地数据库就用远程 API。</p>
+            <pre><code>// 借鉴 upstreamproxy.ts:79-153 的环境检测 + 失败开放模式
+interface PlatformCapabilities {
+  canUseVoice: boolean       // 语音识别/合成
+  canUseCamera: boolean      // 摄像头扫条码
+  canUseLocalDB: boolean     // 本地数据库（门店场景）
+  canUseGPU: boolean         // 本地推理能力
+  canUseInternet: boolean    // 外网访问（门店可能断网）
+}
+
+class PlatformDetector {
+  private capabilities: PlatformCapabilities
+
+  constructor() {
+    this.capabilities = {
+      // 逐项检测，每项失败不影响其他项（失败开放）
+      canUseVoice: this.checkVoiceAPI(),
+      canUseCamera: this.checkCameraAccess(),
+      canUseLocalDB: this.checkLocalDB(),
+      canUseGPU: this.checkGPU(),
+      canUseInternet: this.checkInternet(),
+    }
+    console.log('平台能力检测结果:', this.capabilities)
+  }
+
+  private checkVoiceAPI(): boolean {
+    try {
+      // 云端：检测 ASR 服务是否可达
+      if (process.env.ASR_ENDPOINT) return true
+      // 本地：检测 Whisper 模型是否可用
+      return fs.existsSync('/usr/local/models/whisper')
+    } catch { return false }  // 失败开放：不可用就不启用
+  }
+
+  private checkCamera(): boolean {
+    try {
+      // 门店终端：检测 /dev/video* 设备
+      const devices = fs.readdirSync('/dev').filter(f =&gt; f.startsWith('video'))
+      return devices.length &gt; 0
+    } catch { return false }
+  }
+
+  // 获取能力报告，供上层判断
+  getCapabilities(): Readonly&lt;PlatformCapabilities&gt; {
+    return this.capabilities
+  }
+}
+
+// 使用：agent 启动时检测一次，运行时按能力路由
+const platform = new PlatformDetector()
+const caps = platform.getCapabilities()
+
+// 没有语音 API 就关闭语音入口
+if (!caps.canUseVoice) {
+  channelRegistry.disable('phone')
+  console.warn('语音 API 不可用，已关闭电话渠道')
+}</code></pre>
+
+            <h4>实践 2：统一平台接口（借鉴 CC 的 Shell Provider 抽象）</h4>
+            <p>CC 用 ShellProvider 接口统一了 Bash 和 PowerShell。客服 agent 的平台差异更大——语音、图像、本地存储都需要统一接口，让上层业务代码不关心底层是云端 API 还是本地模块。</p>
+            <pre><code>// 借鉴 shellProvider.ts 的 Provider 抽象模式
+interface SpeechService {
+  recognize(audioBuffer: Buffer): Promise&lt;string&gt;    // 语音转文本
+  synthesize(text: string): Promise&lt;Buffer&gt;           // 文本转语音
+}
+
+interface VisionService {
+  scanBarcode(imageBuffer: Buffer): Promise&lt;string&gt;   // 扫条码
+  ocr(imageBuffer: Buffer): Promise&lt;string&gt;           // 图片文字识别
+}
+
+interface StorageService {
+  queryProduct(barcode: string): Promise&lt;Product | null&gt;
+  saveInteraction(record: InteractionRecord): Promise&lt;void&gt;
+}
+
+// 云端实现：调用远程 API
+class CloudSpeechService implements SpeechService {
+  async recognize(audioBuffer: Buffer): Promise&lt;string&gt; {
+    const resp = await fetch(`${process.env.ASR_ENDPOINT}/recognize`, {
+      method: 'POST', body: audioBuffer,
+    })
+    return resp.json().then(r =&gt; r.text)
+  }
+}
+
+// 本地实现：调用本地 Whisper 模型
+class LocalSpeechService implements SpeechService {
+  async recognize(audioBuffer: Buffer): Promise&lt;string&gt; {
+    const whisper = require('whisper.cpp')  // 本地 NAPI 模块
+    return whisper.transcribe(audioBuffer)
+  }
+}
+
+// 工厂函数：根据平台能力自动选择实现
+function createSpeechService(caps: PlatformCapabilities): SpeechService {
+  if (caps.canUseInternet) return new CloudSpeechService()    // 云端优先
+  if (caps.canUseGPU) return new LocalSpeechService()         // 本地降级
+  return new TextOnlyFallback()                                // 纯文字兜底
+}</code></pre>
+
+            <h4>实践 3：知识库搜索的预过滤（借鉴 CC 的位图快速拒绝思路）</h4>
+            <p>CC 的 FileIndex 用 26 位字母位图预过滤 89% 的路径。客服场景的知识库搜索同样需要预过滤——10 万条 FAQ/商品条目中，先用轻量条件排除不可能匹配的，再做昂贵的语义搜索。</p>
+            <pre><code>// 借鉴 file-index/index.ts:156-167 的位图预过滤思路
+// （不需要抄位图算法本身，用标准搜索引擎的预过滤即可）
+
+interface KnowledgeEntry {
+  id: string
+  category: string           // 'product' | 'faq' | 'policy' | 'troubleshoot'
+  title: string
+  keywords: string[]
+  tags: string[]
+}
+
+class KnowledgeSearchEngine {
+  private entries: KnowledgeEntry[] = []
+  // 预过滤索引：按类别和标签建立倒排索引
+  private categoryIndex = new Map&lt;string, number[]&gt;()
+  private tagIndex = new Map&lt;string, number[]&gt;()
+
+  // 步骤 1：轻量预过滤（类似位图快速拒绝）
+  preFilter(query: SearchQuery): KnowledgeEntry[] {
+    let candidateIndices: number[] | null = null
+
+    // 按类别过滤
+    if (query.category) {
+      const indices = this.categoryIndex.get(query.category) ?? []
+      candidateIndices = candidateIndices
+        ? intersect(candidateIndices, indices)
+        : indices
+    }
+    // 按标签过滤
+    if (query.tags &amp;&amp; query.tags.length &gt; 0) {
+      for (const tag of query.tags) {
+        const indices = this.tagIndex.get(tag) ?? []
+        candidateIndices = candidateIndices
+          ? intersect(candidateIndices, indices)
+          : indices
+      }
+    }
+    // 如果没有过滤条件，返回全部
+    const result = candidateIndices ?? this.entries.map((_, i) =&gt; i)
+    return result.map(i =&gt; this.entries[i])
+  }
+
+  // 步骤 2：对幸存条目做昂贵的语义搜索
+  async search(query: SearchQuery): Promise&lt;KnowledgeEntry[]&gt; {
+    const candidates = this.preFilter(query)
+    // 只对候选条目做向量相似度搜索（昂贵的操作）
+    return this.semanticSearch(query.text, candidates, query.limit)
+  }
+}
+
+// 使用示例：搜索退货相关的 FAQ
+const results = await knowledgeBase.search({
+  text: '买的东西坏了怎么退',
+  category: 'faq',
+  tags: ['refund', 'after_sales'],
+  limit: 5,
+})</code></pre>
+
+            <h3>三、落地清单</h3>
+            <div class="two-col">
+                <div class="component-box">
+                    <div class="name" style="color:var(--green);">必须抄的</div>
+                    <div class="desc">
+                        <ul>
+                            <li><strong>平台能力检测 + 优雅降级</strong>——启动时检测环境能力，运行时按能力路由，每项检测独立失败开放</li>
+                            <li><strong>减少原生依赖</strong>——客服 agent 尽量用纯 JS/HTTP 实现核心功能，避免 NAPI/Rust 依赖导致跨环境部署困难</li>
+                            <li><strong>统一平台接口</strong>——语音/图像/存储用 Provider 接口抽象，云端和本地各自实现，上层不感知差异</li>
+                        </ul>
+                    </div>
+                </div>
+                <div class="component-box">
+                    <div class="name" style="color:var(--text-muted);">不需要抄的</div>
+                    <div class="desc">
+                        <ul>
+                            <li><strong>位图算法的具体实现</strong>——太底层，客服场景用标准搜索引擎（Elasticsearch/Meilisearch）的预过滤即可</li>
+                            <li><strong>Yoga 布局引擎</strong>——客服面板用 Web CSS 渲染，不需要终端布局引擎</li>
+                            <li><strong>UpstreamProxy 的 CONNECT→WebSocket 中继</strong>——客服场景不需要 MITM 代理</li>
+                        </ul>
+                    </div>
+                </div>
+            </div>
+
+            <h3>四、常见坑</h3>
+            <div class="info-box warning">
+                <ol>
+                    <li><strong>平台检测只在启动时做一次</strong>——门店终端的网络可能时断时续，启动时检测到有外网但运行中断网了。必须加定时重检或请求失败时重检逻辑。</li>
+                    <li><strong>降级模式的功能缺失导致客户困惑</strong>——语音 API 不可用时降级为纯文字，但电话渠道的客户根本无法打字。降级策略必须考虑渠道特性：电话断网应该转人工，而不是降级为文字。</li>
+                    <li><strong>知识库搜索跳过预过滤直接全量语义搜索</strong>——10 万条 FAQ 全量做向量相似度计算，单次搜索耗时可能超过 5 秒。先用类别/标签预过滤将候选集缩小到千级，再做语义搜索。</li>
+                    <li><strong>本地模型和云端模型的输出格式不一致</strong>——同一个 <code>SpeechService</code> 接口的两个实现返回格式不同（云端返回 JSON，本地返回纯文本）。必须统一接口契约并做集成测试。</li>
+                </ol>
+            </div>
+        </section>
+
+        <section id="code-index" class="card">
+            <h2>代码索引</h2>
+            <table>
+                <thead><tr><th>文件</th><th>行数</th><th>说明</th></tr></thead>
+                <tbody>
+                    <tr><td><code>native-ts/yoga-layout/index.ts</code></td><td>~2580</td><td>完整 Flexbox 布局引擎，含多级缓存、wrap、baseline</td></tr>
+                    <tr><td><code>native-ts/yoga-layout/enums.ts</code></td><td>~100</td><td>FlexDirection/Align/Justify/Wrap/Edge 等枚举定义</td></tr>
+                    <tr><td><code>native-ts/color-diff/index.ts</code></td><td>~500+</td><td>语法高亮 + word-diff + ANSI TrueColor 渲染</td></tr>
+                    <tr><td><code>native-ts/file-index/index.ts</code></td><td>~300+</td><td>nucleo 风格模糊搜索，异步分 chunk 构建</td></tr>
+                    <tr><td><code>upstreamproxy/upstreamproxy.ts</code></td><td>~200+</td><td>CCR upstream proxy 初始化：token/CA/relay/NO_PROXY</td></tr>
+                    <tr><td><code>upstreamproxy/relay.ts</code></td><td>~200</td><td>CONNECT→WebSocket 本地代理中继</td></tr>
+                    <tr><td><code>bridge/bridgeApi.ts</code></td><td>~200+</td><td>Bridge REST API 客户端工厂函数</td></tr>
+                    <tr><td><code>bridge/bridgeConfig.ts</code></td><td>~100</td><td>Bridge 配置管理</td></tr>
+                    <tr><td><code>bridge/sessionRunner.ts</code></td><td>~200</td><td>远程会话运行器</td></tr>
+                    <tr><td><code>bridge/remoteBridgeCore.ts</code></td><td>~200</td><td>远程 Bridge 核心逻辑</td></tr>
+                    <tr><td><code>bridge/jwtUtils.ts</code></td><td>~100</td><td>JWT 令牌工具</td></tr>
+                    <tr><td><code>bridge/trustedDevice.ts</code></td><td>~100</td><td>可信设备令牌管理</td></tr>
+                    <tr><td><code>bridge/types.ts</code></td><td>~150</td><td>Bridge 类型定义（BridgeConfig, PermissionResponse 等）</td></tr>
+                    <tr><td><code>bridge/debugUtils.ts</code></td><td>~100</td><td>Bridge 调试工具</td></tr>
+                    <tr><td><code>bridge/replBridgeHandle.ts</code></td><td>~100</td><td>REPL Bridge 句柄管理</td></tr>
+                    <tr><td><code>bridge/replBridgeTransport.ts</code></td><td>~100</td><td>REPL Bridge 传输层</td></tr>
+                </tbody>
+            </table>
+        </section>
+        <footer style="text-align:center; padding:32px 0 20px; margin-top:48px; border-top:1px solid var(--border); color:var(--text-secondary); font-size:13px; line-height:2;">
+        <div style="margin-bottom:4px;">⚠️ 免责声明</div>
+        本文仅用于技术学习和架构分析目的。源码分析基于公开泄漏的代码，所有商标和版权归 <a href="https://www.anthropic.com" style="color:var(--indigo);">Anthropic</a> 所有。未经授权不得用于商业用途。
+    </footer>
+    </main>
+</body>
+</html>

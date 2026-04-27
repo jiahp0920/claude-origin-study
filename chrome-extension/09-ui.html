@@ -1,0 +1,921 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>UI 交互层 - Claude Code 源码分析</title>
+    <link rel="stylesheet" href="shared/styles.css">
+</head>
+<body>
+    <nav class="sidebar">
+<div class="sidebar-header"><div class="logo">CC</div><div><div class="sidebar-title">Claude Code</div><div class="sidebar-subtitle">源码深度分析</div></div></div>
+        <div class="nav-section-title">总览</div>
+        <a href="reading-guide.html" class="nav-link">阅读指南</a>
+        <a href="index.html" class="nav-link">架构全景</a>
+        <a href="dependency-map.html" class="nav-link">模块依赖图</a>
+        <a href="vertical-agent-guide.html" class="nav-link">垂直 Agent 设计指南</a>
+<div class="nav-section-title">核心流程</div>
+<a href="00-startup.html" class="nav-link">启动链路</a>
+<a href="01-query-loop.html" class="nav-link">Query 循环</a>
+<a href="flows/query-lifecycle.html" class="nav-link">查询生命周期</a>
+<div class="nav-section-title">核心机制</div>
+<a href="02-tool-dispatch.html" class="nav-link">工具调度</a>
+<a href="03-permissions.html" class="nav-link">权限系统</a>
+<a href="03b-security-hardening.html" class="nav-link">风控与安全加固</a>
+<a href="04-agent-arch.html" class="nav-link">Agent 架构</a>
+<a href="11-hooks.html" class="nav-link">Hook 机制</a>
+<div class="nav-section-title">扩展体系</div>
+<a href="05-mcp.html" class="nav-link">MCP 体系</a>
+<a href="07-plugins.html" class="nav-link">插件系统</a>
+<a href="08-commands.html" class="nav-link">命令系统</a>
+<div class="nav-section-title">数据与服务</div>
+<a href="06-context-mgmt.html" class="nav-link">上下文管理</a>
+<a href="10-services.html" class="nav-link">服务层</a>
+<a href="15-cost-limits.html" class="nav-link">成本与限流</a>
+<div class="nav-section-title">界面与配置</div>
+<a href="09-ui.html" class="nav-link active">UI 交互层</a>
+<a href="13-config.html" class="nav-link">配置与迁移</a>
+<div class="nav-section-title">外围能力</div>
+<a href="12-external.html" class="nav-link">外部集成</a>
+<a href="14-native.html" class="nav-link">Native 能力</a>
+<div class="nav-section-title">安全专题</div>
+<a href="16-anti-distillation.html" class="nav-link">反蒸馏与输出保护</a>
+<a href="17-buddy.html" class="nav-link">Buddy 宠物系统</a>
+<div class="nav-section-title">数据专题</div>
+<a href="18-telemetry.html" class="nav-link">遥测与用户画像</a>
+<div class="nav-section-title">流程图</div>
+<a href="flows/tool-execution.html" class="nav-link">工具执行流程</a>
+<a href="flows/agent-collab.html" class="nav-link">Agent 协作流程</a>
+</nav>
+    <main class="content">
+        <header class="page-header">
+            <span class="breadcrumb"><a href="index.html">源码分析</a></span>
+            <h1>UI 交互层</h1>
+            <p class="subtitle">基于 Ink (React for CLI) 的终端渲染框架、组件架构与事件系统</p>
+        </header>
+
+        <nav class="page-toc">
+    <div class="page-toc-title">页面导航</div>
+        <a href="#overview"><span class="toc-dot dot-overview"></span>职责概述</a>
+        <a href="#architecture"><span class="toc-dot dot-arch"></span>架构设计</a>
+        <a href="#dataflow"><span class="toc-dot dot-data"></span>数据流</a>
+        <a href="#interfaces"><span class="toc-dot dot-arch"></span>核心接口</a>
+        <a href="#patterns"><span class="toc-dot dot-arch"></span>设计模式</a>
+        <a href="#dev-guide"><span class="toc-dot dot-code"></span>开发者指南</a>
+        <a href="#arch-guide"><span class="toc-dot dot-arch"></span>架构师指南</a>
+        <a href="#component-tree"><span class="toc-dot dot-arch"></span>组件树</a>
+        <a href="#topology"><span class="toc-dot dot-data"></span>处理拓扑图</a>
+        <a href="#core-flow"><span class="toc-dot dot-data"></span>核心流程详解</a>
+        <a href="#design-essence"><span class="toc-dot dot-design"></span>设计精华</a>
+        <a href="#agent-practice"><span class="toc-dot dot-practice"></span>Agent 实践借鉴</a>
+        <a href="#code-index"><span class="toc-dot dot-code"></span>代码索引</a>
+</nav>
+
+        <section id="overview" class="card">
+            <h2>职责概述</h2>
+
+            <p><strong>解决的问题：</strong>CC 跑在终端里，但终端只有纯文本。需要把模型的流式回复（带格式）、工具执行进度、权限确认弹窗、错误提示等，全部渲染成好看且可交互的终端界面，同时处理键盘输入和鼠标事件。</p>
+            <p><strong>应用场景：</strong>① 模型回复时实时渲染 Markdown 格式（代码高亮、表格、列表）② 工具执行时显示旋转动画和进度条 ③ 权限请求时弹出"允许/拒绝"选择界面 ④ 用户在输入框中编辑多行文本时的光标移动和自动补全 ⑤ 上下滚动查看历史对话的虚拟列表。</p>
+            <p><strong>一句话理解：</strong>就像终端版的 ChatGPT 网页——虽然跑在命令行里，但该有的格式、动画、交互一个不少。</p>
+        </section>
+
+        <section id="architecture" class="card">
+            <h2>架构设计</h2>
+            <div class="layer-diagram">
+                <div class="layer layer-entry">
+                    <div class="layer-header">应用层</div>
+                    <div class="layer-body">
+                        <div class="layer-component highlight">screens/REPL.tsx — 主屏幕（~2000 行）</div>
+                        <div class="layer-component">screens/Doctor.tsx — 诊断面板</div>
+                        <div class="layer-component">screens/ResumeConversation.tsx — 会话恢复</div>
+                    </div>
+                </div>
+                <div class="layer-arrow">&#9660;</div>
+                <div class="layer layer-ui">
+                    <div class="layer-header">组件层</div>
+                    <div class="layer-body">
+                        <div class="layer-component highlight">PromptInput.tsx — 用户输入</div>
+                        <div class="layer-component highlight">VirtualMessageList.tsx — 消息列表</div>
+                        <div class="layer-component highlight">Messages.tsx — 消息渲染</div>
+                        <div class="layer-component">design-system/ — ThemedText/ThemedBox/ThemeProvider</div>
+                        <div class="layer-component">messages/ — 30+ 消息类型组件</div>
+                        <div class="layer-component">permissions/ — 权限请求对话框</div>
+                    </div>
+                </div>
+                <div class="layer-arrow">&#9660;</div>
+                <div class="layer layer-engine">
+                    <div class="layer-header">渲染引擎</div>
+                    <div class="layer-body">
+                        <div class="layer-component highlight">ink/ink.tsx — Ink 核心类（~1722 行）</div>
+                        <div class="layer-component">ink/reconciler.ts — React reconciler</div>
+                        <div class="layer-component">ink/renderer.ts — DOM→Screen 渲染器</div>
+                        <div class="layer-component highlight">ink/layout/yoga.ts — Yoga 布局引擎适配</div>
+                        <div class="layer-component">ink/screen.ts — Screen 缓冲区</div>
+                    </div>
+                </div>
+                <div class="layer-arrow">&#9660;</div>
+                <div class="layer layer-infra">
+                    <div class="layer-header">基础设施层</div>
+                    <div class="layer-body">
+                        <div class="layer-component highlight">ink/events/ — 事件分发器</div>
+                        <div class="layer-component">ink/termio/ — ANSI 转义序列</div>
+                        <div class="layer-component">ink/terminal.ts — 终端能力检测</div>
+                        <div class="layer-component">ink/parse-keypress.ts — 按键解析</div>
+                    </div>
+                </div>
+            </div>
+        </section>
+
+        <section id="dataflow" class="card">
+            <h2>核心数据流</h2>
+
+            <h3>渲染管线</h3>
+            <div class="flow-chart">
+                <div class="flow-step">
+                    <div class="flow-step-title">1. 用户输入 / 状态变更</div>
+                    <div class="flow-step-desc">按键、消息到达、状态更新触发 React 重渲染</div>
+                </div>
+                <div class="flow-arrow">&rarr;</div>
+                <div class="flow-step">
+                    <div class="flow-step-title">2. React Reconcile</div>
+                    <div class="flow-step-desc"><code>reconciler.ts</code> 使用 react-reconciler（LegacyRoot 同步模式）将 React 组件树转换为 DOM 树（<code>DOMElement</code> 节点）</div>
+                </div>
+                <div class="flow-arrow">&rarr;</div>
+                <div class="flow-step">
+                    <div class="flow-step-title">3. Yoga Layout</div>
+                    <div class="flow-step-desc"><code>layout/yoga.ts</code> 调用 Yoga 引擎计算每个节点的精确位置和尺寸（类 Flexbox）</div>
+                </div>
+                <div class="flow-arrow">&rarr;</div>
+                <div class="flow-step">
+                    <div class="flow-step-title">4. Paint to Screen</div>
+                    <div class="flow-step-desc"><code>renderer.ts</code> 遍历 DOM 树，将每个节点渲染为 Screen 缓冲区的字符单元（含样式、超链接池）</div>
+                </div>
+                <div class="flow-arrow">&rarr;</div>
+                <div class="flow-step">
+                    <div class="flow-step-title">5. Diff &amp; Output</div>
+                    <div class="flow-step-desc"><code>LogUpdate</code> 对比前后两帧 Screen 缓冲区，生成 ANSI 补丁序列，通过 stdout 写入终端。使用 BSU/ESU 同步输出防止闪烁</div>
+                </div>
+            </div>
+
+            <h3>事件处理流程</h3>
+            <div class="flow-chart">
+                <div class="flow-step">
+                    <div class="flow-step-title">stdin 原始字节</div>
+                    <div class="flow-step-desc">终端在 raw mode 下发送按键字节流</div>
+                </div>
+                <div class="flow-arrow">&rarr;</div>
+                <div class="flow-step">
+                    <div class="flow-step-title">parse-keypress.ts</div>
+                    <div class="flow-step-desc">解析为 <code>ParsedInput</code>（字符）+ <code>ParsedKey</code>（修饰键标志）+ <code>ParsedMouse</code>（鼠标坐标）</div>
+                </div>
+                <div class="flow-arrow">&rarr;</div>
+                <div class="flow-step">
+                    <div class="flow-step-title">App.tsx 事件分发</div>
+                    <div class="flow-step-desc">App 组件接收 <code>InputEvent</code>，通过 <code>EventEmitter</code> 通知订阅者</div>
+                </div>
+                <div class="flow-arrow">&rarr;</div>
+                <div class="flow-step">
+                    <div class="flow-step-title">Dispatcher 双阶段派发</div>
+                    <div class="flow-step-desc"><code>events/dispatcher.ts</code> 模拟 DOM 标准：capture（根→目标）→ bubble（目标→根）。查找匹配的 DOM 元素并执行处理器</div>
+                </div>
+            </div>
+        </section>
+
+        <section id="interfaces" class="card">
+            <h2>关键类型与接口</h2>
+
+            <h3>Ink 核心类</h3>
+            <pre><code>// ink/ink.tsx:76-120 — Ink 主类关键结构
+export default class Ink {
+  private readonly log: LogUpdate       // 差量输出管理器
+  private readonly terminal: Terminal    // 终端能力适配
+  private readonly container: FiberRoot  // React reconciler 容器
+  private rootNode: DOMElement           // 虚拟 DOM 根节点
+  readonly focusManager: FocusManager    // 焦点管理
+  private renderer: Renderer             // DOM → Screen 渲染器
+  private readonly stylePool: StylePool  // 样式对象池
+  private charPool: CharPool             // 字符对象池
+  private hyperlinkPool: HyperlinkPool   // 超链接对象池
+  private frontFrame: Frame              // 前帧缓冲区
+  private backFrame: Frame               // 后帧缓冲区
+}</code></pre>
+
+            <h3>Frame 数据结构</h3>
+            <pre><code>// ink/frame.ts:12-20
+export type Frame = {
+  readonly screen: Screen       // 渲染后的屏幕缓冲区
+  readonly viewport: Size       // 视口尺寸
+  readonly cursor: Cursor       // 光标位置与可见性
+  readonly scrollHint?: ScrollHint | null  // DECSTBM 滚动优化提示
+  readonly scrollDrainPending?: boolean    // 是否有待处理的滚动增量
+}</code></pre>
+
+            <h3>DOMElement — Ink 虚拟 DOM 节点</h3>
+            <pre><code>// ink/dom.ts:31-80
+export type DOMElement = {
+  nodeName: ElementNames  // 'ink-root' | 'ink-box' | 'ink-text' | ...
+  attributes: Record&lt;string, DOMNodeAttribute&gt;
+  childNodes: DOMNode[]
+  style: Styles
+  yogaNode?: LayoutNode   // Yoga 布局节点
+  dirty: boolean           // 是否需要重渲染
+  _eventHandlers?: Record&lt;string, unknown&gt;  // 事件处理器
+  // 滚动状态（overflow: 'scroll' 的 Box）
+  scrollTop?: number
+  scrollHeight?: number
+  scrollViewportHeight?: number
+  stickyScroll?: boolean
+}</code></pre>
+
+            <h3>ThemeProvider — 主题系统</h3>
+            <pre><code>// components/design-system/ThemeProvider.tsx:8-16
+type ThemeContextValue = {
+  themeSetting: ThemeSetting      // 用户偏好（可以是 'auto'）
+  setThemeSetting: (s) => void
+  setPreviewTheme: (s) => void    // 主题选择器预览
+  savePreview: () => void
+  cancelPreview: () => void
+  currentTheme: ThemeName         // 解析后的实际主题（永远不是 'auto'）
+}</code></pre>
+
+            <h3>ThemedText — 主题感知文本组件</h3>
+            <pre><code>// components/design-system/ThemedText.tsx:12-61
+export type Props = {
+  color?: keyof Theme | Color     // 接受主题键或原始颜色值
+  backgroundColor?: keyof Theme
+  dimColor?: boolean              // 使用主题的 inactive 颜色
+  bold?: boolean; italic?: boolean
+  underline?: boolean; strikethrough?: boolean
+  inverse?: boolean
+  wrap?: Styles['textWrap']       // 'wrap' | 'truncate' | 'truncate-start' | ...
+}
+// resolveColor() 自动将主题键（如 'primary'）解析为实际 RGB/ANSI 颜色值</code></pre>
+
+            <h3>事件双阶段派发</h3>
+            <pre><code>// ink/events/dispatcher.ts:46-79
+function collectListeners(target, event): DispatchListener[] {
+  // 从目标到根遍历：
+  // capture 处理器 unshift（根优先）
+  // bubble 处理器 push（目标优先）
+  // 结果: [root-cap, ..., parent-cap, target-cap, target-bub, parent-bub, ..., root-bub]
+  let node = target
+  while (node) {
+    const captureHandler = getHandler(node, event.type, true)
+    const bubbleHandler = getHandler(node, event.type, false)
+    // ...收集到 listeners 数组
+    node = node.parentNode
+  }
+  return listeners
+}</code></pre>
+        </section>
+
+        <section id="patterns" class="card">
+            <h2>设计模式与亮点</h2>
+
+            <h3>1. React-for-CLI 架构</h3>
+            <p>Ink 将 Web React 的声明式组件模型完美移植到终端。开发者用 JSX 编写 UI，reconciler 将组件树映射到虚拟 DOM（<code>DOMElement</code>），
+            Yoga 引擎做 Flexbox 布局，最终输出为 ANSI 字符流。这让复杂的终端 UI（选择器、对话框、进度条）可以用 React 组件的方式构建。</p>
+
+            <h3>2. 双缓冲差量渲染</h3>
+            <p>Ink 使用 frontFrame/backFrame 双缓冲策略。每帧渲染时，backFrame 接收新内容，然后与 frontFrame 做 cell-by-cell 对比，
+            只输出变化的 ANSI 序列。这避免了每帧全屏刷新的闪烁问题。StylePool/CharPool/HyperlinkPool 使用对象池模式减少 GC 压力。</p>
+
+            <h3>3. 虚拟列表优化</h3>
+            <p><code>VirtualMessageList.tsx</code> 实现了虚拟滚动：只渲染视口内的消息组件，配合 <code>OffscreenFreeze</code> 冻结不可见组件。
+            在长会话（2800+ 消息）中，通过 <code>LogoHeader</code> memo 化防止不必要的子树 dirty 级联——这是经过性能调优的关键模式：
+            如果 Logo 未 memo，每次 re-render 会导致所有 MessageRow 放弃 blit 优化（150K+ writes/frame）。</p>
+
+            <h3>4. 终端能力自适应</h3>
+            <p><code>terminal.ts</code> 检测终端能力并自适应：</p>
+            <pre><code>// ink/terminal.ts — 能力检测示例
+function isSynchronizedOutputSupported(): boolean {
+  // tmux 不支持 DEC 2026 — 跳过
+  if (process.env.TMUX) return false
+  // 已知支持 DEC 2026 的终端
+  if (['iTerm.app', 'WezTerm', 'ghostty', 'kitty'].includes(termProgram))
+    return true
+  return false
+}
+function isProgressReportingAvailable(): boolean {
+  // OSC 9;4 进度报告：Ghostty 1.2+、iTerm2 3.6.6+
+}</code></pre>
+
+            <h3>5. Design System 主题层</h3>
+            <p>ThemedText/ThemedBox 封装了 Ink 的基础 Text/Box 组件，添加主题解析层。颜色属性接受 <code>keyof Theme</code>（语义键）或原始 ANSI 值，
+            <code>resolveColor()</code> 在运行时自动解析。ThemeProvider 还支持 'auto' 模式——通过 OSC 11 查询终端背景色自动切换明暗主题。</p>
+
+            <h3>6. 按键序列解析</h3>
+            <p><code>termio/</code> 目录实现了完整的终端转义序列解析栈：</p>
+            <ul>
+                <li><code>csi.ts</code> — CSI 序列（光标移动、屏幕擦除）</li>
+                <li><code>dec.ts</code> — DEC 私有模式（交替屏幕、鼠标追踪、光标控制）</li>
+                <li><code>osc.ts</code> — OSC 序列（超链接、剪贴板、标签页状态）</li>
+                <li><code>sgr.ts</code> — SGR 样式序列</li>
+                <li><code>parser.ts</code> — 统一的状态机解析器</li>
+            </ul>
+        </section>
+
+        <section id="dev-guide" class="card developer">
+            <h2>开发者实践指南</h2>
+            <div class="info-box tip">使用 Ink 开发终端 UI 的核心原则：像写 React Web 一样写 CLI 组件，但要注意终端的性能约束。</div>
+
+            <h3>创建新的 UI 组件</h3>
+            <p>所有 CC 组件使用 <code>ink.ts</code> 导出的封装 API：</p>
+            <pre><code>// ink.ts — 项目统一入口（自动包裹 ThemeProvider）
+import { Box, Text, render, createRoot } from '../ink.js'
+
+// 创建带主题的根节点
+const root = await createRoot({ stdout: process.stdout })
+root.render(&lt;Box flexDirection="column"&gt;
+  &lt;Text color="primary" bold&gt;标题&lt;/Text&gt;
+  &lt;Text dimColor&gt;次要信息&lt;/Text&gt;
+&lt;/Box&gt;)</code></pre>
+
+            <h3>PromptInput 集成</h3>
+            <p>PromptInput 是 CC 最复杂的组件（~80 行导入、数十个 hook）。要集成新功能：</p>
+            <ul>
+                <li>使用 <code>useInput</code> 或 <code>useKeybinding</code> 注册快捷键</li>
+                <li>使用 <code>useTypeahead</code> 添加命令自动补全</li>
+                <li>使用 <code>useAppState</code> 读写全局状态</li>
+                <li>使用 <code>useCommandQueue</code> 管理命令排队</li>
+            </ul>
+
+            <h3>性能优化技巧</h3>
+            <ul>
+                <li>使用 <code>React.memo</code> 包裹静态子树（参考 LogoHeader 模式）</li>
+                <li>避免在 render 路径中创建新对象/数组——Ink 的 blit 优化依赖 dirty 标记</li>
+                <li>使用 <code>OffscreenFreeze</code> 冻结视口外组件</li>
+                <li>大量文本使用 <code>ScrollBox</code> 而非全量渲染</li>
+            </ul>
+        </section>
+
+        <section id="arch-guide" class="card architect">
+            <h2>架构师决策指南</h2>
+
+            <h3>为什么选择 Ink（React for CLI）而非直接 ANSI</h3>
+            <p>CC 选择 Ink 的核心原因是<strong>组件复用</strong>和<strong>声明式状态管理</strong>。一个权限对话框（PermissionRequest）
+            需要：列表导航、确认/拒绝按钮、模式切换、实时更新——用纯 ANSI 实现需要数百行状态机代码。
+            用 Ink，这就是一个 React 组件，状态通过 hooks 管理，渲染自动响应。</p>
+
+            <h3>渲染性能的极限与应对</h3>
+            <p>终端渲染的瓶颈不在 Yoga 布局（~1ms/帧），而在 ANSI diff + stdout 写入（~5-15ms/帧）。
+            Ink 的优化策略：</p>
+            <ul>
+                <li><strong>Blit 优化</strong>：前后帧 cell 对比只输出差异行（减少 ANSI 序列体积）</li>
+                <li><strong>BSU/ESU 同步</strong>：DEC 2026 模式确保一帧的输出原子写入（消除闪烁）</li>
+                <li><strong>帧调度</strong>：<code>FRAME_INTERVAL_MS</code> 控制渲染频率，避免空转</li>
+                <li><strong>对象池</strong>：StylePool/CharPool 跨帧复用，减少 GC 停顿</li>
+            </ul>
+
+            <h3>组件架构的权衡</h3>
+            <div class="two-col">
+                <div class="info-box tip">
+                    <strong>优势</strong>：30+ 消息类型组件（messages/）各司其职，新消息类型只需添加一个文件。
+                    设计系统层（design-system/）确保主题一致性。
+                </div>
+                <div class="info-box warning">
+                    <strong>挑战</strong>：REPL.tsx 作为主屏幕承担了过多职责（~2000 行），状态管理分散在 AppState、useCallback、useEffect 中。
+                    未来可考虑拆分为更细粒度的子组件。
+                </div>
+            </div>
+
+            <h3>事件系统的设计取舍</h3>
+            <p>Ink 的事件系统模拟了 DOM 的 capture/bubble 双阶段模型。这在功能上很强大（支持 <code>onKeyDownCapture</code> 等场景），
+            但增加了复杂度。在 CLI 场景中，绝大多数事件处理都是简单的 <code>useInput</code> 或 <code>useKeybinding</code>，
+            双阶段派发只在鼠标点击 hit-test 和嵌套焦点管理中使用。</p>
+        </section>
+
+        <section id="component-tree" class="card">
+            <h2>UI 组件层级图</h2>
+            <div class="layer-diagram">
+                <div class="layer layer-entry">
+                    <div class="layer-header">App（顶层包装器）</div>
+                    <div class="layer-body">
+                        <div class="layer-component">FpsMetricsProvider</div>
+                        <div class="layer-component">StatsProvider</div>
+                        <div class="layer-component">AppStateProvider</div>
+                    </div>
+                </div>
+                <div class="layer-arrow">&#9660;</div>
+                <div class="layer layer-ui">
+                    <div class="layer-header">REPL（主屏幕）</div>
+                    <div class="layer-body">
+                        <div class="layer-component highlight">ThemeProvider</div>
+                        <div class="layer-component highlight">PromptInput — 用户输入区</div>
+                        <div class="layer-component highlight">VirtualMessageList — 消息滚动区</div>
+                        <div class="layer-component">PermissionRequest — 权限对话框</div>
+                        <div class="layer-component">StatusLine — 状态栏</div>
+                        <div class="layer-component">SpinnerWithVerb — 加载动画</div>
+                    </div>
+                </div>
+                <div class="layer-arrow">&#9660;</div>
+                <div class="layer layer-engine">
+                    <div class="layer-header">消息渲染层</div>
+                    <div class="layer-body">
+                        <div class="layer-component">Messages.tsx — 消息列表管理</div>
+                        <div class="layer-component">MessageRow.tsx — 单条消息包装</div>
+                        <div class="layer-component">AssistantTextMessage / AssistantToolUseMessage</div>
+                        <div class="layer-component">UserTextMessage / UserCommandMessage</div>
+                        <div class="layer-component">StreamingMarkdown — Markdown 实时渲染</div>
+                    </div>
+                </div>
+                <div class="layer-arrow">&#9660;</div>
+                <div class="layer layer-infra">
+                    <div class="layer-header">基础组件</div>
+                    <div class="layer-body">
+                        <div class="layer-component">ThemedText / ThemedBox — 主题感知容器</div>
+                        <div class="layer-component">BaseText / BaseBox — Ink 原始组件</div>
+                        <div class="layer-component">ScrollBox — 可滚动容器</div>
+                        <div class="layer-component">Button / Link / Newline</div>
+                        <div class="layer-component">Spacer — 弹性空白</div>
+                    </div>
+                </div>
+            </div>
+        </section>
+
+        <!-- ========== 可视化处理拓扑图 ========== -->
+        <section id="topology" class="card">
+            <h2><span class="icon" style="background:rgba(139,92,246,.15);color:var(--purple);">◈</span> 可视化处理拓扑图</h2>
+
+            <!-- Phase 1: 组件树构建 → Reconciler -->
+            <div class="fc">
+                <div class="fc-center">
+                    <div class="fn n-start">setState / props 变更<span class="sub">用户输入、流式消息、状态更新</span></div>
+                    <div class="vc s24"></div>
+
+                    <div class="fn n-process w">1. React 组件树构建 — REPL 入口<span class="sub">screens/REPL.tsx:572 — 根组件</span><span class="sub">AppStateProvider + StatsProvider + FpsMetricsProvider</span></div>
+                    <div class="vc s16"></div>
+
+                    <div class="fc-row" style="gap:12px;">
+                        <div class="fn n-process" style="max-width:130px;">Messages<span class="sub">消息列表组件</span></div>
+                        <div class="fn n-process" style="max-width:130px;">TextInput<span class="sub">输入框组件</span></div>
+                        <div class="fn n-process" style="max-width:130px;">StatusLine<span class="sub">状态栏组件</span></div>
+                        <div class="fn n-process" style="max-width:130px;">ToolConfirm<span class="sub">工具确认弹窗</span></div>
+                    </div>
+                    <div style="font-size:10px;color:var(--text-muted);margin:6px 0;text-align:center;">React 调度 → Fiber 树 diff ↓</div>
+                    <div class="vc s16"></div>
+
+                    <div class="fn n-check ww">2. 自定义 Reconciler — React → 虚拟 DOM<span class="sub">ink/reconciler.ts — react-reconciler 宿主环境</span><span class="sub">createInstance L331 → DOMElement | commitUpdate L426 → 属性差异</span></div>
+                    <div class="vc s20"></div>
+
+                    <div class="fn n-process w">resetAfterCommit → deferredRender<span class="sub">ink/reconciler.ts:247 — queueMicrotask 触发渲染</span><span class="sub">同一事件循环内多次 setState 只触发一次渲染</span></div>
+                </div>
+            </div>
+
+            <!-- Phase 2: 布局与渲染 -->
+            <div class="fc">
+                <div class="fc-center">
+                    <div class="fn n-start">虚拟 DOM 树就绪<span class="sub">DOMElement 节点树，含样式属性</span></div>
+                    <div class="vc s24"></div>
+
+                    <div class="fn n-check w">3. Yoga 布局计算 — Flexbox → 终端坐标<span class="sub">ink/layout/yoga.ts — DOMElement → YogaNode</span><span class="sub">计算每个节点的行列坐标，回写到 yi 字段</span></div>
+                    <div class="vc s20"></div>
+
+                    <div class="fn n-process ww">4. DOM → Screen 渲染 — renderer.ts<span class="sub">ink/renderer.ts:31 — createRenderer 闭包</span><span class="sub">遍历 DOM 树 → renderNodeToOutput → Output 对象</span><span class="sub">Output → Screen 缓冲区（rows x cols 二维字符数组）</span></div>
+                    <div class="vc s20"></div>
+
+                    <div class="fn n-check ww" style="border-color:var(--amber);color:var(--amber);background:rgba(245,158,11,.08);">5. 双缓冲 Blit — Ink.onRender()<span class="sub">ink/ink.tsx:420-789 — 核心渲染管线</span><span class="sub">prev 帧（已写入终端） vs back 帧（当前计算结果）</span></div>
+                    <div class="vc s16"></div>
+
+                    <div class="fc-row">
+                        <div class="fn n-process w" style="max-width:240px;">逐行对比 prev vs back<span class="sub">差异行 → ANSI 转义序列</span></div>
+                        <div class="hc-arrow s60 green"><span class="hc-label" style="color:var(--green);">变化</span></div>
+                        <div class="fn n-allow w" style="max-width:200px;">writeRaw → stdout<span class="sub">光标移动 + SGR 样式 + OSC</span></div>
+                    </div>
+                    <div class="vc s16"><span class="vc-label">交换帧 ↓</span></div>
+                    <div class="fn n-process" style="border-color:var(--green);color:var(--green);">prev = back; back = nextFrame</div>
+                </div>
+            </div>
+
+            <!-- Phase 3: 消息渲染分支 -->
+            <div class="fc">
+                <div class="fc-center">
+                    <div class="fn n-start">Messages 组件渲染<span class="sub">Messages.tsx:341 — 消息列表管理</span></div>
+                    <div class="vc s24"></div>
+
+                    <div class="fn n-check ww">6. shouldRenderStatically 判断<span class="sub">Messages.tsx:779-833 — 静态渲染缓存</span><span class="sub">已完成消息可跳过 React 渲染和 Yoga 布局</span></div>
+                    <div class="vc s16"></div>
+
+                    <div class="fc-row" style="gap:40px;">
+                        <div style="display:flex;flex-direction:column;align-items:center;gap:0;">
+                            <div class="fn n-auto w" style="border-color:var(--green);color:var(--green);background:rgba(34,197,94,.08);">静态渲染（缓存命中）</div>
+                            <div class="vc s16" style="background:var(--green);"></div>
+                            <div class="fn n-process" style="border-color:var(--green);color:var(--green);">直接复用 Screen 缓冲区<span class="sub">跳过 React + Yoga</span></div>
+                        </div>
+                        <div style="display:flex;flex-direction:column;align-items:center;gap:0;">
+                            <div class="fn n-process w" style="border-color:var(--blue);color:var(--blue);background:rgba(59,130,246,.08);">动态渲染（活跃消息）</div>
+                            <div class="vc s16" style="background:var(--blue);"></div>
+                            <div class="fn n-process">完整 React 渲染周期</div>
+                        </div>
+                    </div>
+
+                    <div class="vc s24"></div>
+
+                    <!-- 消息类型分支 -->
+                    <div class="fn n-check w">7. Message 组件 — 内容块类型分发<span class="sub">Message.tsx:58 — 处理多种 content block</span></div>
+                    <div class="vc s16"></div>
+
+                    <div class="fc-row" style="gap:10px;">
+                        <div class="fn n-process" style="font-size:11px;max-width:110px;">text<span class="sub">文本内容</span></div>
+                        <div class="hc s20"></div>
+                        <div class="fn n-process" style="font-size:11px;max-width:110px;">tool_use<span class="sub">工具调用</span></div>
+                        <div class="hc s20"></div>
+                        <div class="fn n-process" style="font-size:11px;max-width:110px;">thinking<span class="sub">思维过程</span></div>
+                        <div class="hc s20"></div>
+                        <div class="fn n-process" style="font-size:11px;max-width:110px;">tool_result<span class="sub">工具结果</span></div>
+                    </div>
+
+                    <div class="vc s20"></div>
+
+                    <!-- 虚拟滚动 -->
+                    <div class="loop-box" style="border-color:var(--cyan);background:rgba(6,182,212,.04);max-width:560px;">
+                        <div class="loop-title" style="color:var(--cyan);">虚拟滚动 — VirtualMessageList</div>
+                        <div class="loop-text">
+                            <strong>VirtualMessageList.tsx:289</strong> — 全屏模式下启用<br>
+                            ① <code>useVirtualScroll</code> 按需渲染可见区域消息<br>
+                            ② <code>computeSliceStart</code>（Messages.tsx:315）计算可视窗口起始位置<br>
+                            ③ 避免渲染历史消息 → 5000 行 REPL 中仅遍历活跃消息<br>
+                            <span style="color:var(--text-muted);font-size:10px;">性能关键：将每帧 DOM 树遍历范围压缩到流式输出中的活跃消息</span>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Phase 4: 输入输出管线 -->
+            <div class="fc" style="padding:24px 16px;">
+                <div style="overflow-x:auto;">
+                    <div style="display:flex;align-items:center;gap:12px;min-width:920px;">
+                        <div class="fn n-start" style="min-width:100px;">stdin 按键事件</div>
+                        <div class="hc-arrow s40"></div>
+                        <div class="fn n-process" style="min-width:120px;">useTextInput<span class="sub">hooks/useTextInput.ts:73</span></div>
+                        <div class="hc-arrow s40"></div>
+                        <div class="fn n-process" style="min-width:120px;">mapKey → 编辑操作<span class="sub">光标/删除/Kill ring</span></div>
+                        <div class="hc-arrow s40"></div>
+                        <div class="fn n-check" style="min-width:110px;">handleEnter<span class="sub">提交 vs 换行判断</span></div>
+                        <div class="hc-arrow s40"></div>
+                        <div class="fn n-process" style="min-width:110px;">setState 更新<span class="sub">触发 React 渲染</span></div>
+                        <div class="hc-arrow s40"></div>
+                        <div class="fn n-process" style="min-width:110px;">双缓冲 Blit<span class="sub">diff → ANSI 输出</span></div>
+                        <div class="hc-arrow s40"></div>
+                        <div class="fn n-allow" style="min-width:120px;">writeRaw → stdout<span class="sub">终端显示更新</span></div>
+                    </div>
+                </div>
+            </div>
+
+            <div class="info-box info"><strong>双缓冲 Blit 是性能核心</strong>：终端渲染瓶颈是 I/O 带宽而非 CPU。80x24 终端全量输出约 100KB ANSI 序列，双缓冲压缩到实际变化的几十到几百字节。配合静态渲染缓存（已完成消息跳过 React + Yoga），5000 行 REPL 的每帧渲染仅遍历活跃消息。</div>
+        </section>
+
+        <section id="core-flow" class="card">
+            <h2><span class="icon" style="background:rgba(6,182,212,.15);color:var(--cyan);">⇉</span> 核心处理流程详解</h2>
+            <p>Claude Code 的 UI 渲染管线是一个精心设计的多层架构：从 React 组件树出发，经过自定义 Reconciler 转换为虚拟 DOM，再通过 Yoga 布局引擎计算终端坐标，最终由 Screen 缓冲区和双缓冲 blit 机制将内容写入终端。整个流程在每帧（约 60fps）内完成，同时支持搜索高亮、文本选择、虚拟滚动等高级特性。</p>
+            <div class="flow-chart vertical">
+                <div class="flow-step highlight">
+                    <div class="flow-step-title">1. React 组件树构建 — REPL 入口</div>
+                    <div class="flow-step-desc"><code>REPL</code>（screens/REPL.tsx:572）作为根组件，组合 <code>Messages</code>（消息列表）、<code>TextInput</code>（输入框）、<code>StatusLine</code>（状态栏）等组件。通过 <code>useAppState</code> 订阅全局状态，状态变更触发 React 调度。<code>App</code>（components/App.tsx:19）提供 <code>AppStateProvider</code>、<code>StatsProvider</code>、<code>FpsMetricsProvider</code> 三层上下文。</div>
+                </div>
+                <div class="flow-arrow">↓</div>
+                <div class="flow-step">
+                    <div class="flow-step-title">2. 自定义 Reconciler — React → 虚拟 DOM</div>
+                    <div class="flow-step-desc"><code>reconciler.ts</code>（ink/reconciler.ts）使用 <code>react-reconciler</code> 创建自定义宿主环境。<code>createInstance</code>（L331）将 React 元素转为 <code>DOMElement</code> 节点，<code>commitUpdate</code>（L426）处理属性差异更新。<code>resetAfterCommit</code>（L247）在每次提交后触发 <code>Ink.onRender</code>，启动渲染管线。</div>
+                </div>
+                <div class="flow-arrow">↓</div>
+                <div class="flow-step">
+                    <div class="flow-step-title">3. Yoga 布局计算 — Flexbox → 终端坐标</div>
+                    <div class="flow-step-desc"><code>ink/layout/yoga.ts</code> 将虚拟 DOM 树映射到 Yoga 节点树。每个 <code>DOMElement</code> 携带一个 Yoga 节点，通过 Flexbox 属性（width/height/flex/padding 等）计算出每个节点的终端行列坐标。布局结果回写到 DOMElement 的 <code>yi</code>（Yoga info）字段。</div>
+                </div>
+                <div class="flow-arrow">↓</div>
+                <div class="flow-step highlight">
+                    <div class="flow-step-title">4. DOM → Screen 渲染 — renderer.ts</div>
+                    <div class="flow-step-desc"><code>createRenderer</code>（ink/renderer.ts:31）创建渲染闭包。遍历 DOM 树，对每个节点调用 <code>renderNodeToOutput</code> 将文本/样式写入 <code>Output</code> 对象。Output 最终转换为 <code>Screen</code> 缓冲区——一个二维字符数组（rows x cols），每个单元格存储字符、前景色、背景色、超链接等样式信息。</div>
+                </div>
+                <div class="flow-arrow">↓</div>
+                <div class="flow-step highlight">
+                    <div class="flow-step-title">5. 双缓冲 Blit — Ink.onRender()</div>
+                    <div class="flow-step-desc"><code>Ink.onRender</code>（ink/ink.tsx:420-789）是渲染管线的核心。维护 <code>prev</code> 和 <code>back</code> 两个 Frame 缓冲区。每帧对比 prev 和 back 的差异（blit），只将变化的行写入终端。这避免了全屏刷新的闪烁问题。关键优化：<code>queueMicrotask</code>（L212）确保同一事件循环内的多次 setState 只触发一次渲染。</div>
+                </div>
+                <div class="flow-arrow">↓</div>
+                <div class="flow-step">
+                    <div class="flow-step-title">6. 消息列表渲染 — Messages / VirtualMessageList</div>
+                    <div class="flow-step-desc"><code>Messages.tsx</code>（L341）管理消息的渲染、折叠和上下文窗口。通过 <code>computeSliceStart</code>（L315）计算可视窗口的起始位置，避免渲染历史消息。<code>VirtualMessageList.tsx</code>（L289）在全屏模式下启用虚拟滚动，使用 <code>useVirtualScroll</code> hook 实现按需渲染。消息组件 <code>Message.tsx</code>（L58）处理 tool_use、thinking、text 等多种内容块的渲染。</div>
+                </div>
+                <div class="flow-arrow">↓</div>
+                <div class="flow-step">
+                    <div class="flow-step-title">7. 输入处理 — useTextInput → stdin</div>
+                    <div class="flow-step-desc"><code>useTextInput</code>（hooks/useTextInput.ts:73）处理所有键盘输入：多行编辑、历史导航、Kill/Yank ring、粘贴检测。<code>mapKey</code>（L318）将按键映射到编辑操作，<code>handleEnter</code>（L247）区分提交与换行。<code>TextInput.tsx</code>（components/TextInput.tsx:37）将 hook 与 Ink 的 <code>useAnimationFrame</code> 集成，实现光标闪烁。</div>
+                </div>
+                <div class="flow-arrow">↓</div>
+                <div class="flow-step">
+                    <div class="flow-step-title">8. 终端输出 — writeRaw → ANSI 序列</div>
+                    <div class="flow-step-desc"><code>Ink.writeRaw</code>（ink/ink.tsx:1433）将 blit 差异转换为 ANSI 转义序列（光标移动 + SGR 样式 + OSC 超链接），通过 <code>process.stdout.write</code> 写入终端。支持 256 色、真彩色、OSC 52 剪贴板、DEC 2026 模式等终端能力。Alt Screen 模式（L357）通过保存/恢复终端状态实现全屏 UI。</div>
+                </div>
+            </div>
+            <div class="info-box info">整个渲染管线的性能关键在于双缓冲 blit：只传输变化的行到终端。在 5000 行的 REPL 组件中，通过 <code>shouldRenderStatically</code>（Messages.tsx:779）对已完成的消息使用静态渲染缓存，跳过 React 渲染和 Yoga 布局，将每帧的 DOM 树遍历范围压缩到仅包含流式输出中的活跃消息。</div>
+        </section>
+        <section id="design-essence" class="card">
+            <h2><span class="icon" style="background:rgba(245,158,11,.15);color:var(--amber);">★</span> 设计精华</h2>
+
+            <h3>1. 自定义 React Reconciler 实现终端渲染</h3>
+            <p>Claude Code 没有使用传统的终端 UI 库（如 blessed、ncurses），而是复用了 React 的组件模型和调度器。通过 <code>react-reconciler</code>（ink/reconciler.ts）创建自定义宿主环境，将 React 组件树映射到终端屏幕。这意味着开发者可以使用 React 的 hooks、context、memo 等所有特性来构建终端 UI，与 Web 开发体验完全一致。</p>
+            <div class="component-box">
+                <div class="name">自定义 Reconciler 核心</div>
+                <div class="desc">将 React Fiber 树映射到虚拟 DOM 节点，commit 阶段触发渲染</div>
+                <pre><code>// ink/reconciler.ts:331-359
+createInstance(originalType, newProps, _root, hostContext) {
+  const node = dom.createNode(originalType)
+  for (const [key, value] of Object.entries(newProps)) {
+    if (key === 'children') continue
+    applyProp(node, key, value) // 样式 → Yoga 节点属性
+  }
+  return node
+}
+
+// ink/reconciler.ts:247-315
+resetAfterCommit(rootNode) {
+  // 每次 React 提交后触发一次渲染
+  deferredRender() // queueMicrotask → Ink.onRender
+}</code></pre>
+            </div>
+            <div class="info-box tip">这个设计的深层洞察：React 的调度器本身就解决了终端 UI 中最难的"何时重绘"问题。通过 <code>queueMicrotask</code>（L212），同一事件循环中的多次 setState 被自动批处理，避免了对同一帧的重复渲染。React 的优先级调度还确保用户输入（高优先级）不会被长消息渲染（低优先级）阻塞。</div>
+
+            <h3>2. 双缓冲 Blit 渲染策略</h3>
+            <p><code>Ink.onRender</code>（ink/ink.tsx:420）维护两个 Frame：<code>prev</code>（上一帧已写入终端的内容）和 <code>back</code>（当前帧的新内容）。Blit 对比两者差异，只输出变化的行。这种策略避免了全屏刷新导致的闪烁，同时将终端 I/O 降到最低。</p>
+            <div class="component-box">
+                <div class="name">双缓冲差异输出</div>
+                <div class="desc">prev 缓冲区记录已写入终端的状态，back 是当前帧的计算结果</div>
+                <pre><code>// ink/ink.tsx:420 — onRender 核心流程
+onRender() {
+  // 1. Yoga 布局计算
+  const nextFrame = renderer({ terminal, ... })
+  // 2. 差异对比 + ANSI 输出
+  for (let y = 0; y &lt; rows; y++) {
+    if (!prev[y].equals(back[y])) {
+      // 只输出变化的行
+      writeRaw(moveCursor(y) + back[y].toAnsi())
+    }
+  }
+  // 3. 交换缓冲区
+  prev = back; back = nextFrame
+}</code></pre>
+            </div>
+            <div class="info-box tip">终端渲染的瓶颈不是 CPU 计算，而是 I/O 带宽。一个 80x24 的终端有 1920 个单元格，每帧全量输出需要约 100KB ANSI 序列。双缓冲将这个量级降到实际变化的几十到几百字节。在快速流式输出场景（如模型响应），这意味着终端体验接近原生应用的流畅度。</div>
+
+            <h3>3. 静态渲染缓存 — shouldRenderStatically</h3>
+            <p>在 Messages.tsx 中，<code>shouldRenderStatically</code>（L779-833）判断已完成的消息是否可以跳过重新渲染。判断条件包括：消息不是正在流式输出、没有活跃的 tool_use、没有兄弟 tool_use、屏幕尺寸未变等。符合条件的消息直接使用缓存的渲染结果，避免重复的 React 渲染和 Yoga 布局计算。</p>
+            <div class="component-box">
+                <div class="name">静态渲染缓存</div>
+                <div class="desc">已完成消息跳过 React 渲染周期，直接复用 Screen 缓冲区内容</div>
+                <pre><code>// Messages.tsx:779-833
+export function shouldRenderStatically(
+  message, streamingToolUseIDs, inProgressToolUseIDs,
+  siblingToolUseIDs, screen, lookup) {
+  // 非活跃消息：无流式/进行中/兄弟 tool_use
+  const isActive = streamingToolUseIDs.has(message.uuid)
+    || inProgressToolUseIDs.has(message.uuid)
+  if (isActive) return false
+  // 屏幕尺寸未变 + 无 pending 操作
+  return screen === lookup.screen
+}</code></pre>
+            </div>
+            <div class="info-box tip">这个优化是必要的，因为 REPL 的消息列表可能包含数百条消息。在流式输出期间，如果每帧都遍历所有历史消息进行 React 渲染和 Yoga 布局，延迟会随消息数线性增长。静态缓存将每帧的工作量从 O(n) 降到 O(1)（仅当前流式消息），这是在 5000+ 行 REPL 组件中保持 60fps 的关键。</div>
+
+            <h3>4. 消息切片窗口 — computeSliceStart</h3>
+            <p><code>computeSliceStart</code>（Messages.tsx:315-340）实现了上下文窗口裁剪：只渲染最近 N 条消息，历史消息被折叠为 "N messages collapsed"。这不是简单的固定数量裁剪——它考虑了折叠边界（不在 tool_use 和 tool_result 之间切断）、锚点消息（保持最近用户消息可见）和增量更新。</p>
+            <div class="info-box tip">上下文窗口裁剪与静态渲染缓存互补：窗口决定"哪些消息需要渲染"，静态缓存决定"哪些已渲染的消息可以跳过"。两者结合实现了恒定时间的渲染性能，无论会话中积累了多少历史消息。</div>
+        </section>
+
+        <section id="agent-practice" class="card">
+            <h2><span class="icon" style="background:rgba(34,197,94,.15);color:var(--green);">◈</span> Agent 实践借鉴 — 客服 Agent 面板设计</h2>
+
+            <div class="info-box info">本节回答：如果你在设计一个客服 Agent 助手的坐席面板，Claude Code 的 UI 渲染系统有哪些值得抄、哪些不需要抄？</div>
+
+            <h3>1. 场景映射：客服坐席面板的实时需求</h3>
+            <p>客服坐席面板和 Claude Code 的终端有一个共同的核心需求：实时流式渲染。坐席不能等 agent 想完 5 秒才看到结果，客户的消息也不能有延迟。不同之处在于，客服面板是 Web 应用，不需要终端的黑魔法：</p>
+            <div class="two-col">
+                <div class="component-box">
+                    <div class="name">坐席面板的四个核心需求</div>
+                    <div class="desc">实时性、组件化、多会话、状态指示</div>
+                    <pre><code>// 坐席面板的实时渲染需求
+// 1. Agent 回复必须流式显示 — token 到达即渲染
+//    客户等 5 秒才看到第一个字 → 差评
+//
+// 2. 工具结果需要不同渲染样式：
+//    /查订单 → 订单卡片（商品名、金额、状态）
+//    /查物流 → 时间线（已发货→运输中→派送中）
+//    /退单   → 进度条（审核中→退款中→已完成）
+//
+// 3. 多个客户同时在线，面板需要切换会话
+//    坐席同时服务 3-5 个客户
+//
+// 4. 工具调用状态实时指示
+//    "正在查询订单..." / "查询完成" / "查询失败"</code></pre>
+                </div>
+                <div class="component-box">
+                    <div class="name">CC 借鉴点映射</div>
+                    <div class="desc">CC 的终端渲染 → 客服的 Web 面板</div>
+                    <pre><code>// Claude Code                 →  客服 Agent 面板
+// ──────────────────────────────────────────────
+流式 token 渲染        →  WebSocket/SSE 实时追加
+工具结果注册表          →  订单→卡片、物流→时间线
+双缓冲差异输出          →  不需要（浏览器 DOM 天然增量）
+Yoga 布局引擎          →  不需要（CSS flexbox 就行）
+React Reconciler       →  不需要（标准 Web React/Vue）
+消息窗口裁剪            →  虚拟滚动列表（成熟的 Web 方案）</code></pre>
+                </div>
+            </div>
+
+            <h3>2. 借鉴 CC + 客服改造：伪代码实现</h3>
+            <p>以下是客服面板的核心实现，借鉴 CC 的流式渲染和工具结果注册表，但用 Web 原生方案替代终端黑魔法：</p>
+            <div class="component-box">
+                <div class="name">流式消息渲染组件</div>
+                <div class="desc">借鉴 CC 的 token 到达即渲染，用 Web SSE 实现打字效果</div>
+                <pre><code>// 流式消息组件 — 借鉴 CC 的 StreamingText，用 Web 原生实现
+function StreamingMessage({ sessionId }: { sessionId: string }) {
+  const [tokens, setTokens] = useState&lt;string[]&gt;([])
+  const [status, setStatus] = useState&lt;"streaming"|"done"|"error"&gt;("streaming")
+
+  useEffect(() =&gt; {
+    // SSE 连接 — 每个 token 到达就追加渲染
+    const eventSource = new EventSource(`/api/agent/stream/${sessionId}`)
+
+    eventSource.onmessage = (event) =&gt; {
+      const data = JSON.parse(event.data)
+      if (data.type === "token") {
+        setTokens(prev =&gt; [...prev, data.content])  // 追加渲染
+      } else if (data.type === "done") {
+        setStatus("done")
+        eventSource.close()
+      } else if (data.type === "error") {
+        setStatus("error")
+        eventSource.close()
+      }
+    }
+
+    return () =&gt; eventSource.close()
+  }, [sessionId])
+
+  return (
+    &lt;div className="agent-message"&gt;
+      &lt;div className="message-content"&gt;
+        {tokens.join("")}
+        {status === "streaming" &amp;&amp; &lt;span className="cursor"&gt;|&lt;/span&gt;}
+      &lt;/div&gt;
+      {status === "error" &amp;&amp; &lt;div className="error-hint"&gt;生成中断，点击重试&lt;/div&gt;}
+    &lt;/div&gt;
+  )
+}</code></pre>
+            </div>
+
+            <div class="component-box">
+                <div class="name">工具结果渲染器注册表</div>
+                <div class="desc">借鉴 CC 的 toolRenderers Map，每种工具注册自己的渲染组件</div>
+                <pre><code>// 工具结果渲染注册表 — 借鉴 CC 的 toolRenderers.set() 模式
+const toolResultRenderers = new Map&lt;string, React.ComponentType&lt;ToolResultProps&gt;&gt;()
+
+// 注册：每种工具有自己的渲染组件
+toolResultRenderers.set("query_order", OrderCardRenderer)
+toolResultRenderers.set("query_logistics", TimelineRenderer)
+toolResultRenderers.set("process_refund", ProgressRenderer)
+toolResultRenderers.set("issue_coupon", CouponDetailRenderer)
+toolResultRenderers.set("knowledge_search", ArticleListRenderer)
+
+// 通用渲染器 — 根据工具名查找对应组件
+function ToolResultDisplay({ toolUse, result }: ToolResultProps) {
+  const Renderer = toolResultRenderers.get(toolUse.name) ?? DefaultTextRenderer
+  return &lt;Renderer input={toolUse.input} output={result} /&gt;
+}
+
+// 订单卡片渲染器示例
+function OrderCardRenderer({ output }: { output: OrderResult }) {
+  return (
+    &lt;div className="order-card"&gt;
+      &lt;div className="order-header"&gt;订单号：{output.orderId}&lt;/div&gt;
+      &lt;div className="order-items"&gt;
+        {output.items.map(item =&gt; (
+          &lt;div key={item.sku}&gt;{item.name} x{item.qty} ¥{item.price}&lt;/div&gt;
+        ))}
+      &lt;/div&gt;
+      &lt;div className="order-status"&gt;状态：{output.statusText}&lt;/div&gt;
+    &lt;/div&gt;
+  )
+}</code></pre>
+            </div>
+
+            <div class="component-box">
+                <div class="name">会话切换管理 + 工具调用状态指示器</div>
+                <div class="desc">多客户并行，坐席切换会话时状态不丢失</div>
+                <pre><code>// 会话管理器 — 多客户并行
+function SessionManager() {
+  const [sessions, setSessions] = useState&lt;Map&lt;string, Session&gt;&gt;(new Map())
+  const [activeSessionId, setActiveSessionId] = useState&lt;string&gt;(null)
+
+  // 切换会话时，保存当前会话状态（流式输出不中断）
+  const switchSession = (targetId: string) =&gt; {
+    // 后台继续接收其他会话的 SSE 消息
+    setActiveSessionId(targetId)
+  }
+
+  return (
+    &lt;div className="session-container"&gt;
+      {/* 左侧：客户列表 */}
+      &lt;div className="session-list"&gt;
+        {Array.from(sessions.values()).map(s =&gt; (
+          &lt;SessionTab key={s.id} session={s}
+            isActive={s.id === activeSessionId}
+            onClick={() =&gt; switchSession(s.id)} /&gt;
+        ))}
+      &lt;/div&gt;
+      {/* 右侧：当前会话的消息区 */}
+      &lt;div className="message-area"&gt;
+        {sessions.get(activeSessionId) &amp;&amp;
+          &lt;MessageList messages={sessions.get(activeSessionId).messages} /&gt;}
+      &lt;/div&gt;
+    &lt;/div&gt;
+  )
+}
+
+// 工具调用状态指示器
+function ToolCallIndicator({ status, toolName }: { status: string, toolName: string }) {
+  const statusConfig = {
+    pending:  { icon: "⏳", text: `正在${toolName}...`, className: "pending" },
+    complete: { icon: "✓",  text: `${toolName}完成`, className: "complete" },
+    failed:   { icon: "✗",  text: `${toolName}失败`, className: "failed" },
+  }
+  const cfg = statusConfig[status]
+  return &lt;div className={`tool-indicator ${cfg.className}`}&gt;{cfg.icon} {cfg.text}&lt;/div&gt;
+}</code></pre>
+            </div>
+
+            <h3>3. 落地清单：必须抄 vs 不需要抄</h3>
+            <div class="two-col">
+                <div class="info-box tip">
+                    <strong>必须抄：</strong>
+                    <ul>
+                        <li><strong>流式渲染</strong> — token 到达即显示，不等完整响应。CC 用 Observable，客服用 SSE/WebSocket，本质相同</li>
+                        <li><strong>工具结果渲染器注册表</strong> — 每种工具注册独立渲染组件，新增工具不改核心逻辑。CC 用 Map，客服也用 Map</li>
+                        <li><strong>截断策略</strong> — 超长输出必须截断，保留头尾 N 行 + 折叠中间。CC 在终端做，客服在 Web 做更简单</li>
+                    </ul>
+                </div>
+                <div class="info-box warning">
+                    <strong>不需要抄：</strong>
+                    <ul>
+                        <li><strong>自定义 React Reconciler</strong> — CC 为了在终端渲染 React 组件造了整个 reconciler，客服面板是 Web 应用，直接用标准 React/Vue</li>
+                        <li><strong>Ink 组件模型 + Yoga 布局引擎</strong> — 终端没有 CSS，CC 用 Yoga 实现 flexbox。客服面板有原生 CSS，完全不需要</li>
+                        <li><strong>双缓冲差异输出</strong> — CC 为了避免终端闪烁。浏览器 DOM 天然支持增量更新，不需要手动管理帧缓冲</li>
+                    </ul>
+                </div>
+            </div>
+
+            <h3>4. 常见坑</h3>
+            <div class="info-box warning">
+                <strong>坑 1：SSE 流式渲染用 innerHTML 追加，导致 XSS。</strong>直接用 <code>div.innerHTML += token</code> 在 token 包含用户输入时会产生 XSS 注入。解决方案：用 <code>document.createTextNode(token)</code> 或 React 的 <code>setState(prev =&gt; [...prev, token])</code>，框架自动转义。
+            </div>
+            <div class="info-box warning">
+                <strong>坑 2：工具结果渲染器返回的组件越来越慢。</strong>订单卡片渲染了 200 条商品明细，页面卡顿。解决方案：渲染器内部必须做分页或虚拟滚动，注册表只负责路由到正确的组件，不负责性能优化。
+            </div>
+            <div class="info-box warning">
+                <strong>坑 3：切换会话时丢失流式状态。</strong>坐席从客户 A 切到客户 B，再切回 A，发现 A 的 agent 回复中断了。解决方案：每个会话独立维护 SSE 连接和消息缓冲区，切换只改变 activeSessionId，不销毁后台连接。
+            </div>
+            <div class="info-box warning">
+                <strong>坑 4：所有消息组件全量重渲染。</strong>新 token 到达时，整个消息列表 500+ 条消息全部重渲染。解决方案：借鉴 CC 的 static 标记——已完成的消息标记为 static，React.memo 跳过重渲染，只对流式中的消息做更新。
+            </div>
+        </section>
+        <section id="code-index" class="card">
+            <h2>代码索引</h2>
+            <table>
+                <thead><tr><th>文件</th><th>行数</th><th>说明</th></tr></thead>
+                <tbody>
+                    <tr><td><code>ink.ts</code></td><td>~86</td><td>Ink 统一导出入口，封装 ThemeProvider</td></tr>
+                    <tr><td><code>ink/ink.tsx</code></td><td>~1722</td><td>Ink 核心类：双缓冲渲染、事件循环、终端 I/O</td></tr>
+                    <tr><td><code>ink/reconciler.ts</code></td><td>~200</td><td>React reconciler 适配器（react-reconciler）</td></tr>
+                    <tr><td><code>ink/renderer.ts</code></td><td>~150</td><td>DOM 树 → Screen 缓冲区渲染器</td></tr>
+                    <tr><td><code>ink/render-to-screen.ts</code></td><td>~120</td><td>独立渲染（搜索高亮等场景）</td></tr>
+                    <tr><td><code>ink/layout/yoga.ts</code></td><td>~309</td><td>Yoga 布局引擎适配（Flexbox → 终端坐标）</td></tr>
+                    <tr><td><code>ink/dom.ts</code></td><td>~200</td><td>虚拟 DOM 节点定义和操作</td></tr>
+                    <tr><td><code>ink/screen.ts</code></td><td>~300</td><td>Screen 缓冲区、StylePool/CharPool</td></tr>
+                    <tr><td><code>ink/frame.ts</code></td><td>~90</td><td>Frame 数据结构（screen + viewport + cursor）</td></tr>
+                    <tr><td><code>ink/terminal.ts</code></td><td>~150</td><td>终端能力检测（DEC 2026、OSC 9;4 等）</td></tr>
+                    <tr><td><code>ink/events/dispatcher.ts</code></td><td>~120</td><td>双阶段事件派发器</td></tr>
+                    <tr><td><code>ink/parse-keypress.ts</code></td><td>~300</td><td>按键序列解析状态机</td></tr>
+                    <tr><td><code>ink/components/App.tsx</code></td><td>~250</td><td>顶层组件：stdin 事件接收与分发</td></tr>
+                    <tr><td><code>ink/components/Box.tsx</code></td><td>~200</td><td>基础布局容器（映射到 Yoga 节点）</td></tr>
+                    <tr><td><code>ink/components/Text.tsx</code></td><td>~150</td><td>基础文本组件</td></tr>
+                    <tr><td><code>ink/components/ScrollBox.tsx</code></td><td>~300</td><td>可滚动容器组件</td></tr>
+                    <tr><td><code>ink/hooks/use-input.ts</code></td><td>~80</td><td>键盘输入 hook</td></tr>
+                    <tr><td><code>ink/hooks/use-selection.ts</code></td><td>~200</td><td>文本选择 hook</td></tr>
+                    <tr><td><code>ink/termio/</code></td><td>~600</td><td>ANSI 序列库（CSI/DEC/OSC/SGR）</td></tr>
+                    <tr><td><code>screens/REPL.tsx</code></td><td>~2000</td><td>主 REPL 屏幕</td></tr>
+                    <tr><td><code>components/PromptInput.tsx</code></td><td>~1500</td><td>用户输入组件</td></tr>
+                    <tr><td><code>components/VirtualMessageList.tsx</code></td><td>~500</td><td>虚拟消息列表</td></tr>
+                    <tr><td><code>components/Messages.tsx</code></td><td>~800</td><td>消息列表管理与渲染</td></tr>
+                    <tr><td><code>components/design-system/</code></td><td>~1000</td><td>设计系统（ThemeProvider/ThemedText/ThemedBox 等 14 个文件）</td></tr>
+                    <tr><td><code>components/messages/</code></td><td>~3000</td><td>30+ 消息类型组件</td></tr>
+                </tbody>
+            </table>
+        </section>
+        <footer style="text-align:center; padding:32px 0 20px; margin-top:48px; border-top:1px solid var(--border); color:var(--text-secondary); font-size:13px; line-height:2;">
+        <div style="margin-bottom:4px;">⚠️ 免责声明</div>
+        本文仅用于技术学习和架构分析目的。源码分析基于公开泄漏的代码，所有商标和版权归 <a href="https://www.anthropic.com" style="color:var(--indigo);">Anthropic</a> 所有。未经授权不得用于商业用途。
+    </footer>
+    </main>
+</body>
+</html>

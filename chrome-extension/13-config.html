@@ -1,0 +1,944 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>配置与迁移系统 - Claude Code 源码分析</title>
+    <link rel="stylesheet" href="shared/styles.css">
+</head>
+<body>
+    <nav class="sidebar">
+<div class="sidebar-header"><div class="logo">CC</div><div><div class="sidebar-title">Claude Code</div><div class="sidebar-subtitle">源码深度分析</div></div></div>
+        <div class="nav-section-title">总览</div>
+        <a href="reading-guide.html" class="nav-link">阅读指南</a>
+        <a href="index.html" class="nav-link">架构全景</a>
+        <a href="dependency-map.html" class="nav-link">模块依赖图</a>
+        <a href="vertical-agent-guide.html" class="nav-link">垂直 Agent 设计指南</a>
+<div class="nav-section-title">核心流程</div>
+<a href="00-startup.html" class="nav-link">启动链路</a>
+<a href="01-query-loop.html" class="nav-link">Query 循环</a>
+<a href="flows/query-lifecycle.html" class="nav-link">查询生命周期</a>
+<div class="nav-section-title">核心机制</div>
+<a href="02-tool-dispatch.html" class="nav-link">工具调度</a>
+<a href="03-permissions.html" class="nav-link">权限系统</a>
+<a href="03b-security-hardening.html" class="nav-link">风控与安全加固</a>
+<a href="04-agent-arch.html" class="nav-link">Agent 架构</a>
+<a href="11-hooks.html" class="nav-link">Hook 机制</a>
+<div class="nav-section-title">扩展体系</div>
+<a href="05-mcp.html" class="nav-link">MCP 体系</a>
+<a href="07-plugins.html" class="nav-link">插件系统</a>
+<a href="08-commands.html" class="nav-link">命令系统</a>
+<div class="nav-section-title">数据与服务</div>
+<a href="06-context-mgmt.html" class="nav-link">上下文管理</a>
+<a href="10-services.html" class="nav-link">服务层</a>
+<a href="15-cost-limits.html" class="nav-link">成本与限流</a>
+<div class="nav-section-title">界面与配置</div>
+<a href="09-ui.html" class="nav-link">UI 交互层</a>
+<a href="13-config.html" class="nav-link active">配置与迁移</a>
+<div class="nav-section-title">外围能力</div>
+<a href="12-external.html" class="nav-link">外部集成</a>
+<a href="14-native.html" class="nav-link">Native 能力</a>
+<div class="nav-section-title">安全专题</div>
+<a href="16-anti-distillation.html" class="nav-link">反蒸馏与输出保护</a>
+<a href="17-buddy.html" class="nav-link">Buddy 宠物系统</a>
+<div class="nav-section-title">数据专题</div>
+<a href="18-telemetry.html" class="nav-link">遥测与用户画像</a>
+<div class="nav-section-title">流程图</div>
+<a href="flows/tool-execution.html" class="nav-link">工具执行流程</a>
+<a href="flows/agent-collab.html" class="nav-link">Agent 协作流程</a>
+</nav>
+    <main class="content">
+        <header class="page-header">
+            <span class="breadcrumb"><a href="index.html">源码分析</a></span>
+            <h1>配置与迁移系统</h1>
+            <p class="subtitle">五层配置层级、Zod Schema 验证、自动迁移、输出样式与快捷键系统</p>
+        </header>
+
+        <nav class="page-toc">
+    <div class="page-toc-title">页面导航</div>
+        <a href="#overview"><span class="toc-dot dot-overview"></span>职责概述</a>
+        <a href="#architecture"><span class="toc-dot dot-arch"></span>架构设计</a>
+        <a href="#dataflow"><span class="toc-dot dot-data"></span>数据流</a>
+        <a href="#interfaces"><span class="toc-dot dot-arch"></span>核心接口</a>
+        <a href="#patterns"><span class="toc-dot dot-arch"></span>设计模式</a>
+        <a href="#dev-guide"><span class="toc-dot dot-code"></span>开发者指南</a>
+        <a href="#arch-guide"><span class="toc-dot dot-arch"></span>架构师指南</a>
+        <a href="#topology"><span class="toc-dot dot-data"></span>处理拓扑图</a>
+        <a href="#core-flow"><span class="toc-dot dot-data"></span>核心流程详解</a>
+        <a href="#design-essence"><span class="toc-dot dot-design"></span>设计精华</a>
+        <a href="#agent-practice"><span class="toc-dot dot-practice"></span>Agent 实践借鉴</a>
+        <a href="#code-index"><span class="toc-dot dot-code"></span>代码索引</a>
+</nav>
+
+        <section id="overview" class="card">
+            <h2>职责概述</h2>
+
+            <p><strong>解决的问题：</strong>每个用户、每个项目对 CC 的行为偏好都不同——允许哪些工具、用哪个模型、什么格式输出、哪些快捷键。需要一个配置系统记住这些偏好，并且在不同版本升级时自动迁移旧配置，不会因为格式变了就挂掉。</p>
+            <p><strong>应用场景：</strong>① 用户设置"总是允许读文件但写文件要确认" ② 项目级配置 <code>.claude/settings.json</code> 定义团队共享的工具权限 ③ CC 升级后自动把旧格式配置迁移到新格式 ④ 用户自定义快捷键映射 ⑤ 组织管理员下发统一策略覆盖个人配置。</p>
+            <p><strong>一句话理解：</strong>就像 VS Code 的 settings.json——个人设置、项目设置、工作区设置分层叠加，升级时自动迁移。</p>
+        </section>
+
+        <section id="architecture" class="card">
+            <h2>架构设计</h2>
+
+            <h3>配置层级图</h3>
+            <div class="layer-diagram">
+                <div class="layer layer-security">
+                    <div class="layer-header">策略层（最高优先级）— policySettings</div>
+                    <div class="layer-body">
+                        <div class="layer-component highlight">远程托管设置（API 下发）</div>
+                        <div class="layer-component">MDM 管理设置（macOS plist / Windows HKLM）</div>
+                        <div class="layer-component">managed-settings.json + managed-settings.d/*.json</div>
+                        <div class="layer-component">HKCU 注册表设置（最低策略层）</div>
+                    </div>
+                </div>
+                <div class="layer-arrow">&#9660; 覆盖</div>
+                <div class="layer layer-orchestration">
+                    <div class="layer-header">CLI 标志层 — flagSettings</div>
+                    <div class="layer-body">
+                        <div class="layer-component highlight">--settings &lt;path&gt; 指定的设置文件</div>
+                        <div class="layer-component">SDK 内联设置（getFlagSettingsInline）</div>
+                    </div>
+                </div>
+                <div class="layer-arrow">&#9660; 覆盖</div>
+                <div class="layer layer-data">
+                    <div class="layer-header">项目本地层 — localSettings</div>
+                    <div class="layer-body">
+                        <div class="layer-component highlight">.claude/settings.local.json（gitignored）</div>
+                    </div>
+                </div>
+                <div class="layer-arrow">&#9660; 覆盖</div>
+                <div class="layer layer-engine">
+                    <div class="layer-header">项目共享层 — projectSettings</div>
+                    <div class="layer-body">
+                        <div class="layer-component highlight">.claude/settings.json（提交到版本库）</div>
+                    </div>
+                </div>
+                <div class="layer-arrow">&#9660; 覆盖</div>
+                <div class="layer layer-entry">
+                    <div class="layer-header">用户全局层（最低优先级）— userSettings</div>
+                    <div class="layer-body">
+                        <div class="layer-component highlight">~/.claude/settings.json</div>
+                        <div class="layer-component">~/.claude/cowork_settings.json（cowork 模式）</div>
+                    </div>
+                </div>
+            </div>
+
+            <h3>子系统架构</h3>
+            <div class="three-col">
+                <div class="component-box">
+                    <div class="name">Settings Engine</div>
+                    <div class="desc">配置读取、合并、验证、写入</div>
+                    <span class="badge badge-core">核心</span>
+                </div>
+                <div class="component-box">
+                    <div class="name">Migration System</div>
+                    <div class="desc">版本升级自动配置迁移</div>
+                    <span class="badge badge-data">数据</span>
+                </div>
+                <div class="component-box">
+                    <div class="name">Output Styles</div>
+                    <div class="desc">可定制的模型输出风格</div>
+                    <span class="badge badge-ui">UI</span>
+                </div>
+                <div class="component-box">
+                    <div class="name">Keybindings</div>
+                    <div class="desc">上下文感知的快捷键系统</div>
+                    <span class="badge badge-ext">扩展</span>
+                </div>
+            </div>
+        </section>
+
+        <section id="dataflow" class="card">
+            <h2>核心数据流</h2>
+
+            <h3>配置加载流程</h3>
+            <div class="flow-chart">
+                <div class="flow-step">
+                    <div class="flow-step-title">1. 按层级加载</div>
+                    <div class="flow-step-desc"><code>getSettingsForSource(source)</code> 按源类型读取对应文件。策略层优先级：remote > MDM > file > HKCU</div>
+                </div>
+                <div class="flow-arrow">&rarr;</div>
+                <div class="flow-step">
+                    <div class="flow-step-title">2. Zod Schema 验证</div>
+                    <div class="flow-step-desc"><code>SettingsSchema().safeParse(data)</code> 验证 JSON 结构。无效权限规则被 <code>filterInvalidPermissionRules()</code> 过滤，不阻塞整文件</div>
+                </div>
+                <div class="flow-arrow">&rarr;</div>
+                <div class="flow-step">
+                    <div class="flow-step-title">3. 文件缓存</div>
+                    <div class="flow-step-desc"><code>settingsCache.ts</code> 缓存解析结果，<code>clone()</code> 防止调用者污染缓存</div>
+                </div>
+                <div class="flow-arrow">&rarr;</div>
+                <div class="flow-step">
+                    <div class="flow-step-title">4. 合并生效</div>
+                    <div class="flow-step-desc"><code>getInitialSettings()</code> 按优先级 mergeWith 各层。策略层 > 标志层 > 本地层 > 项目层 > 用户层</div>
+                </div>
+            </div>
+
+            <h3>配置写入流程</h3>
+            <div class="flow-chart">
+                <div class="flow-step">
+                    <div class="flow-step-title">1. 选择源</div>
+                    <div class="flow-step-desc">policySettings 和 flagSettings 不可写（只读保护）</div>
+                </div>
+                <div class="flow-arrow">&rarr;</div>
+                <div class="flow-step">
+                    <div class="flow-step-title">2. 读取现有值</div>
+                    <div class="flow-step-desc">bypass 缓存直接读取文件，避免 mergeWith 污染缓存对象</div>
+                </div>
+                <div class="flow-arrow">&rarr;</div>
+                <div class="flow-step">
+                    <div class="flow-step-title">3. lodash mergeWith 合并</div>
+                    <div class="flow-step-desc">增量更新：只修改指定键，保留其他配置不变。<code>undefined</code> 值触发删除</div>
+                </div>
+                <div class="flow-arrow">&rarr;</div>
+                <div class="flow-step">
+                    <div class="flow-step-title">4. 写入 + 缓存失效</div>
+                    <div class="flow-step-desc"><code>resetSettingsCache()</code> 清除所有缓存，确保下次读取反映新值</div>
+                </div>
+            </div>
+
+            <h3>迁移流程</h3>
+            <div class="flow-chart vertical">
+                <div class="flow-step">
+                    <div class="flow-step-title">migrateAutoUpdatesToSettings</div>
+                    <div class="flow-step-desc">将 globalConfig.autoUpdates=false 迁移到 settings.json 的 env.DISABLE_AUTOUPDATER，保留用户意图</div>
+                </div>
+                <div class="flow-arrow">&darr;</div>
+                <div class="flow-step">
+                    <div class="flow-step-title">migrateFennecToOpus</div>
+                    <div class="flow-step-desc">将旧的 fennec 模型别名（fennec-latest → opus）迁移到新名称，仅修改 userSettings</div>
+                </div>
+                <div class="flow-arrow">&darr;</div>
+                <div class="flow-step">
+                    <div class="flow-step-title">migrateSonnet1mToSonnet45 → migrateSonnet45ToSonnet46</div>
+                    <div class="flow-step-desc">链式迁移：将显式 Sonnet 4.5 字符串迁移到 'sonnet' 别名（自动解析到最新版）</div>
+                </div>
+                <div class="flow-arrow">&darr;</div>
+                <div class="flow-step">
+                    <div class="flow-step-title">migrateOpusToOpus1m / migrateLegacyOpusToCurrent</div>
+                    <div class="flow-step-desc">Opus 模型版本迁移，确保用户始终使用最新可用模型</div>
+                </div>
+            </div>
+        </section>
+
+        <section id="interfaces" class="card">
+            <h2>关键类型与接口</h2>
+
+            <h3>SettingSource — 配置来源类型</h3>
+            <pre><code>// utils/settings/constants.ts:7-22
+export const SETTING_SOURCES = [
+  'userSettings',     // ~/.claude/settings.json
+  'projectSettings',  // .claude/settings.json
+  'localSettings',    // .claude/settings.local.json
+  'flagSettings',     // --settings 指定的文件
+  'policySettings',   // managed-settings.json / MDM / remote
+] as const
+export type SettingSource = (typeof SETTING_SOURCES)[number]</code></pre>
+
+            <h3>SettingsSchema — Zod 验证</h3>
+            <pre><code>// utils/settings/types.ts — 核心验证 Schema
+export const PermissionsSchema = lazySchema(() =>
+  z.object({
+    allow: z.array(PermissionRuleSchema()).optional(),
+    deny: z.array(PermissionRuleSchema()).optional(),
+    ask: z.array(PermissionRuleSchema()).optional(),
+    defaultMode: z.enum(PERMISSION_MODES).optional(),
+    disableBypassPermissionsMode: z.enum(['disable']).optional(),
+    additionalDirectories: z.array(z.string()).optional(),
+  }).passthrough()
+)</code></pre>
+
+            <h3>配置文件路径映射</h3>
+            <pre><code>// utils/settings/settings.ts:274-296
+export function getSettingsFilePathForSource(source: SettingSource): string {
+  switch (source) {
+    case 'userSettings':
+      return join(getClaudeConfigHomeDir(), getUserSettingsFilePath())
+    case 'projectSettings':
+      return join(getOriginalCwd(), '.claude', 'settings.json')
+    case 'localSettings':
+      return join(getOriginalCwd(), '.claude', 'settings.local.json')
+    case 'policySettings':
+      return getManagedSettingsFilePath()  // managed-settings.json
+    case 'flagSettings':
+      return getFlagSettingsPath()
+  }
+}</code></pre>
+
+            <h3>OutputStyleConfig — 输出样式</h3>
+            <pre><code>// constants/outputStyles.ts:11-23
+export type OutputStyleConfig = {
+  name: string
+  description: string
+  prompt: string                      // 注入到系统提示词的文本
+  source: SettingSource | 'built-in' | 'plugin'
+  keepCodingInstructions?: boolean
+  forceForPlugin?: boolean            // 插件自动激活此样式
+}</code></pre>
+
+            <h3>Keybinding Schema</h3>
+            <pre><code>// keybindings/schema.ts:12-32
+export const KEYBINDING_CONTEXTS = [
+  'Global', 'Chat', 'Autocomplete', 'Confirmation',
+  'Help', 'Transcript', 'HistorySearch', 'Task',
+  'ThemePicker', 'Settings', 'Tabs',
+  'Attachments', 'Footer', 'MessageSelector',
+  'DiffDialog', 'ModelPicker', 'Select', 'Plugin',
+] as const
+
+export const KEYBINDING_ACTIONS = [
+  'app:interrupt', 'app:exit', 'chat:submit',
+  'chat:cycleMode', 'chat:modelPicker',
+  'autocomplete:accept', 'confirm:yes', 'confirm:no',
+  // ... 80+ 个动作标识符
+] as const</code></pre>
+
+            <h3>迁移函数示例</h3>
+            <pre><code>// migrations/migrateSonnet45ToSonnet46.ts:29-67
+export function migrateSonnet45ToSonnet46(): void {
+  if (getAPIProvider() !== 'firstParty') return
+  if (!isProSubscriber() && !isMaxSubscriber()) return
+
+  const model = getSettingsForSource('userSettings')?.model
+  if (model !== 'claude-sonnet-4-5-20250929' &&
+      model !== 'claude-sonnet-4-5-20250929[1m]') return
+
+  const has1m = model.endsWith('[1m]')
+  updateSettingsForSource('userSettings', {
+    model: has1m ? 'sonnet[1m]' : 'sonnet'
+  })
+  // 记录迁移时间戳（非首次启动才通知）
+  if (getGlobalConfig().numStartups > 1) {
+    saveGlobalConfig(current => ({
+      ...current,
+      sonnet45To46MigrationTimestamp: Date.now()
+    }))
+  }
+}</code></pre>
+        </section>
+
+        <section id="patterns" class="card">
+            <h2>设计模式与亮点</h2>
+
+            <h3>1. First-Source-Wins 策略（策略层）</h3>
+            <p>策略层（policySettings）使用"首个非空源获胜"而非"合并覆盖"：</p>
+            <pre><code>// utils/settings/settings.ts:322-345
+if (source === 'policySettings') {
+  const remote = getRemoteManagedSettingsSyncFromCache()
+  if (remote && Object.keys(remote).length > 0) return remote  // 最高
+
+  const mdm = getMdmSettings()
+  if (Object.keys(mdm.settings).length > 0) return mdm.settings
+
+  const { settings: file } = loadManagedFileSettings()
+  if (file) return file
+
+  const hkcu = getHkcuSettings()
+  if (Object.keys(hkcu.settings).length > 0) return hkcu.settings
+
+  return null
+}</code></pre>
+            <p>这确保了企业策略源的互斥性——远程 API 策略 > 本地 MDM > 文件策略，不会混搭。</p>
+
+            <h3>2. Drop-in 配置目录</h3>
+            <p>managed-settings.d/ 目录支持多个 JSON 文件独立管理策略片段（类似 systemd/sudoers 的 drop-in 约定）。
+            文件按字母序排序，后面的覆盖前面的。这让不同团队可以独立管理策略（如 10-otel.json、20-security.json）。</p>
+
+            <h3>3. 幂等迁移</h3>
+            <p>所有迁移函数都是幂等的——读取特定值、条件匹配才写入。不需要"已完成"标记。
+            例如 <code>migrateFennecToOpus</code> 只检查 userSettings.model 是否以 'fennec' 开头，已迁移的配置自然不匹配。</p>
+
+            <h3>4. 输出样式的 Markdown-as-Config</h3>
+            <p>自定义输出样式用 Markdown 文件定义，放在 <code>.claude/output-styles/</code> 或 <code>~/.claude/output-styles/</code>。
+            文件名即样式名，frontmatter 提供 name/description，正文成为注入系统提示词的 prompt 文本。
+            这让非技术用户也能创建定制样式。</p>
+
+            <h3>5. 快捷键的上下文感知解析</h3>
+            <p>快捷键系统按 <code>context</code>（如 'Chat'、'Autocomplete'、'Confirmation'）组织。
+            解析器在匹配时查找所有活跃上下文的绑定，最后一个匹配获胜（用户覆盖默认）。
+            支持 chord 序列（如 <code>ctrl+x ctrl+k</code>）和 <code>null</code> 解绑定。</p>
+
+            <h3>6. 缓存隔离</h3>
+            <p>配置系统的缓存策略精心设计：</p>
+            <ul>
+                <li><strong>文件级缓存</strong>：<code>getCachedParsedFile(path)</code> 按文件路径缓存解析结果</li>
+                <li><strong>源级缓存</strong>：<code>getCachedSettingsForSource(source)</code> 按源类型缓存合并后的设置</li>
+                <li><strong>会话缓存</strong>：<code>getSessionSettingsCache()</code> 缓存最终合并结果</li>
+                <li><strong>写入时全量清除</strong>：<code>resetSettingsCache()</code> 确保一致性</li>
+            </ul>
+        </section>
+
+        <section id="dev-guide" class="card developer">
+            <h2>开发者实践指南</h2>
+            <div class="info-box tip">新增配置项只需在 types.ts 的 SettingsSchema 中添加字段，系统自动处理验证和合并。</div>
+
+            <h3>添加新配置项</h3>
+            <p><strong>步骤 1</strong>：在 <code>utils/settings/types.ts</code> 的 Schema 中添加字段：</p>
+            <pre><code>// 在 SettingsSchema 中添加新字段
+myNewFeature: z.boolean().optional()
+  .describe('Enable the new feature')</code></pre>
+
+            <p><strong>步骤 2</strong>：在代码中通过 <code>getSettings_DEPRECATED()</code> 或 <code>getSettingsForSource()</code> 读取</p>
+            <pre><code>const settings = getSettings_DEPRECATED()
+const enabled = settings?.myNewFeature ?? false</code></pre>
+
+            <p><strong>步骤 3</strong>（可选）：通过 <code>/config</code> 面板暴露给用户</p>
+
+            <h3>添加配置迁移</h3>
+            <p>在 <code>migrations/</code> 目录创建新文件：</p>
+            <pre><code>// migrations/migrateOldToNew.ts
+export function migrateOldToNew(): void {
+  const settings = getSettingsForSource('userSettings')
+  if (settings?.oldKey === undefined) return    // 已迁移或未设置
+  updateSettingsForSource('userSettings', {
+    oldKey: undefined,    // 删除旧键
+    newKey: transform(settings.oldKey),
+  })
+}</code></pre>
+
+            <h3>添加自定义输出样式</h3>
+            <p>创建 <code>.claude/output-styles/my-style.md</code>：</p>
+            <pre><code>---
+name: My Style
+description: A custom output style for my team
+keep-coding-instructions: true
+---
+
+You are an assistant that always provides concise bullet-point answers.
+Focus on actionable steps, avoid lengthy explanations.</code></pre>
+
+            <h3>自定义快捷键</h3>
+            <p>编辑 <code>~/.claude/keybindings.json</code>：</p>
+            <pre><code>{
+  "$schema": "https://claude.ai/keybindings.schema.json",
+  "bindings": [
+    {
+      "context": "Chat",
+      "bindings": {
+        "ctrl+shift+s": "chat:stash",
+        "ctrl+j": null
+      }
+    }
+  ]
+}</code></pre>
+        </section>
+
+        <section id="arch-guide" class="card architect">
+            <h2>架构师决策指南</h2>
+
+            <h3>五层层级的设计意图</h3>
+            <p>配置层级的设计遵循"最小权限"原则：</p>
+            <ul>
+                <li><strong>userSettings</strong>（~/.claude/）：个人偏好，跨项目生效</li>
+                <li><strong>projectSettings</strong>（.claude/settings.json）：团队共享，提交到 Git，确保团队一致性</li>
+                <li><strong>localSettings</strong>（.claude/settings.local.json）：个人本地偏好，不提交 Git</li>
+                <li><strong>flagSettings</strong>（--settings）：CI/CD 和脚本场景的一次性配置</li>
+                <li><strong>policySettings</strong>（managed-settings.json）：企业管理员强制策略，不可被用户覆盖</li>
+            </ul>
+            <p>策略层的"首个源获胜"（而非合并）是企业场景的关键需求——IT 管理员需要确定性地知道哪条策略生效。</p>
+
+            <h3>迁移系统的幂等性设计</h3>
+            <p>迁移函数没有版本号或完成标记。它们依赖<strong>条件守卫</strong>实现幂等：
+            读取特定值，不匹配则跳过。这意味着迁移可以安全地重复执行（如多次启动），也意味着旧迁移函数可以在新版本中删除——
+            当目标值不再存在时，守卫条件自然不满足。</p>
+
+            <h3>输出样式作为提示词工程</h3>
+            <div class="info-box info">
+                输出样式本质上是<strong>系统提示词的增量注入</strong>。每个样式的 <code>prompt</code> 字段在查询时被追加到系统提示词末尾。
+                <code>keepCodingInstructions</code> 控制是否保留默认的编码指令。这种设计让输出定制成为一种"提示词模板"机制，
+                而非代码层面的配置。
+            </div>
+
+            <h3>快捷键系统的扩展性</h3>
+            <p>快捷键系统使用上下文（context）隔离，新增 UI 场景只需：</p>
+            <ol>
+                <li>在 <code>schema.ts</code> 的 <code>KEYBINDING_CONTEXTS</code> 添加新上下文名称</li>
+                <li>在 <code>defaultBindings.ts</code> 添加默认绑定</li>
+                <li>在组件中通过 <code>useKeybinding('action', handler)</code> 注册</li>
+            </ol>
+            <p>用户通过 <code>keybindings.json</code> 覆盖任何默认绑定，<code>null</code> 值解绑。
+            <code>reservedShortcuts.ts</code> 阻止用户重新绑定 ctrl+c/ctrl+d 等关键快捷键。</p>
+
+            <h3>性能考量</h3>
+            <ul>
+                <li><strong>Schema 编译</strong>：<code>lazySchema(() => ...)</code> 延迟 Zod schema 编译到首次使用，减少启动时间</li>
+                <li><strong>文件读取</strong>：缓存 + clone 策略避免重复 I/O 和缓存污染</li>
+                <li><strong>mergeWith</strong>：使用 lodash 的自定义合并器处理数组替换（而非深度合并）</li>
+                <li><strong>内部写入标记</strong>：<code>markInternalWrite()</code> 区分用户操作和程序更新，避免触发不必要的 watcher</li>
+            </ul>
+        </section>
+
+        <section id="topology" class="card">
+            <h2><span class="icon" style="background:rgba(139,92,246,.15);color:var(--purple);">◈</span> 可视化处理拓扑图</h2>
+
+            <!-- Phase 1: 配置加载与合并 -->
+            <h3 style="margin-top:8px;">Phase 1 — 五层配置加载与深合并</h3>
+            <p>配置系统从最低优先级到最高优先级逐层叠加。<code>loadSettingsFromDisk()</code> 是核心入口，遍历所有配置源并深合并。</p>
+            <div class="fc">
+                <div class="fc-center">
+                    <div class="fn n-start">loadSettingsFromDisk()<span class="sub">settings.ts:645 — 配置加载入口</span></div>
+                    <div class="vc s20"></div>
+
+                    <div class="fn n-process w">插件设置基座<span class="sub">getPluginSettingsBase() — 仅 allowlisted key（如 agent）</span><span class="sub">settings.ts:660-668</span></div>
+                    <div class="vc s20"></div>
+
+                    <div class="fn n-check ww">策略设置 — 首源获胜 (First Source Wins)<span class="sub">互斥策略：Remote Managed → MDM → managed-settings.json → HKCU</span><span class="sub">settings.ts:675-739</span></div>
+                    <div class="vc s20"></div>
+
+                    <div class="fc-row" style="gap:4px;">
+                        <div class="fn n-process" style="font-size:10px;max-width:100px;">Remote API<span class="sub">最高优先</span></div>
+                        <div class="hc-arrow s30 amber"><span class="hc-label" style="color:var(--amber);">空?</span></div>
+                        <div class="fn n-process" style="font-size:10px;max-width:100px;">MDM<span class="sub">HKLM/plist</span></div>
+                        <div class="hc-arrow s30 amber"><span class="hc-label" style="color:var(--amber);">空?</span></div>
+                        <div class="fn n-process" style="font-size:10px;max-width:100px;">JSON 文件<span class="sub">managed-*.json</span></div>
+                        <div class="hc-arrow s30 amber"><span class="hc-label" style="color:var(--amber);">空?</span></div>
+                        <div class="fn n-process" style="font-size:10px;max-width:100px;">HKCU<span class="sub">注册表</span></div>
+                    </div>
+                    <div style="font-size:10px;color:var(--text-muted);margin:4px 0;text-align:center;">首个非空源获胜，后续源跳过 — 策略源互斥</div>
+                    <div class="vc s20"></div>
+
+                    <div class="fn n-check w">逐源读取 + Zod Schema 验证<span class="sub">parseSettingsFile() → SettingsSchema().safeParse()</span><span class="sub">settings.ts:741-790</span></div>
+                    <div class="vc s20"></div>
+
+                    <div class="fc-row" style="gap:6px;">
+                        <div class="fn n-process" style="max-width:120px;font-size:11px;">userSettings<span class="sub">~/.claude/settings.json</span></div>
+                        <div class="hc s20"></div>
+                        <div class="fn n-process" style="max-width:120px;font-size:11px;">projectSettings<span class="sub">.claude/settings.json</span></div>
+                        <div class="hc s20"></div>
+                        <div class="fn n-process" style="max-width:120px;font-size:11px;">localSettings<span class="sub">.claude/settings.local.json</span></div>
+                        <div class="hc s20"></div>
+                        <div class="fn n-process" style="max-width:120px;font-size:11px;">flagSettings<span class="sub">--settings &lt;path&gt;</span></div>
+                    </div>
+                    <div style="font-size:10px;color:var(--text-muted);margin:4px 0;text-align:center;">文件源叠加 — 所有源参与合并，高优先级覆盖低优先级同名字段</div>
+                    <div class="vc s20"></div>
+
+                    <div class="fn n-process w">深合并 — lodash mergeWith<span class="sub">settingsMergeCustomizer() — 数组替换（非拼接）</span><span class="sub">settings.ts:538-547</span></div>
+                    <div class="vc s20"></div>
+
+                    <div class="fn n-auto w">会话级缓存 + 错误收集<span class="sub">resetSettingsCache() 清空 → seenFiles 路径去重 → allErrors 去重</span><span class="sub">settingsCache.ts:7-13</span></div>
+                </div>
+            </div>
+
+            <!-- Phase 2: 写入与迁移 -->
+            <h3 style="margin-top:1.5em;">Phase 2 — 配置写入与迁移</h3>
+            <p>写入流程绕过缓存直接读取文件，迁移函数按序执行且幂等。</p>
+            <div class="fc">
+                <div class="fc-center">
+                    <div class="fn n-start">updateSettingsForSource()<span class="sub">settings.ts:416-524</span></div>
+                    <div class="vc s20"></div>
+
+                    <div class="fn n-check w">目标源是否可写?<span class="sub">policySettings / flagSettings 只读保护</span></div>
+                    <div class="vc s16"></div>
+
+                    <div class="fc-row">
+                        <div class="fn n-deny" style="font-size:11px;">拒绝写入<span class="sub">策略/标志源不可写</span></div>
+                        <div class="hc s20"></div>
+                        <div class="fn n-process" style="font-size:11px;">绕过缓存读取文件<span class="sub">bypass cache</span></div>
+                    </div>
+                    <div class="vc s20"><span class="vc-label">可写 ↓</span></div>
+
+                    <div class="fn n-process w">mergeWith 增量合并<span class="sub">undefined 值触发删除键</span></div>
+                    <div class="vc s20"></div>
+
+                    <div class="fn n-check w">Zod 验证合并结果<span class="sub">SettingsSchema().safeParse()</span></div>
+                    <div class="vc s20"></div>
+
+                    <div class="fc-row">
+                        <div class="fn n-process w">原子写入 JSON<span class="sub">markInternalWrite() 标记</span></div>
+                        <div class="hc-arrow s40"></div>
+                        <div class="fn n-auto w">resetSettingsCache()<span class="sub">全量清除缓存</span></div>
+                    </div>
+                    <div class="vc s24"></div>
+
+                    <div class="fn n-start">迁移执行入口<span class="sub">migrations/ — 每次版本升级按序执行</span></div>
+                    <div class="vc s16"></div>
+
+                    <div class="fc-row" style="gap:8px;">
+                        <div class="fn n-process" style="max-width:130px;font-size:11px;">migrateAutoUpdates<span class="sub">env → settings</span></div>
+                        <div class="hc-arrow s30"></div>
+                        <div class="fn n-process" style="max-width:130px;font-size:11px;">migrateFennecToOpus<span class="sub">旧模型名</span></div>
+                        <div class="hc-arrow s30"></div>
+                        <div class="fn n-process" style="max-width:130px;font-size:11px;">migrateSonnet45→46<span class="sub">链式迁移</span></div>
+                    </div>
+                    <div class="vc s16"></div>
+
+                    <div class="fc-row">
+                        <div class="fn n-auto" style="font-size:11px;">条件匹配 → 写入<span class="sub">幂等：已迁移不触发</span></div>
+                        <div class="hc s20"></div>
+                        <div class="fn n-process" style="font-size:11px;">条件不匹配 → 跳过<span class="sub">无副作用</span></div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Phase 3: 双策略对比 -->
+            <h3 style="margin-top:1.5em;">Phase 3 — 策略互斥 vs 文件叠加</h3>
+            <div class="fc">
+                <div class="fc-center">
+                    <div class="compare">
+                        <div class="compare-col">
+                            <div class="compare-label" style="color:var(--red);">策略源 — 互斥（首源获胜）</div>
+                            <div class="fn n-process" style="font-size:11px;border-color:var(--red);">Remote Managed<span class="sub">API 下发</span></div>
+                            <div class="vc s12 red"><span class="vc-label" style="color:var(--green);">有内容 → 停止</span></div>
+                            <div class="fn n-process" style="font-size:11px;border-color:var(--red);">MDM<span class="sub">HKLM / plist</span></div>
+                            <div class="vc s12 red"><span class="vc-label" style="color:var(--green);">有内容 → 停止</span></div>
+                            <div class="fn n-process" style="font-size:11px;border-color:var(--red);">managed-settings.json<span class="sub">drop-in 目录</span></div>
+                            <div class="vc s12 red"><span class="vc-label" style="color:var(--green);">有内容 → 停止</span></div>
+                            <div class="fn n-process" style="font-size:11px;border-color:var(--red);">HKCU 注册表<span class="sub">最低策略</span></div>
+                            <div style="font-size:10px;color:var(--text-muted);margin-top:6px;text-align:center;">单一权威源<br>组织管控确定性</div>
+                        </div>
+                        <div class="compare-col">
+                            <div class="compare-label" style="color:var(--blue);">文件源 — 叠加（深合并）</div>
+                            <div class="fn n-process" style="font-size:11px;">userSettings<span class="sub">~/.claude/</span></div>
+                            <div class="vc s12 blue"><span class="vc-label">mergeWith ↓</span></div>
+                            <div class="fn n-process" style="font-size:11px;">projectSettings<span class="sub">.claude/</span></div>
+                            <div class="vc s12 blue"><span class="vc-label">mergeWith ↓</span></div>
+                            <div class="fn n-process" style="font-size:11px;">localSettings<span class="sub">.claude/*.local</span></div>
+                            <div class="vc s12 blue"><span class="vc-label">mergeWith ↓</span></div>
+                            <div class="fn n-process" style="font-size:11px;">flagSettings<span class="sub">--settings</span></div>
+                            <div style="font-size:10px;color:var(--text-muted);margin-top:6px;text-align:center;">多层组合<br>用户灵活定制</div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <div class="info-box info"><strong>拓扑总结</strong>：配置系统采用双合并哲学——策略源互斥确保企业管控的单一权威性，文件源叠加允许用户在不同粒度层灵活定制。Zod Schema 延迟编译优化启动性能，幂等迁移消除版本状态管理复杂性。</div>
+        </section>
+
+        <section id="core-flow" class="card">
+            <h2><span class="icon" style="background:rgba(6,182,212,.15);color:var(--cyan);">⇉</span> 核心处理流程详解</h2>
+            <p>配置系统的核心是 <strong>五层合并</strong> 流程——从最低优先级的插件设置到最高优先级的 CLI 标志，逐层叠加并深合并。整个流程围绕 <code>loadSettingsFromDisk()</code>（settings.ts:645）展开，每次调用都会遍历所有启用的配置源。</p>
+            <div class="flow-chart vertical">
+                <div class="flow-step highlight">
+                    <div class="flow-step-title">1. 插件设置基座</div>
+                    <div class="flow-step-desc"><code>loadSettingsFromDisk()</code> 在 L660-668 以插件设置为最低优先级基座。插件设置只包含 allowlisted 的 key（如 agent），通过 <code>getPluginSettingsBase()</code> 从 plugin 配置中提取 — <code>settings.ts:660-668</code></div>
+                </div>
+                <div class="flow-arrow">↓</div>
+                <div class="flow-step highlight">
+                    <div class="flow-step-title">2. 策略设置——首源获胜</div>
+                    <div class="flow-step-desc">策略设置采用 <strong>"first source wins"</strong> 策略（L675-739），按优先级依次尝试：远程管理设置（remote managed）→ MDM（HKLM/macOS plist）→ managed-settings.json 文件 → HKCU 注册表。一旦某个源有内容，后续低优先级源直接跳过。每个源都经过 <code>SettingsSchema().safeParse()</code> 验证（L684-686）— <code>settings.ts:675-739</code></div>
+                </div>
+                <div class="flow-arrow">↓</div>
+                <div class="flow-step">
+                    <div class="flow-step-title">3. 逐源读取与 Zod 验证</div>
+                    <div class="flow-step-desc">对每个启用的源（userSettings/projectSettings/localSettings/flagSettings），调用 <code>parseSettingsFile()</code>（L749）读取并解析 JSON 文件。解析结果通过 <code>lazySchema(() => SettingsSchema)</code> 延迟编译的 Zod schema 做运行时验证。验证错误被收集到 <code>allErrors</code> 数组，不影响有效配置的加载 — <code>settings.ts:741-790</code></div>
+                </div>
+                <div class="flow-arrow">↓</div>
+                <div class="flow-step">
+                    <div class="flow-step-title">4. 深合并——lodash mergeWith + 数组替换</div>
+                    <div class="flow-step-desc">所有源按优先级顺序通过 <code>lodash mergeWith</code> 深合并。<code>settingsMergeCustomizer()</code>（L538-547）定义了自定义合并策略：<strong>数组执行替换而非拼接</strong>——这确保了 <code>permissions.allow</code> 等数组字段的语义是"覆盖"而非"追加" — <code>settings.ts:538-547</code></div>
+                </div>
+                <div class="flow-arrow">↓</div>
+                <div class="flow-step">
+                    <div class="flow-step-title">5. 会话级缓存与会话重载</div>
+                    <div class="flow-step-desc">合并结果被缓存在会话级缓存中（<code>settingsCache.ts:7-13</code>），后续调用直接返回缓存。配置变更需要重启 CLI 才能生效。当需要确保磁盘最新状态时（如 <code>getSettingsWithSources()</code>），先调用 <code>resetSettingsCache()</code> 清空缓存再重新加载 — <code>settingsCache.ts:7-13</code>、<code>settings.ts:836-848</code></div>
+                </div>
+                <div class="flow-arrow">↓</div>
+                <div class="flow-step highlight">
+                    <div class="flow-step-title">6. 配置写入——merge + 验证 + 标记</div>
+                    <div class="flow-step-desc"><code>updateSettingsForSource()</code>（L416-524）负责写入：先读取目标源当前配置 → 用 <code>mergeWith</code> 合并新设置 → 通过 Zod schema 验证合并结果 → 原子写入 JSON 文件。写入后通过 <code>markInternalWrite()</code> 标记，区分用户手动编辑和程序更新，避免触发不必要的 watcher — <code>settings.ts:416-524</code></div>
+                </div>
+                <div class="flow-arrow">↓</div>
+                <div class="flow-step">
+                    <div class="flow-step-title">7. 迁移执行——版本升级自动转换</div>
+                    <div class="flow-step-desc">每次版本升级时，<code>migrations/</code> 目录下的迁移函数按序执行。每个迁移函数检测旧配置格式并自动转换：如 <code>migrateFennecToOpus.ts</code> 将旧模型名映射到新模型名，<code>migrateAutoUpdatesToSettings.ts</code> 将环境变量设置迁移到 settings.json。迁移是幂等的——重复执行不会产生副作用 — <code>migrations/</code></div>
+                </div>
+                <div class="flow-arrow">↓</div>
+                <div class="flow-step">
+                    <div class="flow-step-title">8. 错误收集与上报</div>
+                    <div class="flow-step-desc">所有源的验证错误通过文件路径 + JSON 路径 + 错误消息三元组去重（L731-735），最终汇总到 <code>SettingsWithErrors</code> 返回给上层。UI 层可以显示具体哪个文件的哪个字段有什么问题，帮助用户快速定位配置错误 — <code>settings.ts:730-735</code></div>
+                </div>
+            </div>
+            <div class="info-box info">配置系统的核心权衡是"读多写少"——合并操作只在首次加载和显式刷新时发生，运行时全部走会话缓存。策略设置的"首源获胜"策略与文件设置的"深合并"策略形成鲜明对比：策略源之间是互斥的（同一时间只有一个策略生效），而文件源之间是叠加的（每层都可以覆盖上层的部分字段）。</div>
+        </section>
+        <section id="design-essence" class="card">
+            <h2><span class="icon" style="background:rgba(245,158,11,.15);color:var(--amber);">★</span> 设计精华</h2>
+
+            <h3>1. 延迟 Schema 编译——lazySchema 模式</h3>
+            <p><code>SettingsSchema</code> 使用 <code>lazySchema(() => ...)</code>（types.ts）将 Zod schema 的编译延迟到首次使用。这是因为 SettingsSchema 非常庞大（1149 行类型定义），包含大量嵌套的 permission、hook、MCP server 子 schema。如果在模块加载时编译，会显著拖慢 CLI 启动时间。</p>
+            <div class="component-box">
+                <div class="name">lazySchema 延迟编译</div>
+                <div class="desc">将昂贵的 schema 编译推迟到首次实际验证时，避免启动时的无效开销</div>
+                <pre><code>// utils/settings/types.ts — 延迟 Zod schema 编译
+export const SettingsSchema = lazySchema(() =>
+  z.object({
+    permissions: z.union([...]).optional(),
+    hooks: HooksSchema.optional(),
+    mcpServers: z.record(...).optional(),
+    // ... 50+ 字段，嵌套 5+ 层
+  })
+)</code></pre>
+            </div>
+            <div class="info-box tip">lazySchema 模式在大型配置系统中特别有价值。Zod schema 的编译成本与 schema 复杂度成正比——对于有数百个字段的配置 schema，延迟编译可以节省数十毫秒的启动时间。关键实现是确保 lazy wrapper 本身足够轻量，否则延迟的意义就被抵消了。</div>
+
+            <h3>2. 策略源互斥 vs 文件源叠加——两种合并哲学</h3>
+            <p>配置系统同时使用了两种截然不同的合并策略：<strong>策略设置</strong>（policySettings）采用"首源获胜"——远程管理 > MDM > managed-settings.json > HKCU，一旦找到有内容的源就停止查找；<strong>文件设置</strong>（user/project/local/flag）采用"深合并叠加"——所有源都参与合并，高优先级源的字段覆盖低优先级源的同名字段。</p>
+            <div class="component-box">
+                <div class="name">双合并策略</div>
+                <div class="desc">策略互斥确保组织级管控的单一权威性；文件叠加允许用户在不同粒度层定制行为</div>
+                <pre><code>// settings.ts:675-739 — 策略源互斥（first source wins）
+if (source === 'policySettings') {
+  // 1. Remote (highest)
+  const remoteSettings = getRemoteManagedSettingsSyncFromCache()
+  if (remoteSettings && Object.keys(remoteSettings).length > 0) {
+    policySettings = SettingsSchema().safeParse(remoteSettings).data
+  }
+  // 2. MDM — 仅在 remote 无内容时检查
+  if (!policySettings) { policySettings = getMdmSettings().settings }
+  // 3. managed-settings.json — 仅在 MDM 无内容时检查
+  if (!policySettings) { policySettings = loadManagedFileSettings().settings }
+}
+
+// settings.ts:673-674 — 文件源叠加（deep merge all）
+for (const source of getEnabledSettingSources()) {
+  mergedSettings = mergeWith(mergedSettings, settings, settingsMergeCustomizer)
+}</code></pre>
+            </div>
+            <div class="info-box tip">这种双策略设计体现了"管控与自由的平衡"：组织管理员通过策略源设置不可逾越的边界（互斥 = 唯一权威），而用户在边界内通过文件源灵活定制（叠加 = 多层组合）。这种模式在企业级 SaaS 产品中非常普遍，Claude Code 通过清晰的代码结构将其显式化。</div>
+
+            <h3>3. 文件路径去重——跨源同一文件防御</h3>
+            <p>某些场景下不同配置源可能指向同一个文件（如 projectSettings 和 localSettings 在非项目目录时路径相同）。<code>seenFiles</code> Set（L746-747）确保每个物理文件只被解析一次，避免重复读取和验证。</p>
+            <div class="component-box">
+                <div class="name">文件路径去重</div>
+                <div class="desc">使用 resolve() 后的绝对路径作为去重键，防止同一文件被多个源重复加载</div>
+                <pre><code>// settings.ts:741-749
+const filePath = getSettingsFilePathForSource(source)
+if (filePath) {
+  const resolvedPath = resolve(filePath)
+  if (!seenFiles.has(resolvedPath)) {  // 路径去重
+    seenFiles.add(resolvedPath)
+    const { settings, errors } = parseSettingsFile(filePath)
+    // ...merge
+  }
+}</code></pre>
+            </div>
+            <div class="info-box tip">这是一个看似简单但经常被遗漏的边界条件。在 monorepo 或 symlink 环境下，不同配置源的路径解析可能收敛到同一个物理文件。不做去重会导致：重复的验证错误消息、重复的文件 I/O、以及合并时的优先级混乱。</div>
+
+            <h3>4. 迁移幂等性——版本无关的配置兼容</h3>
+            <p>每个迁移函数都是幂等的——重复执行不会改变配置状态。例如 <code>migrateFennecToOpus.ts</code> 只在检测到旧模型名时才替换，如果配置已经是新模型名则直接跳过。这使得迁移可以安全地在每次启动时运行，不需要记录"已执行的迁移"状态。</p>
+            <div class="component-box">
+                <div class="name">幂等迁移模式</div>
+                <div class="desc">每个迁移函数先检测条件，条件不满足时直接返回，不产生任何写入</div>
+                <pre><code>// migrations/migrateFennecToOpus.ts — 典型幂等迁移
+// 仅当 model 字段包含旧值时才更新
+if (settings.model === 'fennec') {
+  updateSettingsForSource('userSettings', { model: 'opus' })
+}</code></pre>
+            </div>
+            <div class="info-box tip">幂等迁移消除了"迁移状态管理"这个复杂性来源——不需要版本号、不需要迁移日志、不需要回滚机制。代价是每次启动都要执行所有迁移函数的检测逻辑，但由于这些检测都是简单的字符串比较或类型检查，开销可以忽略。这是"用 CPU 时间换代码简洁性"的典型案例。</div>
+        </section>
+
+        <section id="agent-practice" class="card">
+            <h2><span class="icon" style="background:rgba(34,197,94,.15);color:var(--green);">◈</span> Agent 实践借鉴 — 客服 Agent 配置管理设计</h2>
+
+            <h3>一、场景映射：客服 agent 的配置管理挑战</h3>
+            <p>SaaS 客服平台是典型的多租户系统：A 公司用自建 LLM（私有化部署），B 公司用 OpenAI API；A 公司的电话客服要求回复风格正式严谨，B 公司的在线客服偏好活泼亲切；坐席小王想自定义问候语，但不能改系统的 API 地址。CC 的三层配置（全局 → 项目 → 本地）完美映射到客服的三层：平台全局 → 租户 → 坐席个人。CC 的策略层互斥设计则对应平台方对租户的管控边界。</p>
+
+            <h3>二、借鉴 CC + 客服改造</h3>
+
+            <h4>实践 1：三层配置层级（借鉴 CC 全局/项目/本地分层）</h4>
+            <p>CC 用五个 SettingSource 实现了"全局默认 → 项目覆盖 → 本地定制"的分层体系。客服场景同样需要三层：Platform（平台默认配置）→ Tenant（租户覆盖）→ Agent（坐席个人配置），高优先级覆盖低优先级的同名字段。</p>
+            <pre><code>// 借鉴 settings.ts 的 SettingSource 分层设计
+type ConfigSource = 'platform' | 'tenant' | 'agent'
+
+interface CustomerServiceConfig {
+  model: string                    // 使用哪个 LLM
+  replyStyle: 'formal' | 'casual' | 'professional'
+  greeting: string                 // 问候语
+  maxRetries: number               // 最大重试次数
+  apiEndpoint: string              // LLM API 地址
+  allowedChannels: string[]        // 该租户开通的渠道
+  transferRules: TransferRule[]    // 转接人工的规则
+  systemPrompt: string             // 系统提示词
+}
+
+// 三层配置加载：platform → tenant → agent
+function loadEffectiveConfig(
+  tenantId: string, agentId: string,
+): CustomerServiceConfig {
+  // 第一层：平台默认配置（最低优先级）
+  const platformDefaults = loadPlatformConfig()
+  // 第二层：租户配置（覆盖平台默认）
+  const tenantConfig = loadTenantConfig(tenantId)
+  // 第三层：坐席个人配置（覆盖租户配置）
+  const agentConfig = loadAgentConfig(tenantId, agentId)
+
+  // 深合并：tenant 覆盖 platform，agent 覆盖 tenant
+  return deepMergeConfig(
+    deepMergeConfig(platformDefaults, tenantConfig),
+    agentConfig,
+  )
+}
+
+// 示例：平台默认用 sonnet，A 租户用自建 LLM，坐席小王不改模型
+// Platform: { model: 'sonnet', apiEndpoint: 'https://api.openai.com' }
+// Tenant A: { model: 'custom-llm', apiEndpoint: 'https://llm.company-a.com' }
+// Agent 小王: { greeting: '您好，我是小王' }  // 只改问候语
+// 最终结果: { model: 'custom-llm', apiEndpoint: 'https://llm.company-a.com',
+//             greeting: '您好，我是小王', ... }</code></pre>
+
+            <h4>实践 2：深层合并策略（借鉴 CC 的 mergeWith + 数组替换）</h4>
+            <p>CC 的 settingsMergeCustomizer 确保数组执行替换而非拼接。客服场景也有同样需求——<code>transferRules</code>（转接规则）在租户层配置了就应该完全替换平台默认规则，而不是追加。</p>
+            <pre><code>// 借鉴 settings.ts:538-547 的 settingsMergeCustomizer
+function deepMergeConfig&lt;T&gt;(base: T, override: Partial&lt;T&gt;): T {
+  return mergeWith({}, base, override, (baseVal, overVal) =&gt; {
+    // 数组执行替换，不拼接——转接规则的语义是"覆盖"而非"追加"
+    if (Array.isArray(baseVal) &amp;&amp; Array.isArray(overVal)) {
+      return overVal  // 租户的 transferRules 完全替换平台默认
+    }
+    // 字符串/数字等基本类型直接覆盖
+    if (typeof baseVal !== 'object' || baseVal === null) return overVal
+    // 对象递归合并
+    return undefined  // 让 mergeWith 默认递归
+  })
+}
+
+// 反例（错误做法）：用 Object.assign 或浅拷贝
+// Object.assign(platformDefaults, tenantConfig)
+// 问题：嵌套对象会被整体替换而非合并
+// 平台: { systemPrompt: { prefix: '你是客服', suffix: '请保持礼貌' } }
+// 租户: { systemPrompt: { prefix: '你是 A 公司的客服' } }
+// Object.assign 结果: { prefix: '你是 A 公司的客服' }  // suffix 丢了！
+// 深合并结果: { prefix: '你是 A 公司的客服', suffix: '请保持礼貌' }  // 正确</code></pre>
+
+            <h4>实践 3：配置热更新（借鉴 CC 的文件监听 + 缓存失效）</h4>
+            <p>CC 通过 resetSettingsCache() 在写入后清除缓存。客服场景更严格——10 万个在线会话的配置变更必须实时生效，不能重启 agent。</p>
+            <pre><code>// 借鉴 settingsCache.ts 的缓存失效 + 广播模式
+class TenantConfigManager {
+  private configCache = new Map&lt;string, { config: CustomerServiceConfig; version: number }&gt;()
+  private subscribers = new Map&lt;string, Set&lt;(config: CustomerServiceConfig) =&gt; void&gt;&gt;()
+
+  // 管理后台修改租户配置 → 触发热更新
+  async updateTenantConfig(tenantId: string, patch: Partial&lt;CustomerServiceConfig&gt;) {
+    // 1. 验证配置合法性
+    const validation = validateConfig(patch)
+    if (!validation.success) {
+      throw new Error(`配置校验失败：${validation.errors.map(e =&gt; e.message).join('; ')}`)
+    }
+    // 2. 写入数据库
+    await db.tenantConfigs.update(tenantId, patch)
+    // 3. 清除缓存（借鉴 resetSettingsCache）
+    const newConfig = this.reloadFromDB(tenantId)
+    // 4. 广播给该租户所有正在运行的 agent 实例
+    this.broadcastToAgents(tenantId, newConfig)
+  }
+
+  // 每个 agent 实例订阅自己租户的配置变更
+  subscribe(tenantId: string, callback: (config: CustomerServiceConfig) =&gt; void) {
+    if (!this.subscribers.has(tenantId)) {
+      this.subscribers.set(tenantId, new Set())
+    }
+    this.subscribers.get(tenantId)!.add(callback)
+    // 返回取消订阅函数
+    return () =&gt; this.subscribers.get(tenantId)?.delete(callback)
+  }
+
+  private broadcastToAgents(tenantId: string, config: CustomerServiceConfig) {
+    const agents = this.subscribers.get(tenantId)
+    agents?.forEach(cb =&gt; {
+      try { cb(config) } catch (e) { console.error('配置热更新回调失败', e) }
+    })
+  }
+}</code></pre>
+
+            <h4>实践 4：配置校验与友好错误提示（借鉴 CC 的 Zod 验证 + 错误收集）</h4>
+            <pre><code>// 借鉴 settings.ts 的 parseSettingsFile + 错误收集模式
+interface ConfigError {
+  field: string      // 'transferRules[2].condition'
+  message: string    // '条件表达式语法错误'
+  suggestion: string // '请参考文档：https://docs.example.com/rules'
+}
+
+function validateConfig(config: unknown): { success: boolean; errors: ConfigError[] } {
+  const result = CustomerServiceConfigSchema.safeParse(config)
+  if (result.success) return { success: true, errors: [] }
+
+  const errors: ConfigError[] = result.error.issues.map(issue =&gt; ({
+    field: issue.path.join('.'),
+    message: issue.message,
+    suggestion: getSuggestion(issue.path.join('.'), issue.message),
+  }))
+
+  return { success: false, errors }
+}
+
+// 友好提示，不是 "schema validation failed"
+function getSuggestion(field: string, _msg: string): string {
+  if (field === 'apiEndpoint') return '请输入完整的 HTTPS 地址，如 https://api.openai.com'
+  if (field.startsWith('transferRules')) return '转接规则格式：{ condition: "关键词", target: "技能组ID" }'
+  if (field === 'replyStyle') return '可选值：formal / casual / professional'
+  return '请参考配置文档'
+}</code></pre>
+
+            <h3>三、落地清单</h3>
+            <div class="two-col">
+                <div class="component-box">
+                    <div class="name" style="color:var(--green);">必须抄的</div>
+                    <div class="desc">
+                        <ul>
+                            <li><strong>分层配置 + 深层合并</strong>——Platform/Tenant/Agent 三层，用深合并而非浅拷贝，数组必须替换不拼接</li>
+                            <li><strong>配置校验</strong>——每个字段验证 + 友好错误提示，不是 "schema validation failed"</li>
+                            <li><strong>配置热更新</strong>——管理后台修改后广播给运行中的 agent 实例，不能要求重启</li>
+                        </ul>
+                    </div>
+                </div>
+                <div class="component-box">
+                    <div class="name" style="color:var(--text-muted);">不需要抄的</div>
+                    <div class="desc">
+                        <ul>
+                            <li><strong>lazySchema</strong>——客服场景 agent 启动不频繁（不像 CLI 每次命令都启动），可以启动时编译 schema</li>
+                            <li><strong>.claude/settings.local.json 概念</strong>——客服配置在管理后台数据库，不在本地文件系统</li>
+                            <li><strong>模型名迁移</strong>——CC 的 migrateFennecToOpus 是因为 API 模型名变了，客服场景的配置迁移需求不同</li>
+                        </ul>
+                    </div>
+                </div>
+            </div>
+
+            <h3>四、常见坑</h3>
+            <div class="info-box warning">
+                <ol>
+                    <li><strong>用 Object.assign 做配置合并</strong>——嵌套对象被整体替换而非合并，租户只想改 <code>systemPrompt.prefix</code> 却把 <code>systemPrompt.suffix</code> 丢了。必须用深层合并。</li>
+                    <li><strong>配置热更新丢失进行中的对话状态</strong>——配置变更后广播给 agent，但正在执行的对话可能用的是旧配置。必须做"新会话用新配置，旧会话保持旧配置"的灰度切换。</li>
+                    <li><strong>坐席个人配置覆盖了系统安全字段</strong>——坐席不应修改 <code>apiEndpoint</code> 或 <code>transferRules</code> 等系统配置。借鉴 CC 的策略层只读保护，用白名单控制坐席可修改的字段。</li>
+                    <li><strong>校验错误消息对运营人员不友好</strong>——运营人员不是开发者，"Expected string, received number" 毫无意义。必须为每个字段提供中文友好提示和修复建议。</li>
+                </ol>
+            </div>
+        </section>
+
+        <section id="code-index" class="card">
+            <h2>代码索引</h2>
+            <table>
+                <thead><tr><th>文件</th><th>行数</th><th>说明</th></tr></thead>
+                <tbody>
+                    <tr><td><code>utils/settings/settings.ts</code></td><td>~500</td><td>配置读取、合并、写入核心逻辑</td></tr>
+                    <tr><td><code>utils/settings/types.ts</code></td><td>~200</td><td>SettingsJson 类型、Zod Schema 定义</td></tr>
+                    <tr><td><code>utils/settings/constants.ts</code></td><td>~100</td><td>SETTING_SOURCES 定义、源名称映射</td></tr>
+                    <tr><td><code>utils/settings/validation.ts</code></td><td>~200</td><td>Zod 错误格式化、权限规则过滤</td></tr>
+                    <tr><td><code>utils/settings/settingsCache.ts</code></td><td>~150</td><td>多级缓存（文件/源/会话）</td></tr>
+                    <tr><td><code>utils/settings/managedPath.ts</code></td><td>~50</td><td>managed-settings.json 路径管理</td></tr>
+                    <tr><td><code>utils/settings/changeDetector.ts</code></td><td>~80</td><td>配置变更检测（文件 watcher）</td></tr>
+                    <tr><td><code>utils/settings/applySettingsChange.ts</code></td><td>~100</td><td>配置变更应用逻辑</td></tr>
+                    <tr><td><code>utils/config.ts</code></td><td>~400</td><td>全局配置管理（globalConfig）</td></tr>
+                    <tr><td><code>migrations/migrateAutoUpdatesToSettings.ts</code></td><td>~62</td><td>自动更新配置迁移</td></tr>
+                    <tr><td><code>migrations/migrateFennecToOpus.ts</code></td><td>~46</td><td>Fennec → Opus 模型名迁移</td></tr>
+                    <tr><td><code>migrations/migrateSonnet45ToSonnet46.ts</code></td><td>~68</td><td>Sonnet 4.5 → 4.6 别名迁移</td></tr>
+                    <tr><td><code>migrations/migrateOpusToOpus1m.ts</code></td><td>~40</td><td>Opus → Opus 1m 迁移</td></tr>
+                    <tr><td><code>migrations/migrateLegacyOpusToCurrent.ts</code></td><td>~40</td><td>旧版 Opus 到当前版迁移</td></tr>
+                    <tr><td><code>migrations/migrateReplBridgeEnabledToRemoteControlAtStartup.ts</code></td><td>~30</td><td>Bridge → RemoteControl 迁移</td></tr>
+                    <tr><td><code>constants/outputStyles.ts</code></td><td>~217</td><td>内置输出样式定义（default/Explanatory/Learning）</td></tr>
+                    <tr><td><code>outputStyles/loadOutputStylesDir.ts</code></td><td>~99</td><td>从 .claude/output-styles/ 加载自定义样式</td></tr>
+                    <tr><td><code>keybindings/defaultBindings.ts</code></td><td>~341</td><td>默认快捷键绑定（按上下文组织）</td></tr>
+                    <tr><td><code>keybindings/schema.ts</code></td><td>~237</td><td>Zod Schema、上下文/动作枚举</td></tr>
+                    <tr><td><code>keybindings/resolver.ts</code></td><td>~120</td><td>快捷键解析器（匹配 + chord 支持）</td></tr>
+                    <tr><td><code>keybindings/parser.ts</code></td><td>~100</td><td>快捷键字符串解析</td></tr>
+                    <tr><td><code>keybindings/useKeybinding.ts</code></td><td>~80</td><td>React hook：注册快捷键处理器</td></tr>
+                </tbody>
+            </table>
+        </section>
+        <footer style="text-align:center; padding:32px 0 20px; margin-top:48px; border-top:1px solid var(--border); color:var(--text-secondary); font-size:13px; line-height:2;">
+        <div style="margin-bottom:4px;">⚠️ 免责声明</div>
+        本文仅用于技术学习和架构分析目的。源码分析基于公开泄漏的代码，所有商标和版权归 <a href="https://www.anthropic.com" style="color:var(--indigo);">Anthropic</a> 所有。未经授权不得用于商业用途。
+    </footer>
+    </main>
+</body>
+</html>

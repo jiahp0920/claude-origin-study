@@ -1,0 +1,952 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>工具调度系统 - Claude Code 源码分析</title>
+    <link rel="stylesheet" href="shared/styles.css">
+</head>
+<body>
+    <nav class="sidebar">
+<div class="sidebar-header"><div class="logo">CC</div><div><div class="sidebar-title">Claude Code</div><div class="sidebar-subtitle">源码深度分析</div></div></div>
+        <div class="nav-section-title">总览</div>
+        <a href="reading-guide.html" class="nav-link">阅读指南</a>
+        <a href="index.html" class="nav-link">架构全景</a>
+        <a href="dependency-map.html" class="nav-link">模块依赖图</a>
+        <a href="vertical-agent-guide.html" class="nav-link">垂直 Agent 设计指南</a>
+<div class="nav-section-title">核心流程</div>
+<a href="00-startup.html" class="nav-link">启动链路</a>
+<a href="01-query-loop.html" class="nav-link">Query 循环</a>
+<a href="flows/query-lifecycle.html" class="nav-link">查询生命周期</a>
+<div class="nav-section-title">核心机制</div>
+<a href="02-tool-dispatch.html" class="nav-link active">工具调度</a>
+<a href="03-permissions.html" class="nav-link">权限系统</a>
+<a href="03b-security-hardening.html" class="nav-link">风控与安全加固</a>
+<a href="04-agent-arch.html" class="nav-link">Agent 架构</a>
+<a href="11-hooks.html" class="nav-link">Hook 机制</a>
+<div class="nav-section-title">扩展体系</div>
+<a href="05-mcp.html" class="nav-link">MCP 体系</a>
+<a href="07-plugins.html" class="nav-link">插件系统</a>
+<a href="08-commands.html" class="nav-link">命令系统</a>
+<div class="nav-section-title">数据与服务</div>
+<a href="06-context-mgmt.html" class="nav-link">上下文管理</a>
+<a href="10-services.html" class="nav-link">服务层</a>
+<a href="15-cost-limits.html" class="nav-link">成本与限流</a>
+<div class="nav-section-title">界面与配置</div>
+<a href="09-ui.html" class="nav-link">UI 交互层</a>
+<a href="13-config.html" class="nav-link">配置与迁移</a>
+<div class="nav-section-title">外围能力</div>
+<a href="12-external.html" class="nav-link">外部集成</a>
+<a href="14-native.html" class="nav-link">Native 能力</a>
+<div class="nav-section-title">安全专题</div>
+<a href="16-anti-distillation.html" class="nav-link">反蒸馏与输出保护</a>
+<a href="17-buddy.html" class="nav-link">Buddy 宠物系统</a>
+<div class="nav-section-title">数据专题</div>
+<a href="18-telemetry.html" class="nav-link">遥测与用户画像</a>
+<div class="nav-section-title">流程图</div>
+<a href="flows/tool-execution.html" class="nav-link">工具执行流程</a>
+<a href="flows/agent-collab.html" class="nav-link">Agent 协作流程</a>
+</nav>
+    <main class="content">
+        <header class="page-header">
+            <span class="breadcrumb"><a href="index.html">源码分析</a></span>
+            <h1>工具调度系统</h1>
+            <p class="subtitle">30+ 工具的注册、匹配、分发与执行机制——Claude Code 的核心能力层</p>
+        </header>
+
+        <nav class="page-toc">
+    <div class="page-toc-title">页面导航</div>
+        <a href="#overview"><span class="toc-dot dot-overview"></span>职责概述</a>
+        <a href="#architecture"><span class="toc-dot dot-arch"></span>架构设计</a>
+        <a href="#dataflow"><span class="toc-dot dot-data"></span>数据流</a>
+        <a href="#interfaces"><span class="toc-dot dot-arch"></span>核心接口</a>
+        <a href="#patterns"><span class="toc-dot dot-arch"></span>设计模式</a>
+        <a href="#dev-guide"><span class="toc-dot dot-code"></span>开发者指南</a>
+        <a href="#arch-guide"><span class="toc-dot dot-arch"></span>架构师指南</a>
+        <a href="#topology"><span class="toc-dot dot-data"></span>处理拓扑图</a>
+        <a href="#core-flow"><span class="toc-dot dot-data"></span>核心流程详解</a>
+        <a href="#design-essence"><span class="toc-dot dot-design"></span>设计精华</a>
+        <a href="#agent-practice"><span class="toc-dot dot-practice"></span>Agent 实践借鉴</a>
+        <a href="#code-index"><span class="toc-dot dot-code"></span>代码索引</a>
+</nav>
+
+        <section id="overview" class="card">
+            <h2>职责概述</h2>
+
+            <p><strong>解决的问题：</strong>模型说"我要读文件 X"或"我要运行命令 Y"，但这些意图只是一段文本。需要一个调度系统把模型的文本意图翻译成真实的文件操作、Shell 命令、网络请求，并把执行结果格式化后返回给模型。</p>
+            <p><strong>应用场景：</strong>① 模型请求读取代码文件 → 调度 FileRead 工具 → 返回文件内容 ② 模型请求运行测试 → 调度 Bash 工具 → 返回执行结果 ③ MCP 插件注册的自定义工具（如数据库查询）的统一调度 ④ 多工具并发执行时的读写分离和并发控制。</p>
+            <p><strong>一句话理解：</strong>就像餐厅里的服务员——客人（模型）点菜（工具调用），服务员把单子传给厨房（执行引擎），菜做好了端回去（返回结果）。</p>
+        </section>
+
+        <section id="architecture" class="card">
+            <h2>架构设计</h2>
+            <div class="layer-diagram">
+                <div class="layer layer-entry">
+                    <div class="layer-header">工具注册层</div>
+                    <div class="layer-body">
+                        <div class="layer-component highlight">Tool.ts — Tool 类型定义</div>
+                        <div class="layer-component highlight">tools.ts — 注册表与组装</div>
+                        <div class="layer-component">buildTool() 工厂函数</div>
+                    </div>
+                </div>
+                <div class="layer-arrow">▼</div>
+                <div class="layer layer-orchestration">
+                    <div class="layer-header">工具组装层</div>
+                    <div class="layer-body">
+                        <div class="layer-component">getAllBaseTools()</div>
+                        <div class="layer-component">getTools(permissionCtx)</div>
+                        <div class="layer-component highlight">assembleToolPool() — 内置 + MCP 合并</div>
+                        <div class="layer-component">filterToolsByDenyRules()</div>
+                    </div>
+                </div>
+                <div class="layer-arrow">▼</div>
+                <div class="layer layer-engine">
+                    <div class="layer-header">工具执行层</div>
+                    <div class="layer-body">
+                        <div class="layer-component">findToolByName() — 查找匹配</div>
+                        <div class="layer-component highlight">tool.call() — 执行入口</div>
+                        <div class="layer-component">validateInput → checkPermissions</div>
+                        <div class="layer-component">ToolResult 处理</div>
+                    </div>
+                </div>
+                <div class="layer-arrow">▼</div>
+                <div class="layer layer-tool">
+                    <div class="layer-header">工具实现层（30+ 工具）</div>
+                    <div class="layer-body">
+                        <div class="layer-component">BashTool / FileEditTool / FileReadTool / FileWriteTool</div>
+                        <div class="layer-component">AgentTool / SkillTool / MCPTool</div>
+                        <div class="layer-component">GrepTool / GlobTool / WebSearchTool / WebFetchTool</div>
+                        <div class="layer-component">SendMessageTool / TaskCreateTool / NotebookEditTool</div>
+                    </div>
+                </div>
+            </div>
+        </section>
+
+        <section id="dataflow" class="card">
+            <h2>核心数据流</h2>
+            <h3>工具生命周期流程</h3>
+            <div class="flow-chart">
+                <div class="flow-step">
+                    <div class="flow-step-title">1. 注册阶段</div>
+                    <div class="flow-step-desc">各工具模块 export 单例对象，由 <code>getAllBaseTools()</code> 汇总（tools.ts:193）。条件工具通过 feature flag 和环境变量动态加入。</div>
+                </div>
+                <div class="flow-arrow">→</div>
+                <div class="flow-step">
+                    <div class="flow-step-title">2. 过滤与组装</div>
+                    <div class="flow-step-desc"><code>getTools()</code> 过滤 deny 规则和 disabled 工具；<code>assembleToolPool()</code> 合并内置+MCP 工具并按名称排序（确保 prompt cache 稳定性）。</div>
+                </div>
+                <div class="flow-arrow">→</div>
+                <div class="flow-step">
+                    <div class="flow-step-title">3. API 提交</div>
+                    <div class="flow-step-desc">工具列表作为 API 请求的 <code>tools</code> 参数发送。支持 ToolSearch 延迟加载大型工具集。</div>
+                </div>
+                <div class="flow-arrow">→</div>
+                <div class="flow-step">
+                    <div class="flow-step-title">4. 模型选择工具</div>
+                    <div class="flow-step-desc">LLM 返回 <code>tool_use</code> block，包含工具名和参数。通过 <code>findToolByName()</code> 匹配（支持 alias 别名）。</div>
+                </div>
+                <div class="flow-arrow">→</div>
+                <div class="flow-step">
+                    <div class="flow-step-title">5. 校验与权限</div>
+                    <div class="flow-step-desc"><code>validateInput()</code> 验证参数合法性；<code>checkPermissions()</code> 检查工具级权限。详见权限系统章节。</div>
+                </div>
+                <div class="flow-arrow">→</div>
+                <div class="flow-step">
+                    <div class="flow-step-title">6. 执行与结果</div>
+                    <div class="flow-step-desc"><code>tool.call()</code> 执行具体逻辑，返回 <code>ToolResult&lt;T&gt;</code>。支持 progress 回调、后台运行和结果持久化。</div>
+                </div>
+            </div>
+
+            <h3>工具注册表架构</h3>
+            <div class="diagram-container">
+                <div class="diagram-row">
+                    <div class="diagram-node" style="background: var(--layer-entry);">
+                        <strong>getAllBaseTools()</strong><br><small>tools.ts:193 — 工具注册表入口</small>
+                    </div>
+                </div>
+                <div class="diagram-row" style="justify-content: center;">
+                    <div class="diagram-connector">▼ 分支</div>
+                </div>
+                <div class="diagram-row" style="gap: 12px;">
+                    <div class="diagram-node" style="background: var(--layer-tool); flex: 1;">
+                        <strong>核心工具（始终加载）</strong><br>
+                        <small>BashTool, FileEditTool, FileReadTool, FileWriteTool, AgentTool, SkillTool, GlobTool, GrepTool, WebSearchTool, WebFetchTool, NotebookEditTool, AskUserQuestionTool, TodoWriteTool, TaskOutputTool, TaskStopTool, EnterPlanModeTool, ExitPlanModeV2Tool, BriefTool, SendMessageTool, ListMcpResourcesTool, ReadMcpResourceTool</small>
+                    </div>
+                    <div class="diagram-node" style="background: var(--layer-plugin); flex: 1;">
+                        <strong>条件工具（Feature Flag 控制）</strong><br>
+                        <small>REPLTool (ant-only), TungstenTool (ant-only), ConfigTool (ant-only), SuggestBackgroundPRTool (ant-only), WebBrowserTool, LSPTool, EnterWorktreeTool/ExitWorktreeTool, WorkflowTool, SleepTool, CronCreateTool/CronDeleteTool/CronListTool, RemoteTriggerTool, MonitorTool, PushNotificationTool, PowerShellTool</small>
+                    </div>
+                    <div class="diagram-node" style="background: var(--layer-security); flex: 1;">
+                        <strong>特殊工具</strong><br>
+                        <small>TestingPermissionTool (仅 test 环境), ToolSearchTool (延迟加载), TaskCreateTool/TaskGetTool/TaskUpdateTool/TaskListTool (TodoV2), OverflowTestTool, CtxInspectTool, VerifyPlanExecutionTool, SnipTool, ListPeersTool, TeamCreateTool/TeamDeleteTool (Swarm)</small>
+                    </div>
+                </div>
+            </div>
+        </section>
+
+        <section id="interfaces" class="card">
+            <h2>关键类型与接口</h2>
+
+            <h3>Tool 类型定义（Tool.ts:362-695）</h3>
+            <pre><code>export type Tool&lt;
+  Input extends AnyObject = AnyObject,
+  Output = unknown,
+  P extends ToolProgressData = ToolProgressData,
+&gt; = {
+  // 身份标识
+  readonly name: string
+  aliases?: string[]                    // 别名（向后兼容重命名）
+  searchHint?: string                   // ToolSearch 关键词提示
+
+  // 核心方法
+  call(args, context, canUseTool, parentMessage, onProgress?): Promise&lt;ToolResult&lt;Output&gt;&gt;
+  description(input, options): Promise&lt;string&gt;
+  prompt(options): Promise&lt;string | SystemPrompt&gt;
+  readonly inputSchema: Input           // Zod schema
+  outputSchema?: z.ZodType&lt;unknown&gt;
+
+  // 生命周期钩子
+  validateInput?(input, context): Promise&lt;ValidationResult&gt;
+  checkPermissions(input, context): Promise&lt;PermissionResult&gt;
+  preparePermissionMatcher?(input): Promise&lt;(pattern: string) =&gt; boolean&gt;
+  backfillObservableInput?(input): void
+
+  // 行为属性
+  isConcurrencySafe(input): boolean     // 默认 false
+  isEnabled(): boolean                  // 默认 true
+  isReadOnly(input): boolean            // 默认 false
+  isDestructive?(input): boolean        // 默认 false
+  interruptBehavior?(): 'cancel' | 'block'  // 默认 'block'
+
+  // MCP 相关
+  isMcp?: boolean
+  mcpInfo?: { serverName: string; toolName: string }
+  readonly shouldDefer?: boolean        // 延迟加载标记
+  readonly alwaysLoad?: boolean         // 首轮必须加载
+
+  // 结果处理
+  maxResultSizeChars: number            // 超出时写入磁盘
+}</code></pre>
+
+            <h3>buildTool 工厂函数（Tool.ts:783-792）</h3>
+            <pre><code>const TOOL_DEFAULTS = {
+  isEnabled: () =&gt; true,
+  isConcurrencySafe: (_input?: unknown) =&gt; false,
+  isReadOnly: (_input?: unknown) =&gt; false,
+  isDestructive: (_input?: unknown) =&gt; false,
+  checkPermissions: (input, _ctx?) =&gt;
+    Promise.resolve({ behavior: 'allow', updatedInput: input }),
+  toAutoClassifierInput: (_input?) =&gt; '',
+  userFacingName: (_input?) =&gt; '',
+}
+
+export function buildTool&lt;D extends AnyToolDef&gt;(def: D): BuiltTool&lt;D&gt; {
+  return {
+    ...TOOL_DEFAULTS,
+    userFacingName: () =&gt; def.name,
+    ...def,
+  } as BuiltTool&lt;D&gt;
+}</code></pre>
+
+            <h3>工具查找与匹配（Tool.ts:348-360）</h3>
+            <pre><code>export function toolMatchesName(
+  tool: { name: string; aliases?: string[] },
+  name: string,
+): boolean {
+  return tool.name === name || (tool.aliases?.includes(name) ?? false)
+}
+
+export function findToolByName(tools: Tools, name: string): Tool | undefined {
+  return tools.find(t =&gt; toolMatchesName(t, name))
+}</code></pre>
+
+            <h3>工具组装管线（tools.ts:345-367）</h3>
+            <pre><code>export function assembleToolPool(
+  permissionContext: ToolPermissionContext,
+  mcpTools: Tools,
+): Tools {
+  const builtInTools = getTools(permissionContext)
+  const allowedMcpTools = filterToolsByDenyRules(mcpTools, permissionContext)
+
+  // 按名称排序确保 prompt cache 稳定性
+  // 内置工具优先（uniqBy 保留插入顺序）
+  const byName = (a: Tool, b: Tool) =&gt; a.name.localeCompare(b.name)
+  return uniqBy(
+    [...builtInTools].sort(byName).concat(allowedMcpTools.sort(byName)),
+    'name',
+  )
+}</code></pre>
+
+            <h3>ToolResult 类型（Tool.ts:321-336）</h3>
+            <pre><code>export type ToolResult&lt;T&gt; = {
+  data: T
+  newMessages?: (UserMessage | AssistantMessage | AttachmentMessage | SystemMessage)[]
+  contextModifier?: (context: ToolUseContext) =&gt; ToolUseContext
+  mcpMeta?: {
+    _meta?: Record&lt;string, unknown&gt;
+    structuredContent?: Record&lt;string, unknown&gt;
+  }
+}</code></pre>
+        </section>
+
+        <section id="patterns" class="card">
+            <h2>设计模式与亮点</h2>
+
+            <div class="three-col">
+                <div class="component-box">
+                    <div class="name">Builder 工厂模式</div>
+                    <div class="desc"><code>buildTool()</code> 使用类型级 spread 运算符，将 <code>ToolDef</code>（部分定义）补全为完整 <code>Tool</code>。7 个可默认字段（<code>isEnabled</code>, <code>isConcurrencySafe</code>, <code>isReadOnly</code>, <code>isDestructive</code>, <code>checkPermissions</code>, <code>toAutoClassifierInput</code>, <code>userFacingName</code>）都有安全默认值，采用"fail-closed"原则。</div>
+                    <span class="badge badge-core">核心模式</span>
+                </div>
+                <div class="component-box">
+                    <div class="name">分层组装管线</div>
+                    <div class="desc">工具集通过 <code>getAllBaseTools → getTools → assembleToolPool → getMergedTools</code> 四级管线逐步精炼。每层职责清晰：注册、权限过滤、MCP 合并、最终组装。排序保证 prompt cache 稳定性。</div>
+                    <span class="badge badge-ext">架构</span>
+                </div>
+                <div class="component-box">
+                    <div class="name">Feature Flag 条件加载</div>
+                    <div class="desc">30+ 工具中约 15 个通过 <code>feature()</code> flag 或 <code>process.env</code> 条件加载。使用 <code>require()</code> 懒加载避免循环依赖，实现 dead code elimination。</div>
+                    <span class="badge badge-perf">性能</span>
+                </div>
+            </div>
+
+            <h3>更多亮点</h3>
+            <ul>
+                <li><strong>别名系统</strong>：<code>aliases</code> 字段支持工具重命名时向后兼容，<code>toolMatchesName()</code> 统一匹配主名和别名。</li>
+                <li><strong>ToolSearch 延迟加载</strong>：当工具总数超过阈值时，<code>ToolSearchTool</code> 作为元工具被启用。其他工具标记 <code>shouldDefer: true</code>，模型需先通过 ToolSearch 查找才能调用，减少 prompt token 消耗。</li>
+                <li><strong>结果持久化</strong>：<code>maxResultSizeChars</code> 限制结果大小，超出时自动写入磁盘文件，避免超大输出撑爆上下文窗口。</li>
+                <li><strong>progress 回调</strong>：<code>onProgress</code> 参数支持工具执行过程中的实时进度更新（如 BashTool 的行输出、AgentTool 的 shell 进度）。</li>
+                <li><strong>并发安全标记</strong>：<code>isConcurrencySafe()</code> 标识哪些工具可以并行执行。非并发安全工具通过 <code>contextModifier</code> 修改上下文，确保状态隔离。</li>
+                <li><strong>中断行为</strong>：<code>interruptBehavior()</code> 控制用户发送新消息时工具的行为——<code>'cancel'</code> 停止并丢弃结果，<code>'block'</code> 继续运行让新消息等待。</li>
+            </ul>
+        </section>
+
+        <section id="dev-guide" class="card developer">
+            <h2>开发者实践指南</h2>
+
+            <h3>如何添加新工具</h3>
+            <div class="info-box tip">
+                <strong>步骤 1</strong>：在 <code>tools/</code> 下创建目录，使用 <code>buildTool()</code> 定义工具对象。只需提供 <code>name</code>、<code>inputSchema</code>、<code>call()</code>、<code>description()</code> 和 <code>prompt()</code>，其他方法有安全默认值。
+            </div>
+            <pre><code>// tools/MyTool/MyTool.ts
+import { buildTool, type ToolDef } from '../../Tool.js'
+
+export const MyTool = buildTool({
+  name: 'MyTool',
+  async prompt() { return '...' },
+  async description() { return 'My custom tool' },
+  get inputSchema() {
+    return z.object({ query: z.string() })
+  },
+  async call(input, context) {
+    return { data: { result: 'done' } }
+  },
+  // 可选覆盖
+  isReadOnly: () =&gt; true,
+  isConcurrencySafe: () =&gt; true,
+})</code></pre>
+
+            <div class="info-box tip">
+                <strong>步骤 2</strong>：在 <code>tools.ts</code> 的 <code>getAllBaseTools()</code> 数组中注册。如果是条件工具，使用 <code>feature()</code> 或 <code>process.env</code> 守卫，并通过 <code>require()</code> 懒加载避免循环依赖。
+            </div>
+
+            <h3>工具开发常见模式</h3>
+            <ul>
+                <li><strong>权限检查</strong>：覆盖 <code>checkPermissions()</code> 实现工具级权限逻辑（如 BashTool 的子命令规则匹配）。</li>
+                <li><strong>输入验证</strong>：覆盖 <code>validateInput()</code> 在权限检查前拦截非法输入，返回 <code>{ result: false, message, errorCode }</code>。</li>
+                <li><strong>路径操作</strong>：实现 <code>getPath()</code> 让权限系统识别工具操作的文件路径。</li>
+                <li><strong>权限匹配器</strong>：实现 <code>preparePermissionMatcher()</code> 为 Hook 的 <code>if</code> 条件提供精确匹配（如 <code>Bash(git *)</code> 的 glob 匹配）。</li>
+                <li><strong>可观察输入补全</strong>：实现 <code>backfillObservableInput()</code> 为 SDK 流、transcript、Hook 添加派生字段。</li>
+            </ul>
+        </section>
+
+        <section id="arch-guide" class="card architect">
+            <h2>架构师决策指南</h2>
+
+            <h3>设计权衡</h3>
+            <div class="two-col">
+                <div class="info-box info">
+                    <strong>单例模式 vs 工厂模式</strong><br>
+                    每个工具 export 一个单例对象而非工厂函数。优势：注册简单，类型推断精确。代价：工具实例无法携带请求级状态，必须通过 <code>ToolUseContext</code> 传递。这是一个刻意的设计选择——工具定义是静态的，上下文是动态的。
+                </div>
+                <div class="info-box info">
+                    <strong>工具排序与 Prompt Cache</strong><br>
+                    <code>assembleToolPool()</code> 按名称排序工具，内置工具作为连续前缀。这确保 MCP 工具的增减不会影响内置工具的排序位置，从而保持 prompt cache 命中率。排序策略与服务端 <code>claude_code_system_cache_policy</code> 配合工作。
+                </div>
+            </div>
+
+            <h3>扩展性考量</h3>
+            <ul>
+                <li><strong>MCP 工具集成</strong>：MCP 工具通过 <code>assembleToolPool()</code> 合并，使用 <code>mcpInfo</code> 字段标识来源。<code>filterToolsByDenyRules()</code> 支持 <code>mcp__server</code> 前缀的批量拒绝规则。</li>
+                <li><strong>工具数量增长</strong>：当工具超过约 20 个时，ToolSearch 延迟加载机制启动。新工具应设置 <code>searchHint</code> 以优化关键词匹配。</li>
+                <li><strong>工具间通信</strong>：<code>ToolResult.contextModifier</code> 允许工具修改后续工具的上下文（仅非并发安全工具）。<code>SkillTool</code> 使用此机制修改 <code>getAppState</code> 注入子 agent 的隔离状态。</li>
+            </ul>
+
+            <h3>性能考量</h3>
+            <ul>
+                <li><strong>工具 Schema 序列化</strong>：每个工具的 <code>inputSchema</code>（Zod schema）在 API 调用时序列化为 JSON Schema。MCP 工具支持 <code>inputJSONSchema</code> 直接传递 JSON Schema，避免 Zod → JSON 转换开销。</li>
+                <li><strong>延迟加载</strong>：约 15 个条件工具通过 <code>require()</code> 动态加载，避免启动时解析无用模块。</li>
+                <li><strong>结果持久化</strong>：<code>maxResultSizeChars</code> 阈值控制大结果写入磁盘。FileReadTool 设为 <code>Infinity</code>（自身已有 limit），避免 Read→file→Read 循环。</li>
+            </ul>
+        </section>
+
+        <section id="topology" class="card">
+            <h2><span class="icon" style="background:rgba(139,92,246,.15);color:var(--purple);">◈</span> 可视化处理拓扑图</h2>
+            <p>工具调度系统是从模型输出到实际执行的完整管线。当 API 流式响应中包含 <code>tool_use</code> 块时，系统依次经过工具查找、输入验证、权限检查、并发/串行执行和结果规范化。<code>buildTool</code> 工厂统一了 60+ 工具的接口，<code>StreamingToolExecutor</code> 实现流式并行执行。</p>
+
+            <!-- Phase 1: 工具注册与组装 -->
+            <div class="fc">
+                <div class="fc-center">
+                    <div class="fn n-process" style="font-size:11px;color:var(--text-muted);">Phase 1 — 工具注册与组装管线</div>
+                    <div class="vc s20"></div>
+
+                    <div class="fn n-start">getAllBaseTools — 注册表入口<span class="sub">tools.ts:193</span></div>
+                    <div class="vc s20"></div>
+
+                    <div class="fc-row" style="gap:10px;">
+                        <div style="display:flex;flex-direction:column;align-items:center;gap:0;">
+                            <div class="fn n-process" style="max-width:150px;font-size:11px;">核心工具<span class="sub">~21 个始终加载</span></div>
+                        </div>
+                        <div style="display:flex;flex-direction:column;align-items:center;gap:0;">
+                            <div class="fn n-process" style="max-width:150px;font-size:11px;">条件工具<span class="sub">feature() 守卫</span></div>
+                        </div>
+                        <div style="display:flex;flex-direction:column;align-items:center;gap:0;">
+                            <div class="fn n-process" style="max-width:150px;font-size:11px;">特殊工具<span class="sub">test/延迟/元工具</span></div>
+                        </div>
+                    </div>
+                    <div class="vc s20"></div>
+
+                    <div class="fn n-process w">getTools — deny 规则过滤<span class="sub">tools.ts:filterToolsByDenyRules</span></div>
+                    <div class="vc s16"></div>
+
+                    <div class="fn n-process w">assembleToolPool — 内置 + MCP 合并（按名称排序）<span class="sub">tools.ts:345-367 — 保证 prompt cache 稳定</span></div>
+                    <div class="vc s16"></div>
+
+                    <div class="fn n-process">getMergedTools — 最终工具集<span class="sub">tools.ts — 发送给 API</span></div>
+                </div>
+            </div>
+
+            <!-- Phase 2: 工具调度与执行 -->
+            <div class="fc">
+                <div class="fc-center">
+                    <div class="fn n-process" style="font-size:11px;color:var(--text-muted);">Phase 2 — 单次工具调用调度管线</div>
+                    <div class="vc s20"></div>
+
+                    <div class="fn n-start">API 流式响应 — tool_use 块到达<span class="sub">query.ts:829-835</span></div>
+                    <div class="vc s20"></div>
+
+                    <div class="fn n-check w">findToolByName — 工具查找匹配<span class="sub">Tool.ts:348-360 — 支持主名 + 别名</span></div>
+                    <div class="vc s20"></div>
+
+                    <div class="fc-row">
+                        <div class="fn n-check w">validateInput — 输入验证<span class="sub">Tool.ts:489-492</span></div>
+                        <div class="hc-arrow s60 red"><span class="hc-label" style="color:var(--red);">无效</span></div>
+                        <div class="fn n-deny">返回验证错误<span class="sub">{ valid: false, message }</span></div>
+                    </div>
+                    <div class="vc s20"><span class="vc-label">有效 ↓</span></div>
+
+                    <div class="fn n-check ww">checkPermissions — 权限检查<span class="sub">Tool.ts:500-503 — 默认 allow</span></div>
+                    <div class="vc s20"></div>
+
+                    <div class="fc-row" style="gap:24px;">
+                        <div style="display:flex;flex-direction:column;align-items:center;gap:0;">
+                            <div class="hc s20"></div>
+                            <div class="fn n-allow" style="font-size:11px;">allow</div>
+                            <div class="vc s16"></div>
+                            <div class="fn n-process" style="font-size:11px;">→ 执行</div>
+                        </div>
+                        <div style="display:flex;flex-direction:column;align-items:center;gap:0;">
+                            <div class="hc s20"></div>
+                            <div class="fn n-deny" style="font-size:11px;">deny</div>
+                            <div class="vc s16"></div>
+                            <div class="fn n-process" style="font-size:11px;">→ 拒绝</div>
+                        </div>
+                        <div style="display:flex;flex-direction:column;align-items:center;gap:0;">
+                            <div class="hc s20"></div>
+                            <div class="fn n-ask" style="font-size:11px;">ask</div>
+                            <div class="vc s16"></div>
+                            <div class="fn n-process" style="font-size:11px;">→ 用户确认</div>
+                        </div>
+                    </div>
+                    <div class="vc s24"></div>
+
+                    <!-- 并发/串行执行 -->
+                    <div class="fn n-check ww">isConcurrencySafe? — 并发安全判定<span class="sub">Tool.ts:402 — 默认 false，Read/Glob 返回 true</span></div>
+                    <div class="vc s20"></div>
+
+                    <div class="fc-row" style="gap:40px;">
+                        <div style="display:flex;flex-direction:column;align-items:center;gap:0;">
+                            <div class="fn n-auto w">并发安全 → StreamingToolExecutor<span class="sub">query.ts:561-568 — 并行执行</span></div>
+                            <div class="vc s16"></div>
+                            <div class="fc-row" style="gap:8px;">
+                                <div class="fn n-process" style="font-size:10px;">Tool A</div>
+                                <div class="fn n-process" style="font-size:10px;">Tool B</div>
+                                <div class="fn n-process" style="font-size:10px;">Tool C</div>
+                            </div>
+                            <div style="font-size:10px;color:var(--text-muted);margin-top:4px;">并行执行，完成即 yield</div>
+                        </div>
+                        <div style="display:flex;flex-direction:column;align-items:center;gap:0;">
+                            <div class="fn n-process w">非安全 → runTools 串行执行<span class="sub">query.ts:1382</span></div>
+                            <div class="vc s16"></div>
+                            <div class="fn n-process" style="font-size:10px;">Tool A → Tool B → Tool C</div>
+                            <div style="font-size:10px;color:var(--text-muted);margin-top:4px;">排队串行，防止状态冲突</div>
+                        </div>
+                    </div>
+                    <div class="vc s24"></div>
+
+                    <!-- 结果处理 -->
+                    <div class="fn n-process w">tool.call — 实际执行<span class="sub">Tool.ts:379-385 — 接收 args + context + onProgress</span></div>
+                    <div class="vc s20"></div>
+
+                    <div class="fn n-check w">maxResultSizeChars — 结果大小检查<span class="sub">Tool.ts:466 — ReadTool: Infinity</span></div>
+                    <div class="vc s20"></div>
+
+                    <div class="fc-row">
+                        <div class="fn n-process w">结果 ≤ 阈值<span class="sub">直接返回 ToolResult</span></div>
+                        <div class="hc s40"></div>
+                        <div class="fn n-deny w">结果 > 阈值<span class="sub">写入磁盘，返回路径预览</span></div>
+                    </div>
+                    <div class="vc s20"></div>
+
+                    <div class="fn n-allow ww">normalizeMessagesForAPI — 结果规范化返回<span class="sub">query.ts:1395-1400 — tool_result → user message</span></div>
+                </div>
+            </div>
+
+            <div class="info-box info"><strong>调度核心约束</strong>：从定义到执行全程类型安全——<code>buildTool</code> 工厂通过 TypeScript 类型推断确保 <code>call()</code>、<code>checkPermissions()</code> 等方法接收正确类型。默认值机制（TOOL_DEFAULTS）让简单工具只需 4 个必要字段。工具排序保证 prompt cache 稳定性，<code>maxResultSizeChars</code> 防止超大输出淹没上下文。</div>
+        </section>
+
+        <section id="core-flow" class="card">
+            <h2><span class="icon" style="background:rgba(6,182,212,.15);color:var(--cyan);">⇉</span> 核心处理流程详解</h2>
+            <p>工具调度系统是 Claude Code 执行力的核心。从模型输出 tool_use 块到实际执行并返回结果，数据经过一条类型安全、权限受控、支持并行的完整管线。<code>buildTool</code> 工厂统一了 60+ 个工具的接口，<code>StreamingToolExecutor</code> 实现了流式并行执行，<code>runTools</code> 提供了批量串行执行的兜底方案。</p>
+            <div class="flow-chart vertical">
+                <div class="flow-step highlight">
+                    <div class="flow-step-title">1. 模型输出 — tool_use 块到达</div>
+                    <div class="flow-step-desc">API 流式响应中包含 <code>type: 'tool_use'</code> 的 content block。<code>query.ts:829-835</code> 提取所有 tool_use 块推入 <code>toolUseBlocks</code> 数组，并标记 <code>needsFollowUp = true</code> 表示需要执行工具。如果启用 StreamingToolExecutor（<code>query.ts:561-568</code>），每个 tool_use 块立即通过 <code>addTool()</code>（L842）入队执行。</div>
+                </div>
+                <div class="flow-arrow">↓</div>
+                <div class="flow-step">
+                    <div class="flow-step-title">2. 工具查找 — findToolByName</div>
+                    <div class="flow-step-desc"><code>Tool.ts:358-360</code> 的 <code>findToolByName()</code> 在工具列表中查找匹配的工具。支持主名称和别名匹配（通过 <code>toolMatchesName()</code>，L348-353，检查 tool.name 和 tool.aliases）。这对工具重命名场景（如旧名兼容）至关重要。</div>
+                </div>
+                <div class="flow-arrow">↓</div>
+                <div class="flow-step highlight">
+                    <div class="flow-step-title">3. 输入验证 — validateInput</div>
+                    <div class="flow-step-desc">工具调用前先验证输入。<code>Tool.ts:489-492</code> 定义了可选的 <code>validateInput()</code> 方法，用于在权限检查之前校验参数合法性（如文件路径是否存在、参数格式是否正确）。验证失败返回 <code>{ valid: false, message: '...' }</code>，跳过后续所有处理。</div>
+                </div>
+                <div class="flow-arrow">↓</div>
+                <div class="flow-step highlight">
+                    <div class="flow-step-title">4. 权限检查 — checkPermissions</div>
+                    <div class="flow-step-desc">每个工具定义了 <code>checkPermissions(input, context)</code> 方法（<code>Tool.ts:500-503</code>）。默认实现（<code>TOOL_DEFAULTS</code>，L762-766）直接返回 <code>{ behavior: 'allow' }</code>。复杂工具如 BashTool 会解析命令内容，匹配子命令规则，检查沙箱可用性。返回三种行为：allow（直接放行）、deny（拒绝执行）、ask（需用户确认）。</div>
+                </div>
+                <div class="flow-arrow">↓</div>
+                <div class="flow-step">
+                    <div class="flow-step-title">5. 工具执行 — call()</div>
+                    <div class="flow-step-desc"><code>Tool.ts:379-385</code> 定义了核心的 <code>call(args, context, canUseTool, parentMessage, onProgress)</code> 方法。这是工具的实际执行入口，接收解析后的参数、工具上下文、权限检查函数和进度回调。执行结果类型 <code>ToolResult&lt;T&gt;</code>（L321-336）支持正常输出、错误输出和元数据。</div>
+                </div>
+                <div class="flow-arrow">↓</div>
+                <div class="flow-step">
+                    <div class="flow-step-title">6. 结果持久化 — maxResultSizeChars</div>
+                    <div class="flow-step-desc"><code>Tool.ts:466</code> 的 <code>maxResultSizeChars</code> 控制大结果处理策略。当工具输出超过此阈值时，结果写入磁盘文件，模型只收到文件路径预览。ReadTool 设为 <code>Infinity</code>（L466 的注释解释了原因：Read 的结果持久化会创建 Read→file→Read 的死循环）。BashTool 等工具使用有限阈值，避免巨大的命令输出淹没上下文。</div>
+                </div>
+                <div class="flow-arrow">↓</div>
+                <div class="flow-step">
+                    <div class="flow-step-title">7. 进度回调 — onProgress</div>
+                    <div class="flow-step-desc"><code>Tool.ts:384</code> 的 <code>onProgress</code> 回调（类型 <code>ToolCallProgress&lt;P&gt;</code>，L338-340）允许工具在执行过程中实时推送进度信息。这在长时间运行的工具中（如 BashTool 执行耗时命令、AgentTool 等待子 agent）特别重要——用户能看到实时反馈而非等待黑盒。</div>
+                </div>
+                <div class="flow-arrow">↓</div>
+                <div class="flow-step">
+                    <div class="flow-step-title">8. 结果规范化与返回</div>
+                    <div class="flow-step-desc"><code>query.ts:1395-1400</code> 通过 <code>normalizeMessagesForAPI()</code> 将工具结果消息转换为 API 兼容格式（tool_result 类型的 user message）。过滤确保只有 user 类型的消息被推入 toolResults 数组，用于下一轮 API 调用。这完成了"模型请求→工具执行→结果返回→模型继续"的完整闭环。</div>
+                </div>
+            </div>
+            <div class="info-box info">工具调度系统的核心约束是"类型安全从定义到执行"：<code>buildTool</code> 工厂通过 TypeScript 类型推断确保每个工具的 <code>call()</code>、<code>checkPermissions()</code>、<code>isReadOnly()</code> 等方法接收正确类型的参数。默认值机制（TOOL_DEFAULTS）让简单工具只需定义 <code>name</code>、<code>inputSchema</code>、<code>call</code> 和 <code>description</code>，复杂工具可以覆盖每个可选方法。</div>
+        </section>
+        <section id="design-essence" class="card">
+            <h2><span class="icon" style="background:rgba(245,158,11,.15);color:var(--amber);">★</span> 设计精华</h2>
+            <h3>1. buildTool 工厂 — 零样板工具定义</h3>
+            <p><code>Tool.ts:783-792</code> 的 <code>buildTool()</code> 是整个工具系统的基石。它通过运行时展开 <code>{ ...TOOL_DEFAULTS, ...def }</code> 为工具定义填充默认值，同时在类型层面通过 <code>BuiltTool&lt;D&gt;</code>（L735-741）精确计算最终类型。这意味着 60+ 个工具中，简单工具只需 4 个必要字段（name、inputSchema、call、description），复杂工具可以选择性覆盖任何默认行为。</p>
+            <div class="component-box">
+                <div class="name">buildTool Factory Pattern</div>
+                <div class="desc">默认值 + 展开覆盖，类型安全的工具定义</div>
+                <pre><code>// Tool.ts:757-792 — 工厂实现
+const TOOL_DEFAULTS = {
+  isEnabled: () => true,
+  isConcurrencySafe: (_input?: unknown) => false,
+  isReadOnly: (_input?: unknown) => false,
+  isDestructive: (_input?: unknown) => false,
+  checkPermissions: (input, _ctx?) =>
+    Promise.resolve({ behavior: 'allow', updatedInput: input }),
+  toAutoClassifierInput: (_input?: unknown) => '',
+  userFacingName: (_input?: unknown) => '',
+}
+
+export function buildTool<D extends AnyToolDef>(def: D): BuiltTool<D> {
+  return {
+    ...TOOL_DEFAULTS,
+    userFacingName: () => def.name, // 默认使用工具名
+    ...def, // 工具定义覆盖默认值
+  } as BuiltTool<D>
+}</code></pre>
+            </div>
+            <div class="info-box tip"><code>BuiltTool&lt;D&gt;</code> 的类型计算（L735-741）使用 <code>Omit&lt;D, DefaultableToolKeys&gt; &amp; ToolDefaults</code> 模式——先移除工具定义中的可默认字段，再与默认类型交叉。这确保了如果工具定义提供了 <code>checkPermissions</code>，类型系统使用工具定义的签名而非默认签名，实现精确的类型推导。</div>
+            <h3>2. 工具别名系统 — 向后兼容重命名</h3>
+            <p><code>Tool.ts:371</code> 的可选 <code>aliases</code> 字段允许工具注册一个或多个别名。<code>toolMatchesName()</code>（L348-353）在查找时同时匹配主名称和所有别名。这使得工具可以在不破坏已保存会话和用户权限规则的情况下重命名——旧名称作为别名继续有效，新代码统一使用新名称。</p>
+            <div class="component-box">
+                <div class="name">Tool Alias for Backward Compatibility</div>
+                <div class="desc">查找逻辑同时匹配主名和别名</div>
+                <pre><code>// Tool.ts:348-360
+export function toolMatchesName(tool, name): boolean {
+  return tool.name === name || tool.aliases?.includes(name) === true
+}
+
+export function findToolByName(tools: Tools, name: string): Tool | undefined {
+  return tools.find(tool => toolMatchesName(tool, name))
+}</code></pre>
+            </div>
+            <div class="info-box tip">别名系统与权限规则紧密配合——用户可能在 settings.json 中写了 <code>"OldToolName(*)": "allow"</code>。即使工具改名为 NewToolName，只要旧名注册在 aliases 中，权限规则仍然生效。这避免了工具重命名导致的"用户权限突然丢失"问题。</div>
+            <h3>3. searchHint — 延迟加载工具的发现机制</h3>
+            <p><code>Tool.ts:378</code> 的 <code>searchHint</code> 是一句简短的能力描述（3-10 词），用于 ToolSearch 的关键词匹配。当工具被标记为 <code>shouldDefer: true</code>（L442）时，其完整 schema 不会出现在初始 API 请求中——模型需要先调用 ToolSearch 工具找到它，然后再调用。<code>alwaysLoad</code>（L449）则标记"必须在首轮就出现的工具"。</p>
+            <div class="component-box">
+                <div class="name">Deferred Tool Loading via searchHint</div>
+                <div class="desc">减少初始 prompt 体积，按需加载工具 schema</div>
+                <pre><code>// Tool.ts:378-449 — 延迟加载相关字段
+searchHint?: string // 3-10 词，关键词匹配用
+readonly shouldDefer?: boolean // 延迟加载标记
+readonly alwaysLoad?: boolean // 强制首轮加载
+
+// 示例：NotebookEdit 的 searchHint 是 'jupyter notebook cell'
+// 模型搜索 'jupyter' 就能找到它，无需在每轮都发送完整 schema</code></pre>
+            </div>
+            <div class="info-box tip">延迟加载是 prompt engineering 的经典权衡：60+ 个工具的完整 schema 约 15000 token，每轮 API 调用都发送它们既浪费 token 又增加延迟。通过延迟加载，初始请求只包含 ~20 个核心工具和所有工具的 searchHint，模型需要时再动态加载。MCP 工具可通过 <code>_meta['anthropic/alwaysLoad']</code> 选择退出延迟加载。</div>
+            <h3>4. 结果持久化阈值 — 上下文保护</h3>
+            <p><code>Tool.ts:459-466</code> 的 <code>maxResultSizeChars</code> 是防止工具输出淹没上下文的关键机制。当结果字符数超过阈值时，内容写入磁盘文件，模型只收到路径预览。这个设计有两个精妙之处：一是 ReadTool 设为 <code>Infinity</code>（避免 Read→file→Read 循环），二是阈值由工具自身定义而非全局配置——不同工具的"过大"标准不同。</p>
+            <div class="component-box">
+                <div class="name">Per-Tool Result Size Threshold</div>
+                <div class="desc">工具自治的结果大小控制</div>
+                <pre><code>// Tool.ts:459-466
+/**
+ * Maximum size in characters for tool result before it gets persisted to disk.
+ * Set to Infinity for tools whose output must never be persisted (e.g. Read,
+ * where persisting creates a circular Read→file→Read loop).
+ */
+maxResultSizeChars: number
+
+// BashTool: 有限阈值，大输出写磁盘
+// ReadTool: Infinity，自身已有 limit 参数控制输出
+// GlobTool: 较小阈值，文件列表通常不大</code></pre>
+            </div>
+            <div class="info-box tip">ReadTool 的 Infinity 设定是一个反直觉但正确的设计。如果 Read 工具的结果被持久化为文件（"文件内容太长，已保存到 /tmp/xxx"），模型下次需要读取文件时会再次调用 Read，Read 又返回持久化路径...形成死循环。Read 自身通过 <code>limit</code> 参数控制输出大小，不需要外部持久化机制介入。</div>
+            <h3>5. isConcurrencySafe — 并行执行安全标记</h3>
+            <p><code>Tool.ts:402</code> 的 <code>isConcurrencySafe(input)</code> 方法标记工具是否可以安全并行执行。默认返回 <code>false</code>（Tool.ts:759），只读工具（如 Read、Glob）返回 <code>true</code>。StreamingToolExecutor 使用此标记决定是否并行调度工具——两个安全的工具可以同时运行，不安全的工具排队串行执行。</p>
+            <div class="info-box tip">isConcurrencySafe 接收 <code>input</code> 参数而非无参调用，是因为安全性可能取决于具体参数。例如 BashTool 执行 <code>git status</code>（只读）是安全的，但执行 <code>rm -rf</code>（写入）不安全。这种"参数级"的安全判断比"工具级"更精确。</div>
+        </section>
+
+        <section id="agent-practice" class="card">
+            <h2><span class="icon" style="background:rgba(34,197,94,.15);color:var(--green);">◈</span> Agent 实践借鉴 — 客服 Agent 工具系统设计</h2>
+
+            <h3>场景映射：客服 Agent 的工具长什么样？</h3>
+            <p>客服 Agent 不像 CC 那样有 60+ 个工具，但 10-15 个核心工具的管理同样有挑战：</p>
+            <ul>
+                <li><strong>工具清单</strong>：查订单（queryOrder）、查物流（trackLogistics）、退单（createRefund）、改地址（updateAddress）、发优惠券（sendCoupon）、查知识库（searchFAQ）、转人工（transferToAgent）、查客户信息（queryCustomer）、创建工单（createTicket）。约 10-15 个核心工具。</li>
+                <li><strong>动态扩展</strong>：新接入了微信支付渠道，需要加一个"查微信退款状态"的工具。不能让其他工具受影响。</li>
+                <li><strong>渠道权限差异</strong>：在线客服坐席有"发优惠券"工具（客户在聊天窗口里直接领），电话客服坐席没有（电话里没法发二维码）。不同渠道看到的工具集不同。</li>
+                <li><strong>高危操作</strong>："退单"和"改地址"是写操作，需要坐席确认。"查订单"和"查知识库"是只读操作，可以自动放行。</li>
+            </ul>
+
+            <h3>借鉴 CC：buildTool 工厂 + 统一生命周期</h3>
+            <p>CC 的 <code>buildTool()</code> 工厂让简单工具只需 4 个字段（name、inputSchema、call、description），复杂工具选择性覆盖。每个工具走 <code>validateInput → checkPermissions → call → ToolResult</code> 的标准管线。客服工具完全可以用同样的模式：</p>
+            <pre><code>// CC 的 buildTool 工厂（简化）
+const TOOL_DEFAULTS = {
+  isEnabled: () => true,
+  isReadOnly: () => false,
+  isConcurrencySafe: () => false,
+  checkPermissions: (input, _ctx) =>
+    Promise.resolve({ behavior: 'allow', updatedInput: input }),
+};
+
+function buildTool&lt;D&gt;(def: D): Tool {
+  return { ...TOOL_DEFAULTS, userFacingName: () => def.name, ...def };
+}
+
+// 简单工具：只需 name + schema + call + description
+const GlobTool = buildTool({
+  name: 'Glob',
+  inputSchema: z.object({ pattern: z.string() }),
+  async call(input) { return { data: glob.sync(input.pattern) }; },
+  async description() { return 'Find files by pattern'; },
+});
+
+// 复杂工具：覆盖权限检查
+const BashTool = buildTool({
+  name: 'Bash',
+  inputSchema: z.object({ command: z.string() }),
+  async call(input, ctx) { /* ... */ },
+  async description(input) { return `Run: ${input.command}`; },
+  async checkPermissions(input, ctx) {
+    return isSafeCommand(input.command)
+      ? { behavior: 'allow' }
+      : { behavior: 'ask', message: `Allow: ${input.command}` };
+  },
+});</code></pre>
+
+            <h3>客服 Agent 怎么改：统一工具接口</h3>
+            <p>照搬 CC 的 <code>buildTool</code> 工厂模式，但把 CC 的文件系统相关概念（isReadOnly 对应文件写入、isConcurrencySafe 对应并行执行）替换为客服场景的概念（isReadOnly 对应写操作如退单、requiresConfirmation 对应需要坐席确认）：</p>
+            <pre><code>// 客服工具统一接口 — 借鉴 CC 的 buildTool 模式
+interface CustomerServiceTool&lt;Input, Output&gt; {
+  // 必须实现（4 个字段，照搬 CC）
+  readonly name: string;
+  readonly inputSchema: ZodSchema&lt;Input&gt;;
+  call(args: Input, ctx: ServiceContext): Promise&lt;ToolResult&lt;Output&gt;&gt;;
+  description(input: Input): Promise&lt;string&gt;;
+
+  // 可选覆盖（有安全默认值）
+  validate?(input: Input): Promise&lt;ValidationResult&gt;;
+  checkPermission?(input: Input, ctx: PermContext): Promise&lt;PermResult&gt;;
+  isReadOnly(input: Input): boolean;              // 默认 false
+  requiresConfirmation(input: Input): boolean;    // 默认 true（fail-safe）
+  allowedChannels?: ChannelType[];                // 默认所有渠道
+}
+
+// 默认值：fail-safe 原则（与 CC 的 fail-closed 对应）
+const CS_TOOL_DEFAULTS = {
+  isReadOnly: () => false,
+  requiresConfirmation: () => true,    // 默认需要确认（退单/改地址等高危操作）
+  checkPermission: (input, _ctx) =>
+    Promise.resolve({ behavior: 'allow' }),
+  allowedChannels: undefined,          // undefined = 所有渠道都可用
+};
+
+function buildCSTool&lt;D extends Partial&lt;CustomerServiceTool&lt;any, any&gt;&gt;&gt;(def: D) {
+  return { ...CS_TOOL_DEFAULTS, ...def };
+}
+
+// ===== 使用示例 =====
+
+// 简单工具：查订单（只读，不需要确认，4 个字段搞定）
+const queryOrder = buildCSTool({
+  name: 'queryOrder',
+  inputSchema: z.object({ orderId: z.string() }),
+  async call(input, ctx) {
+    const order = await ctx.orderService.query(input.orderId);
+    return { data: order };
+  },
+  async description(input) { return `查询订单 ${input.orderId}`; },
+  isReadOnly: () => true,                // 覆盖：只读
+  requiresConfirmation: () => false,     // 覆盖：不需要坐席确认
+});
+
+// 复杂工具：退单（写操作，需要坐席确认，需要参数校验）
+const createRefund = buildCSTool({
+  name: 'createRefund',
+  inputSchema: z.object({
+    orderId: z.string(),
+    reason: z.string(),
+    amount: z.number().positive(),
+  }),
+  async call(input, ctx) {
+    const refund = await ctx.refundService.create({
+      orderId: input.orderId,
+      reason: input.reason,
+      amount: input.amount,
+    });
+    return { data: refund };
+  },
+  async description(input) { return `为订单 ${input.orderId} 创建退款`; },
+  // 不覆盖 isReadOnly → 默认 false（写操作）
+  // 不覆盖 requiresConfirmation → 默认 true（需要坐席确认）
+
+  // 覆盖参数校验：退款金额不能超过订单金额
+  async validate(input, ctx) {
+    const order = await ctx.orderService.query(input.orderId);
+    if (input.amount > order.totalAmount) {
+      return { valid: false, message: '退款金额不能超过订单金额' };
+    }
+    if (order.status === 'refunded') {
+      return { valid: false, message: '该订单已退款，不能重复退款' };
+    }
+    return { valid: true };
+  },
+});
+
+// 渠道限定工具：发优惠券（只有在线客服有）
+const sendCoupon = buildCSTool({
+  name: 'sendCoupon',
+  inputSchema: z.object({ customerId: z.string(), couponId: z.string() }),
+  async call(input, ctx) {
+    await ctx.couponService.send(input.customerId, input.couponId);
+    return { data: { success: true } };
+  },
+  async description(input) { return `发送优惠券 ${input.couponId}`; },
+  allowedChannels: ['online'],           // 只有在线渠道可用
+  isReadOnly: () => false,
+  requiresConfirmation: () => true,
+});</code></pre>
+
+            <h4>工具执行生命周期：validate → permission → execute</h4>
+            <pre><code>// 客服工具执行管线 — 照搬 CC 的三步生命周期
+async function executeCSTool(
+  tool: CustomerServiceTool&lt;any, any&gt;,
+  rawInput: unknown,
+  ctx: ServiceContext
+): Promise&lt;ToolResult&gt; {
+  // Step 1: validate — 校验参数（退单金额不能超限、订单不能重复退款）
+  if (tool.validate) {
+    const validation = await tool.validate(rawInput, ctx);
+    if (!validation.valid) {
+      return { data: { error: validation.message } };
+    }
+  }
+
+  // Step 2: checkPermission — 检查权限（这个坐席是否有权退单）
+  const parsedInput = tool.inputSchema.parse(rawInput);
+  const perm = await (tool.checkPermission?.(parsedInput, ctx.permCtx)
+    ?? Promise.resolve({ behavior: 'allow' as const }));
+
+  if (perm.behavior === 'deny') {
+    return { data: { error: '权限不足', reason: perm.reason } };
+  }
+  if (perm.behavior === 'ask' || tool.requiresConfirmation(parsedInput)) {
+    // 需要坐席确认（退单、改地址等高危操作）
+    const confirmed = await ctx.askAgent(
+      `确认执行 ${tool.name}？参数：${JSON.stringify(parsedInput)}`
+    );
+    if (!confirmed) {
+      return { data: { error: '坐席已拒绝' } };
+    }
+  }
+
+  // Step 3: call — 实际执行
+  const result = await tool.call(parsedInput, ctx);
+  return result;
+}</code></pre>
+
+            <h4>按渠道/角色过滤工具集 + 动态注册</h4>
+            <pre><code>// 工具过滤 — 借鉴 CC 的 assembleToolPool 模式，但更简单
+// CC 用的是 getAllBaseTools → getTools → assembleToolPool → getMergedTools 四级管线
+// 客服场景工具少（10-15 个），只需要两级：注册 + 过滤
+
+// 工具注册表（全局，启动时加载）
+const toolRegistry: Map&lt;string, CustomerServiceTool&lt;any, any&gt;&gt; = new Map();
+
+function registerTool(tool: CustomerServiceTool&lt;any, any&gt;) {
+  toolRegistry.set(tool.name, tool);
+}
+
+// 启动时注册所有工具
+registerTool(queryOrder);
+registerTool(trackLogistics);
+registerTool(createRefund);
+registerTool(updateAddress);
+registerTool(sendCoupon);
+registerTool(searchFAQ);
+registerTool(transferToAgent);
+registerTool(queryCustomer);
+registerTool(createTicket);
+
+// 按渠道/角色过滤工具集
+function getToolsForChannel(channel: ChannelType, role: AgentRole): Tool[] {
+  return Array.from(toolRegistry.values()).filter(tool => {
+    // 渠道过滤：allowedChannels 未定义 = 所有渠道可用
+    if (tool.allowedChannels && !tool.allowedChannels.includes(channel)) {
+      return false;
+    }
+    // 角色过滤：初级坐席不能退单
+    if (role === 'junior' && tool.name === 'createRefund') {
+      return false;
+    }
+    return true;
+  });
+}
+
+// 动态注册新工具（新接入业务系统时）
+// 借鉴 CC 的 MCP 动态工具模式，但不需要运行时发现
+// 客服场景的工具数量有限，用简单的注册机制即可
+function registerExternalTool(systemName: string, toolDef: ExternalToolDef) {
+  const tool = buildCSTool({
+    name: `${systemName}__${toolDef.name}`,
+    inputSchema: convertSchema(toolDef.inputSchema),
+    async call(input, ctx) {
+      return await ctx.externalCall(systemName, toolDef.name, input);
+    },
+    async description() { return toolDef.description; },
+    allowedChannels: toolDef.allowedChannels,
+  });
+  registerTool(tool);
+}
+
+// 使用示例：新接入微信支付渠道
+registerExternalTool('wechat_pay', {
+  name: 'queryRefundStatus',
+  description: '查询微信退款状态',
+  inputSchema: { refundId: { type: 'string', required: true } },
+  allowedChannels: ['online', 'ticket'],
+});
+// 注册后，指定渠道的坐席自动获得此工具，无需重启</code></pre>
+
+            <h3>落地清单</h3>
+            <div class="two-col">
+                <div class="info-box tip">
+                    <strong>必须抄的：</strong>
+                    <ul>
+                        <li><strong>统一工具接口 + 默认值</strong>：用 <code>buildCSTool()</code> 工厂，简单工具 4 个字段搞定。默认值要 fail-safe（默认需要确认、默认是写操作），确保新增工具不会意外绕过安全检查。</li>
+                        <li><strong>validate → execute 生命周期</strong>：每个工具执行前先校验参数（退单金额不能超限），再检查权限（坐席是否有权操作），最后才执行。三层防护，任何一层都可以短路返回。</li>
+                        <li><strong>工具过滤</strong>：按渠道（在线/电话/工单）和角色（初级/高级坐席）过滤可用工具。不是所有坐席都看到所有工具。</li>
+                    </ul>
+                </div>
+                <div class="info-box warning">
+                    <strong>不需要抄的：</strong>
+                    <ul>
+                        <li><strong>MCP 动态工具合并</strong>：CC 用 MCP 协议在运行时动态发现和合并工具。客服场景只有 10-15 个工具，用简单的注册表 + 过滤就够了，不需要运行时发现协议。</li>
+                        <li><strong>ToolSearch 延迟加载</strong>：CC 工具超过 20 个时用 ToolSearch 按需加载 schema。客服工具数量有限，全部加载到 prompt 里也没多少 token，不需要这个机制。</li>
+                        <li><strong>结果持久化到磁盘</strong>：CC 的 <code>maxResultSizeChars</code> 是为文件内容等大输出设计的。客服工具返回的是订单/退款等结构化数据，体积可控，不需要写磁盘。</li>
+                        <li><strong>工具别名</strong>：CC 用 aliases 做向后兼容。客服工具数量少，直接改名就行，不需要别名机制。</li>
+                    </ul>
+                </div>
+            </div>
+
+            <div class="info-box warning">
+                <strong>常见坑：</strong>
+                <ul>
+                    <li><strong>LLM 幻觉出不存在的工具名</strong>：LLM 可能在对话中说"我来帮你使用 cancelOrder"，但你根本没有这个工具（只有 createRefund）。解法：工具列表是 prompt 的一部分，LLM 只能调用列表中存在的工具。如果调用了不存在的工具，返回错误消息"工具 cancelOrder 不存在，请使用 createRefund"。</li>
+                    <li><strong>跳过 validate 直接执行</strong>：LLM 传入退款金额 -100 元，工具直接执行了，财务数据出问题。validate 层必须在 call 之前拦截非法参数。</li>
+                    <li><strong>渠道过滤放在前端而不是后端</strong>：前端隐藏了"发优惠券"按钮，但 API 层没做校验。客户抓包后直接调 API 发优惠券。工具过滤必须在执行层（后端）做，前端只是锦上添花。</li>
+                    <li><strong>动态注册不通知 LLM</strong>：运行时注册了新工具，但没有更新 LLM 的工具列表。LLM 不知道新工具的存在。解法：注册新工具后，下一轮对话时更新 system prompt 中的工具描述。</li>
+                </ul>
+            </div>
+        </section>
+
+        <section id="code-index" class="card">
+            <h2>代码索引</h2>
+            <table>
+                <thead><tr><th>文件</th><th>行数</th><th>说明</th></tr></thead>
+                <tbody>
+                    <tr><td><code>Tool.ts</code></td><td>~793</td><td>Tool 类型定义、buildTool 工厂、findToolByName、ToolResult 类型</td></tr>
+                    <tr><td><code>tools.ts</code></td><td>~390</td><td>工具注册表、getAllBaseTools、getTools、assembleToolPool、getMergedTools</td></tr>
+                    <tr><td><code>tools/BashTool/BashTool.tsx</code></td><td>~1144</td><td>Shell 命令执行工具，最复杂的内置工具</td></tr>
+                    <tr><td><code>tools/AgentTool/AgentTool.tsx</code></td><td>~1398</td><td>子 agent 调度工具，支持同步/异步/teammate 模式</td></tr>
+                    <tr><td><code>tools/AgentTool/runAgent.ts</code></td><td>~974</td><td>Agent 执行引擎，MCP 初始化、消息过滤</td></tr>
+                    <tr><td><code>tools/AgentTool/forkSubagent.ts</code></td><td>~211</td><td>Fork 子 agent 机制，消息构建与 worktree 通知</td></tr>
+                    <tr><td><code>tools/FileEditTool/FileEditTool.ts</code></td><td>~626</td><td>文件编辑工具，支持 sed 模拟和精确 diff</td></tr>
+                    <tr><td><code>tools/FileReadTool/</code></td><td>目录</td><td>文件读取工具</td></tr>
+                    <tr><td><code>tools/FileWriteTool/</code></td><td>目录</td><td>文件写入工具</td></tr>
+                    <tr><td><code>tools/SkillTool/SkillTool.ts</code></td><td>~1109</td><td>Skill 执行工具，支持 fork 和远程 skill</td></tr>
+                    <tr><td><code>tools/MCPTool/MCPTool.ts</code></td><td>~78</td><td>MCP 工具外壳，实际逻辑在 mcpClient.ts 中覆盖</td></tr>
+                    <tr><td><code>tools/SendMessageTool/SendMessageTool.ts</code></td><td>~918</td><td>多 agent 消息通信工具</td></tr>
+                    <tr><td><code>tools/GrepTool/</code></td><td>目录</td><td>代码搜索工具（ripgrep）</td></tr>
+                    <tr><td><code>tools/GlobTool/</code></td><td>目录</td><td>文件模式匹配工具</td></tr>
+                    <tr><td><code>tools/WebSearchTool/</code></td><td>目录</td><td>Web 搜索工具</td></tr>
+                    <tr><td><code>tools/WebFetchTool/</code></td><td>目录</td><td>URL 内容获取工具</td></tr>
+                    <tr><td><code>tools/NotebookEditTool/</code></td><td>目录</td><td>Jupyter Notebook 编辑工具</td></tr>
+                    <tr><td><code>tools/ToolSearchTool/</code></td><td>目录</td><td>工具搜索元工具（延迟加载场景）</td></tr>
+                    <tr><td><code>tools/TaskCreateTool/</code>~<code>TaskUpdateTool/</code></td><td>目录</td><td>TodoV2 任务管理工具集</td></tr>
+                    <tr><td><code>tools/REPLTool/</code></td><td>目录</td><td>REPL 工具（ant-only，包装 Bash/Read/Edit）</td></tr>
+                </tbody>
+            </table>
+        </section>
+        <footer style="text-align:center; padding:32px 0 20px; margin-top:48px; border-top:1px solid var(--border); color:var(--text-secondary); font-size:13px; line-height:2;">
+        <div style="margin-bottom:4px;">⚠️ 免责声明</div>
+        本文仅用于技术学习和架构分析目的。源码分析基于公开泄漏的代码，所有商标和版权归 <a href="https://www.anthropic.com" style="color:var(--indigo);">Anthropic</a> 所有。未经授权不得用于商业用途。
+    </footer>
+    </main>
+</body>
+</html>

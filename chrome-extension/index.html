@@ -1,0 +1,498 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Claude Code 源码深度分析</title>
+    <link rel="stylesheet" href="shared/styles.css">
+</head>
+<body>
+    <nav class="sidebar">
+        <div class="sidebar-header"><div class="logo">CC</div><div><div class="sidebar-title">Claude Code</div><div class="sidebar-subtitle">源码深度分析</div></div></div>
+                <div class="nav-section-title">总览</div>
+        <a href="reading-guide.html" class="nav-link">阅读指南</a>
+        <a href="index.html" class="nav-link active">架构全景</a>
+        <a href="dependency-map.html" class="nav-link">模块依赖图</a>
+        <a href="vertical-agent-guide.html" class="nav-link">垂直 Agent 设计指南</a>
+<div class="nav-section-title">核心流程</div>
+        <a href="00-startup.html" class="nav-link">启动链路</a>
+        <a href="01-query-loop.html" class="nav-link">Query 循环</a>
+        <a href="flows/query-lifecycle.html" class="nav-link">查询生命周期</a>
+        <div class="nav-section-title">核心机制</div>
+        <a href="02-tool-dispatch.html" class="nav-link">工具调度</a>
+        <a href="03-permissions.html" class="nav-link">权限系统</a>
+<a href="03b-security-hardening.html" class="nav-link">风控与安全加固</a>
+        <a href="04-agent-arch.html" class="nav-link">Agent 架构</a>
+        <a href="11-hooks.html" class="nav-link">Hook 机制</a>
+        <div class="nav-section-title">扩展体系</div>
+        <a href="05-mcp.html" class="nav-link">MCP 体系</a>
+        <a href="07-plugins.html" class="nav-link">插件系统</a>
+        <a href="08-commands.html" class="nav-link">命令系统</a>
+        <div class="nav-section-title">数据与服务</div>
+        <a href="06-context-mgmt.html" class="nav-link">上下文管理</a>
+        <a href="10-services.html" class="nav-link">服务层</a>
+        <a href="15-cost-limits.html" class="nav-link">成本与限流</a>
+        <div class="nav-section-title">界面与配置</div>
+        <a href="09-ui.html" class="nav-link">UI 交互层</a>
+        <a href="13-config.html" class="nav-link">配置与迁移</a>
+        <div class="nav-section-title">外围能力</div>
+        <a href="12-external.html" class="nav-link">外部集成</a>
+        <a href="14-native.html" class="nav-link">Native 能力</a>
+<div class="nav-section-title">安全专题</div>
+<a href="16-anti-distillation.html" class="nav-link">反蒸馏与输出保护</a>
+<a href="17-buddy.html" class="nav-link">Buddy 宠物系统</a>
+<div class="nav-section-title">数据专题</div>
+<a href="18-telemetry.html" class="nav-link">遥测与用户画像</a>
+        <div class="nav-section-title">流程图</div>
+        <a href="flows/tool-execution.html" class="nav-link">工具执行流程</a>
+        <a href="flows/agent-collab.html" class="nav-link">Agent 协作流程</a>
+    </nav>
+
+    <main class="content">
+        <header class="page-header">
+            <h1>Claude Code 源码深度分析</h1>
+            <p class="subtitle">Anthropic 官方 CLI 工具 — 1884 个 TypeScript 文件，51 万行代码的全景架构解析</p>
+        </header>
+
+        <!-- 项目概览 -->
+        <section class="card">
+            <h2>项目概览</h2>
+            <p>Claude Code 是 Anthropic 推出的命令行 AI 编程助手，支持终端交互、代码编辑、Git 操作、多 Agent 协作等能力。本文档对其源码进行系统性分析，产出 20 份 HTML 分析文档，覆盖从启动链路到外部集成的全部核心模块。</p>
+            <div class="three-col" style="margin-top:20px">
+                <div class="component-box" style="text-align:center">
+                    <div class="name" style="font-size:28px;color:var(--blue)">1,884</div>
+                    <div class="desc">TypeScript 文件</div>
+                </div>
+                <div class="component-box" style="text-align:center">
+                    <div class="name" style="font-size:28px;color:var(--green)">512K</div>
+                    <div class="desc">行代码</div>
+                </div>
+                <div class="component-box" style="text-align:center">
+                    <div class="name" style="font-size:28px;color:var(--purple)">20</div>
+                    <div class="desc">分析文档</div>
+                </div>
+            </div>
+        </section>
+
+        <!-- 六层架构图 -->
+        <section class="card">
+            <h2>六层架构全景</h2>
+            <p>Claude Code 采用清晰的分层架构。每一层内展示了该层的核心模块及其关键能力。</p>
+            <style>
+                .arch-module { background:var(--bg-elevated); border:1px solid var(--border-light); border-radius:6px; padding:10px 14px; }
+                .arch-module .mod-name { font-family:'SF Mono','Fira Code',monospace; font-size:12px; font-weight:700; color:var(--blue); margin-bottom:6px; }
+                .arch-module .mod-caps { display:flex; flex-wrap:wrap; gap:4px; }
+                .cap { font-size:10.5px; padding:2px 7px; border-radius:4px; background:var(--bg-base); color:var(--text-secondary); border:1px solid var(--border); white-space:nowrap; }
+                .cap.core { border-color:var(--blue); color:var(--blue); background:rgba(59,130,246,.08); }
+                .layer-body-grid { display:grid; grid-template-columns:repeat(auto-fill,minmax(190px,1fr)); gap:10px; padding:14px 16px; background:var(--bg-surface); }
+            </style>
+
+            <div class="layer-diagram" style="margin-top:24px">
+                <!-- Layer 1: 入口层 -->
+                <div class="layer layer-entry">
+                    <div class="layer-header"><span>Layer 1 — 入口层</span></div>
+                    <div class="layer-body-grid">
+                        <div class="arch-module"><div class="mod-name">main.tsx</div><div class="mod-caps"><span class="cap core">CLI 参数解析</span><span class="cap">快速路径分发</span><span class="cap">--version/--print</span><span class="cap">--resume 恢复</span></div></div>
+                        <div class="arch-module"><div class="mod-name">setup.ts</div><div class="mod-caps"><span class="cap core">项目初始化</span><span class="cap">MCP 预加载</span><span class="cap">Git 检测</span><span class="cap">Hooks 快照</span></div></div>
+                        <div class="arch-module"><div class="mod-name">bootstrap/state.ts</div><div class="mod-caps"><span class="cap core">AppState 全局状态</span><span class="cap">Store&lt;T&gt; 响应式容器</span><span class="cap">CWD 管理</span></div></div>
+                        <div class="arch-module"><div class="mod-name">replLauncher.tsx</div><div class="mod-caps"><span class="cap core">REPL 启动</span><span class="cap">动态 import</span><span class="cap">按需加载 App/Screens</span></div></div>
+                        <div class="arch-module"><div class="mod-name">entrypoints/</div><div class="mod-caps"><span class="cap">SDK 入口</span><span class="cap">CLI 入口</span><span class="cap">多模式路由分发</span></div></div>
+                    </div>
+                </div>
+                <div class="layer-arrow">&#9660;</div>
+
+                <!-- Layer 2: 编排层 -->
+                <div class="layer layer-orchestration">
+                    <div class="layer-header"><span>Layer 2 — 编排层</span></div>
+                    <div class="layer-body-grid">
+                        <div class="arch-module" style="grid-column:span 2;border-color:var(--blue);background:rgba(59,130,246,.06)">
+                            <div class="mod-name">QueryEngine.ts (1296行)</div>
+                            <div class="mod-caps"><span class="cap core">submitMessage()</span><span class="cap core">权限决策包裹</span><span class="cap core">会话持久化先于API</span><span class="cap">消息标准化/回放</span><span class="cap">结构化输出</span><span class="cap">预算检查</span><span class="cap">错误恢复协调</span></div>
+                        </div>
+                        <div class="arch-module" style="grid-column:span 2;border-color:var(--blue);background:rgba(59,130,246,.06)">
+                            <div class="mod-name">query.ts (1730行)</div>
+                            <div class="mod-caps"><span class="cap core">while(true) 查询循环</span><span class="cap core">4级压缩管线</span><span class="cap core">流式并发工具执行</span><span class="cap">模型降级链</span><span class="cap">延迟错误恢复</span><span class="cap">死亡螺旋防护</span><span class="cap">不可变状态替换</span></div>
+                        </div>
+                        <div class="arch-module"><div class="mod-name">coordinator/</div><div class="mod-caps"><span class="cap">MCP 客户端协调</span><span class="cap">Scratchpad 管理</span><span class="cap">用户上下文注入</span></div></div>
+                        <div class="arch-module"><div class="mod-name">interactiveHelpers</div><div class="mod-caps"><span class="cap core">Trust 边界编排</span><span class="cap">用户交互状态机</span><span class="cap">权限确认流程</span></div></div>
+                        <div class="arch-module"><div class="mod-name">dialogLaunchers</div><div class="mod-caps"><span class="cap">对话框触发器</span><span class="cap">权限确认 UI</span><span class="cap">Elicitation 回调</span></div></div>
+                    </div>
+                </div>
+                <div class="layer-arrow">&#9660;</div>
+
+                <!-- Layer 3: 工具/任务层 -->
+                <div class="layer layer-tool">
+                    <div class="layer-header"><span>Layer 3 — 工具/任务层</span></div>
+                    <div class="layer-body-grid">
+                        <div class="arch-module" style="border-color:var(--green);background:rgba(34,197,94,.06)">
+                            <div class="mod-name">Tool.ts (793行)</div>
+                            <div class="mod-caps"><span class="cap core">buildTool() 工厂</span><span class="cap core">Fail-Closed 默认值</span><span class="cap">inputSchema (Zod)</span><span class="cap">权限检查</span><span class="cap">并发安全</span><span class="cap">只读/可撤销标记</span></div>
+                        </div>
+                        <div class="arch-module" style="border-color:var(--green);background:rgba(34,197,94,.06)">
+                            <div class="mod-name">tools/ (30+ 工具)</div>
+                            <div class="mod-caps"><span class="cap core">BashTool</span><span class="cap core">FileRead/Edit/Write</span><span class="cap">GrepTool</span><span class="cap">GlobTool</span><span class="cap">WebSearchTool</span><span class="cap">NotebookEdit</span><span class="cap">SkillTool</span><span class="cap">MCPTool</span></div>
+                        </div>
+                        <div class="arch-module" style="border-color:var(--green);background:rgba(34,197,94,.06)">
+                            <div class="mod-name">tasks/ (5 种任务)</div>
+                            <div class="mod-caps"><span class="cap core">LocalAgentTask</span><span class="cap">LocalShellTask</span><span class="cap">RemoteAgentTask</span><span class="cap">InProcessTeammateTask</span><span class="cap">DreamTask</span><span class="cap">独立生命周期</span></div>
+                        </div>
+                        <div class="arch-module"><div class="mod-name">AgentTool (1398行)</div><div class="mod-caps"><span class="cap core">团队协作路由</span><span class="cap">远程调度</span><span class="cap">Fork 模式</span><span class="cap">异步/同步分支</span></div></div>
+                        <div class="arch-module"><div class="mod-name">SendMessage</div><div class="mod-caps"><span class="cap core">点对点通信</span><span class="cap">广播</span><span class="cap">关闭协商</span><span class="cap">计划审批</span></div></div>
+                    </div>
+                </div>
+                <div class="layer-arrow">&#9660;</div>
+
+                <!-- Layer 4: 扩展层 -->
+                <div class="layer layer-plugin">
+                    <div class="layer-header"><span>Layer 4 — 扩展层</span></div>
+                    <div class="layer-body-grid">
+                        <div class="arch-module" style="border-color:var(--orange);background:rgba(249,115,22,.06)">
+                            <div class="mod-name">services/mcp/ (26文件)</div>
+                            <div class="mod-caps"><span class="cap core">多传输支持</span><span class="cap core">7种连接配置</span><span class="cap">5种连接状态</span><span class="cap">认证缓存</span><span class="cap">16ms 批量合并</span><span class="cap">指数退避重连</span></div>
+                        </div>
+                        <div class="arch-module"><div class="mod-name">plugins/</div><div class="mod-caps"><span class="cap core">插件发现/加载/验证</span><span class="cap">Chokidar 热重载</span><span class="cap">版本化缓存隔离</span><span class="cap">功能门控</span></div></div>
+                        <div class="arch-module"><div class="mod-name">skills/</div><div class="mod-caps"><span class="cap core">Bundled → 目录 → 插件 → MCP</span><span class="cap">条件激活</span><span class="cap">动态发现</span></div></div>
+                        <div class="arch-module"><div class="mod-name">server/</div><div class="mod-caps"><span class="cap">MCP 服务端</span><span class="cap">内嵌协议实现</span><span class="cap">能力声明</span></div></div>
+                        <div class="arch-module"><div class="mod-name">commands/ (70+)</div><div class="mod-caps"><span class="cap">3种命令类型</span><span class="cap">prompt</span><span class="cap">local</span><span class="cap">local-jsx</span><span class="cap">参数解析</span></div></div>
+                    </div>
+                </div>
+                <div class="layer-arrow">&#9660;</div>
+
+                <!-- Layer 5: 服务层 -->
+                <div class="layer layer-data">
+                    <div class="layer-header"><span>Layer 5 — 服务层</span></div>
+                    <div class="layer-body-grid">
+                        <div class="arch-module"><div class="mod-name">context.ts</div><div class="mod-caps"><span class="cap core">上下文构建</span><span class="cap core">系统提示组装</span><span class="cap">Git 信息注入</span><span class="cap">环境感知</span></div></div>
+                        <div class="arch-module"><div class="mod-name">services/compact</div><div class="mod-caps"><span class="cap core">4级压缩管线</span><span class="cap core">Snip 裁剪</span><span class="cap core">Microcompact 缓存编辑</span><span class="cap">Context Collapse 折叠</span><span class="cap">Autocompact 全量摘要</span></div></div>
+                        <div class="arch-module"><div class="mod-name">services/api</div><div class="mod-caps"><span class="cap core">Claude API 客户端</span><span class="cap core">流式响应</span><span class="cap">重试策略</span><span class="cap">Fallback 模型切换</span></div></div>
+                        <div class="arch-module"><div class="mod-name">services/oauth</div><div class="mod-caps"><span class="cap core">OAuth PKCE</span><span class="cap">XAA 企业认证</span><span class="cap">Token 刷新</span><span class="cap">安全存储</span></div></div>
+                        <div class="arch-module"><div class="mod-name">services/analytics</div><div class="mod-caps"><span class="cap core">OTel 双通道</span><span class="cap">Perfetto 追踪</span><span class="cap">事件埋点</span><span class="cap">性能分析</span></div></div>
+                        <div class="arch-module"><div class="mod-name">services/SessionMemory</div><div class="mod-caps"><span class="cap core">会话记忆</span><span class="cap">记忆提取</span><span class="cap">跨会话知识保留</span></div></div>
+                        <div class="arch-module"><div class="mod-name">services/lsp</div><div class="mod-caps"><span class="cap">LSP 客户端管理</span><span class="cap">诊断信息收集</span><span class="cap">代码智能</span></div></div>
+                        <div class="arch-module"><div class="mod-name">cost-tracker.ts</div><div class="mod-caps"><span class="cap core">Token 成本追踪</span><span class="cap core">多级阈值告警</span><span class="cap">预算管理</span><span class="cap">Usage 统计</span></div></div>
+                    </div>
+                </div>
+                <div class="layer-arrow">&#9660;</div>
+
+                <!-- Layer 6: 基础层 -->
+                <div class="layer layer-infra">
+                    <div class="layer-header"><span>Layer 6 — 基础层</span></div>
+                    <div class="layer-body-grid">
+                        <div class="arch-module"><div class="mod-name">utils/git</div><div class="mod-caps"><span class="cap core">分支/状态检测</span><span class="cap core">Diff 解析</span><span class="cap">Commit 生成</span><span class="cap">Worktree 管理</span></div></div>
+                        <div class="arch-module"><div class="mod-name">utils/permissions</div><div class="mod-caps"><span class="cap core">6种权限模式</span><span class="cap core">13步决策链</span><span class="cap">规则白名单</span><span class="cap">AI 自动分类器</span></div></div>
+                        <div class="arch-module"><div class="mod-name">utils/sandbox</div><div class="mod-caps"><span class="cap core">文件系统沙盒</span><span class="cap core">安全路径验证</span><span class="cap">绕过免疫</span><span class="cap">沙盒适配器层</span></div></div>
+                        <div class="arch-module"><div class="mod-name">utils/shell + bash</div><div class="mod-caps"><span class="cap core">Shell 执行引擎</span><span class="cap">进程管理</span><span class="cap">信号处理</span><span class="cap">超时控制</span></div></div>
+                        <div class="arch-module"><div class="mod-name">utils/memory</div><div class="mod-caps"><span class="cap core">MEMORY.md 读写</span><span class="cap">版本化存储</span><span class="cap">嵌套记忆加载</span></div></div>
+                        <div class="arch-module"><div class="mod-name">hooks/ (50+ Hook)</div><div class="mod-caps"><span class="cap core">React Hook 生态</span><span class="cap">通知 Hook</span><span class="cap">工具合并决策树</span><span class="cap">权限 Hook</span></div></div>
+                        <div class="arch-module"><div class="mod-name">ink/ (终端渲染)</div><div class="mod-caps"><span class="cap core">Yoga 布局引擎</span><span class="cap core">双缓冲差分渲染</span><span class="cap">事件系统</span><span class="cap">TermIO</span></div></div>
+                        <div class="arch-module"><div class="mod-name">native-ts/</div><div class="mod-caps"><span class="cap core">color-diff 语法高亮</span><span class="cap core">file-index 模糊搜索</span><span class="cap">yoga-layout 布局计算</span></div></div>
+                    </div>
+                </div>
+            </div>
+        </section>
+
+        <!-- 核心数据流 -->
+        <section class="card">
+            <h2>核心数据流 — 一次查询的旅程</h2>
+            <p>用户输入经过 7 个关键阶段，最终变为终端上的响应。</p>
+            <div class="flow-chart" style="margin-top:16px">
+                <div class="flow-step">
+                    <div class="flow-step-title">用户输入</div>
+                    <div class="flow-step-desc">PromptInput</div>
+                </div>
+                <div class="flow-arrow">&#10132;</div>
+                <div class="flow-step">
+                    <div class="flow-step-title">QueryEngine</div>
+                    <div class="flow-step-desc">构建上下文</div>
+                </div>
+                <div class="flow-arrow">&#10132;</div>
+                <div class="flow-step">
+                    <div class="flow-step-title">API 调用</div>
+                    <div class="flow-step-desc">流式响应</div>
+                </div>
+                <div class="flow-arrow">&#10132;</div>
+                <div class="flow-step highlight">
+                    <div class="flow-step-title">工具调度</div>
+                    <div class="flow-step-desc">匹配 &amp; 执行</div>
+                </div>
+                <div class="flow-arrow">&#10132;</div>
+                <div class="flow-step">
+                    <div class="flow-step-title">结果收集</div>
+                    <div class="flow-step-desc">循环或终止</div>
+                </div>
+                <div class="flow-arrow">&#10132;</div>
+                <div class="flow-step">
+                    <div class="flow-step-title">渲染输出</div>
+                    <div class="flow-step-desc">Ink 终端渲染</div>
+                </div>
+            </div>
+            <div class="info-box info" style="margin-top:16px">
+                详细流程参见：<a href="flows/query-lifecycle.html" style="color:var(--blue)">查询的完整生命周期</a>
+            </div>
+        </section>
+
+        <!-- 安全体系 -->
+        <section class="card">
+            <h2>安全体系纵览</h2>
+            <p>Claude Code 采用三层深度防御策略保护用户安全：</p>
+            <div class="diagram-container" style="margin-top:16px">
+                <div class="diagram-row">
+                    <div class="diagram-node danger" style="min-width:300px">
+                        <div class="label">Layer 1: 权限规则引擎</div>
+                        <div class="detail">6 种权限模式 · 13 步决策链 · 规则白名单</div>
+                    </div>
+                </div>
+                <div class="diagram-spacer">&#9660;</div>
+                <div class="diagram-row">
+                    <div class="diagram-node warning" style="min-width:300px">
+                        <div class="label">Layer 2: Hook 拦截层</div>
+                        <div class="detail">PreToolUse · PostToolUse · 4 种执行策略</div>
+                    </div>
+                </div>
+                <div class="diagram-spacer">&#9660;</div>
+                <div class="diagram-row">
+                    <div class="diagram-node success" style="min-width:300px">
+                        <div class="label">Layer 3: 沙盒隔离</div>
+                        <div class="detail">文件系统沙盒 · 安全路径验证 · 绕过免疫</div>
+                    </div>
+                </div>
+            </div>
+            <div class="info-box info" style="margin-top:16px">
+                详细分析参见：<a href="03-permissions.html" style="color:var(--blue)">权限与安全系统</a>
+            </div>
+        </section>
+
+        <!-- 模块导航 -->
+        <section class="card">
+            <h2>模块导航</h2>
+            <p>按功能域分类的分析文档索引。每份文档包含：架构设计（层级图）、数据流（流程图）、关键接口（真实代码）、设计模式、开发者指南、架构师指南、代码索引。</p>
+
+            <h3 style="margin-top:24px">核心流程</h3>
+            <table>
+                <thead><tr><th>文档</th><th>覆盖范围</th><th>关键文件</th></tr></thead>
+                <tbody>
+                    <tr>
+                        <td><a href="00-startup.html" style="color:var(--blue)">00 - 启动链路</a></td>
+                        <td>从 main.tsx 到 REPL 启动的 7 阶段初始化流程</td>
+                        <td><code>main.tsx</code> <code>setup.ts</code> <code>bootstrap/</code></td>
+                    </tr>
+                    <tr>
+                        <td><a href="01-query-loop.html" style="color:var(--blue)">01 - Query 循环</a></td>
+                        <td>QueryEngine 核心循环：输入处理 → API 调用 → 工具调度 → 结果收集</td>
+                        <td><code>QueryEngine.ts</code> <code>query/</code></td>
+                    </tr>
+                    <tr>
+                        <td><a href="flows/query-lifecycle.html" style="color:var(--blue)">查询生命周期</a></td>
+                        <td>端到端 12 阶段流程：用户输入 → 响应渲染</td>
+                        <td>跨模块集成分析</td>
+                    </tr>
+                </tbody>
+            </table>
+
+            <h3>核心机制</h3>
+            <table>
+                <thead><tr><th>文档</th><th>覆盖范围</th><th>关键文件</th></tr></thead>
+                <tbody>
+                    <tr>
+                        <td><a href="02-tool-dispatch.html" style="color:var(--blue)">02 - 工具调度</a></td>
+                        <td>30+ 工具的注册、匹配、执行机制，4 级组装管道</td>
+                        <td><code>Tool.ts</code> <code>tools/</code></td>
+                    </tr>
+                    <tr>
+                        <td><a href="03-permissions.html" style="color:var(--blue)">03 - 权限系统</a></td>
+                        <td>三层安全：权限规则 + Hook 拦截 + 沙盒隔离，13 步决策链</td>
+                        <td><code>utils/permissions/</code> <code>hooks/toolPermission/</code></td>
+                    </tr>
+                    <tr>
+                        <td><a href="04-agent-arch.html" style="color:var(--blue)">04 - Agent 架构</a></td>
+                        <td>5 种任务类型、多 Agent 协作、消息传递机制</td>
+                        <td><code>tasks/</code> <code>AgentTool</code> <code>SendMessageTool</code></td>
+                    </tr>
+                    <tr>
+                        <td><a href="11-hooks.html" style="color:var(--blue)">11 - Hook 机制</a></td>
+                        <td>50+ Hook 的注册、触发、工具合并决策树</td>
+                        <td><code>hooks/</code> <code>hooks/notifs/</code></td>
+                    </tr>
+                </tbody>
+            </table>
+
+            <h3>扩展体系</h3>
+            <table>
+                <thead><tr><th>文档</th><th>覆盖范围</th><th>关键文件</th></tr></thead>
+                <tbody>
+                    <tr>
+                        <td><a href="05-mcp.html" style="color:var(--blue)">05 - MCP 体系</a></td>
+                        <td>Model Context Protocol 完整实现，7 种传输变体，5 种连接状态</td>
+                        <td><code>services/mcp/</code> <code>server/</code></td>
+                    </tr>
+                    <tr>
+                        <td><a href="07-plugins.html" style="color:var(--blue)">07 - 插件系统</a></td>
+                        <td>插件生命周期、技能发现、热重载机制</td>
+                        <td><code>plugins/</code> <code>skills/</code></td>
+                    </tr>
+                    <tr>
+                        <td><a href="08-commands.html" style="color:var(--blue)">08 - 命令系统</a></td>
+                        <td>70+ 斜杠命令的注册、分发、3 种命令类型</td>
+                        <td><code>commands.ts</code> <code>commands/</code></td>
+                    </tr>
+                </tbody>
+            </table>
+
+            <h3>数据与服务</h3>
+            <table>
+                <thead><tr><th>文档</th><th>覆盖范围</th><th>关键文件</th></tr></thead>
+                <tbody>
+                    <tr>
+                        <td><a href="06-context-mgmt.html" style="color:var(--blue)">06 - 上下文管理</a></td>
+                        <td>上下文窗口管理、压缩策略、会话记忆、记忆提取</td>
+                        <td><code>context.ts</code> <code>services/compact/</code></td>
+                    </tr>
+                    <tr>
+                        <td><a href="10-services.html" style="color:var(--blue)">10 - 服务层</a></td>
+                        <td>15 个服务模块：API、OAuth、LSP、分析、设置同步等</td>
+                        <td><code>services/</code> 各子模块</td>
+                    </tr>
+                    <tr>
+                        <td><a href="15-cost-limits.html" style="color:var(--blue)">15 - 成本与限流</a></td>
+                        <td>Token 成本追踪、策略限制、多级阈值、预算管理</td>
+                        <td><code>cost-tracker.ts</code> <code>services/policyLimits/</code></td>
+                    </tr>
+                </tbody>
+            </table>
+
+            <h3>界面与配置</h3>
+            <table>
+                <thead><tr><th>文档</th><th>覆盖范围</th><th>关键文件</th></tr></thead>
+                <tbody>
+                    <tr>
+                        <td><a href="09-ui.html" style="color:var(--blue)">09 - UI 交互层</a></td>
+                        <td>Ink (React for CLI) 终端渲染、组件架构、双缓冲差分渲染</td>
+                        <td><code>ink/</code> <code>components/</code> <code>screens/</code></td>
+                    </tr>
+                    <tr>
+                        <td><a href="13-config.html" style="color:var(--blue)">13 - 配置与迁移</a></td>
+                        <td>五层配置层级、迁移系统、输出样式、快捷键绑定</td>
+                        <td><code>utils/settings/</code> <code>migrations/</code></td>
+                    </tr>
+                </tbody>
+            </table>
+
+            <h3>外围能力</h3>
+            <table>
+                <thead><tr><th>文档</th><th>覆盖范围</th><th>关键文件</th></tr></thead>
+                <tbody>
+                    <tr>
+                        <td><a href="12-external.html" style="color:var(--blue)">12 - 外部集成</a></td>
+                        <td>Vim 模式、语音输入、GitHub、Git、遥测、Computer Use</td>
+                        <td><code>vim/</code> <code>voice/</code> <code>utils/github/</code></td>
+                    </tr>
+                    <tr>
+                        <td><a href="14-native.html" style="color:var(--blue)">14 - Native 能力</a></td>
+                        <td>Yoga 布局引擎、文件索引、语法高亮、上游代理</td>
+                        <td><code>native-ts/</code> <code>upstreamproxy/</code></td>
+                    </tr>
+                </tbody>
+            </table>
+
+            <h3>全局视图</h3>
+            <table>
+                <thead><tr><th>文档</th><th>覆盖范围</th></tr></thead>
+                <tbody>
+                    <tr>
+                        <td><a href="dependency-map.html" style="color:var(--blue)">模块依赖全景图</a></td>
+                        <td>全部模块的依赖关系，6 层架构的跨层依赖分析</td>
+                    </tr>
+                    <tr>
+                        <td><a href="flows/tool-execution.html" style="color:var(--blue)">工具执行流程</a></td>
+                        <td>工具调用端到端流程：API 响应 → 匹配 → 权限 → Hook → 执行 → 结果</td>
+                    </tr>
+                    <tr>
+                        <td><a href="flows/agent-collab.html" style="color:var(--blue)">Agent 协作流程</a></td>
+                        <td>多 Agent 协作：3 种后端、Agent 生命周期、文件邮箱消息传递</td>
+                    </tr>
+                </tbody>
+            </table>
+        </section>
+
+        <!-- 设计原则 -->
+        <section class="card architect">
+            <h2>核心设计原则</h2>
+            <p>通过源码分析提炼出的 Claude Code 架构设计原则：</p>
+            <div class="two-col" style="margin-top:16px">
+                <div class="component-box">
+                    <div class="name">分层隔离</div>
+                    <div class="desc">六层架构，层间通过接口通信。入口层不直接操作工具层，编排层不关心 UI 渲染细节。</div>
+                    <span class="badge badge-sec">可维护性</span>
+                </div>
+                <div class="component-box">
+                    <div class="name">深度防御</div>
+                    <div class="desc">权限规则、Hook 拦截、沙盒隔离三层安全机制，任何单层绕过不会导致系统失守。</div>
+                    <span class="badge badge-sec">安全性</span>
+                </div>
+                <div class="component-box">
+                    <div class="name">插件化扩展</div>
+                    <div class="desc">MCP 协议、插件系统、技能系统三层扩展机制，核心功能与扩展严格分离。</div>
+                    <span class="badge badge-ext">扩展性</span>
+                </div>
+                <div class="component-box">
+                    <div class="name">流式优先</div>
+                    <div class="desc">API 调用、工具执行、UI 渲染全链路流式处理，用户无感知延迟。</div>
+                    <span class="badge badge-perf">性能</span>
+                </div>
+                <div class="component-box">
+                    <div class="name">上下文感知压缩</div>
+                    <div class="desc">多级压缩策略（微压缩、自动压缩、会话记忆），在有限窗口内保留最大信息密度。</div>
+                    <span class="badge badge-data">智能</span>
+                </div>
+                <div class="component-box">
+                    <div class="name">Agent 原生</div>
+                    <div class="desc">5 种任务类型 + 消息传递机制，原生支持多 Agent 协作，而非后加的补丁。</div>
+                    <span class="badge badge-core">架构</span>
+                </div>
+            </div>
+        </section>
+
+        <!-- 使用指南 -->
+        <section class="card developer">
+            <h2>如何使用本文档</h2>
+            <div class="info-box tip">
+                <strong>如果你是开发者：</strong>重点关注每个模块的「开发者实践指南」章节，了解如何扩展和修改。从 <a href="00-startup.html" style="color:var(--green)">启动链路</a> 和 <a href="02-tool-dispatch.html" style="color:var(--green)">工具调度</a> 开始阅读。
+            </div>
+            <div class="info-box info" style="margin-top:12px">
+                <strong>如果你是架构师：</strong>重点关注「架构师决策指南」和「设计模式与亮点」章节，理解设计权衡。先看本页的六层架构图，再看 <a href="dependency-map.html" style="color:var(--blue)">模块依赖图</a>。
+            </div>
+            <div class="info-box warning" style="margin-top:12px">
+                <strong>如果你想了解完整流程：</strong>从三个流程图文档开始：<a href="flows/query-lifecycle.html" style="color:var(--amber)">查询生命周期</a> → <a href="flows/tool-execution.html" style="color:var(--amber)">工具执行流程</a> → <a href="flows/agent-collab.html" style="color:var(--amber)">Agent 协作流程</a>。
+            </div>
+        </section>
+
+        <!-- 技术栈 -->
+        <section class="card">
+            <h2>技术栈</h2>
+            <div class="two-col">
+                <div>
+                    <h3>核心</h3>
+                    <p><span class="tag tag-blue">TypeScript</span> <span class="tag tag-green">React (Ink)</span> <span class="tag tag-purple">Zod</span> <span class="tag tag-cyan">AsyncGenerator</span></p>
+                </div>
+                <div>
+                    <h3>终端</h3>
+                    <p><span class="tag tag-orange">Yoga Layout</span> <span class="tag tag-blue">ANSI 控制序列</span> <span class="tag tag-green">双缓冲差分渲染</span></p>
+                </div>
+                <div>
+                    <h3>协议</h3>
+                    <p><span class="tag tag-purple">MCP (Model Context Protocol)</span> <span class="tag tag-blue">HTTP SSE</span> <span class="tag tag-cyan">stdio</span> <span class="tag tag-green">OAuth PKCE</span></p>
+                </div>
+                <div>
+                    <h3>工具链</h3>
+                    <p><span class="tag tag-orange">ESBuild</span> <span class="tag tag-blue">NPM</span> <span class="tag tag-purple">Tree-sitter</span> <span class="tag tag-green">Chokidar</span></p>
+                </div>
+            </div>
+        </section>
+
+        <footer style="text-align:center; padding:32px 0 20px; margin-top:48px; border-top:1px solid var(--border); color:var(--text-secondary); font-size:13px; line-height:2;">
+        <div style="margin-bottom:4px;">⚠️ 免责声明</div>
+        本文仅用于技术学习和架构分析目的。源码分析基于公开泄漏的代码，所有商标和版权归 <a href="https://www.anthropic.com" style="color:var(--indigo);">Anthropic</a> 所有。未经授权不得用于商业用途。
+    </footer>
+    </main>
+</body>
+</html>

@@ -1,0 +1,806 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>启动链路 - Claude Code 源码分析</title>
+    <link rel="stylesheet" href="shared/styles.css">
+</head>
+<body>
+    <nav class="sidebar">
+<div class="sidebar-header"><div class="logo">CC</div><div><div class="sidebar-title">Claude Code</div><div class="sidebar-subtitle">源码深度分析</div></div></div>
+        <div class="nav-section-title">总览</div>
+        <a href="reading-guide.html" class="nav-link">阅读指南</a>
+        <a href="index.html" class="nav-link">架构全景</a>
+        <a href="dependency-map.html" class="nav-link">模块依赖图</a>
+        <a href="vertical-agent-guide.html" class="nav-link">垂直 Agent 设计指南</a>
+<div class="nav-section-title">核心流程</div>
+<a href="00-startup.html" class="nav-link active">启动链路</a>
+<a href="01-query-loop.html" class="nav-link">Query 循环</a>
+<a href="flows/query-lifecycle.html" class="nav-link">查询生命周期</a>
+<div class="nav-section-title">核心机制</div>
+<a href="02-tool-dispatch.html" class="nav-link">工具调度</a>
+<a href="03-permissions.html" class="nav-link">权限系统</a>
+<a href="03b-security-hardening.html" class="nav-link">风控与安全加固</a>
+<a href="04-agent-arch.html" class="nav-link">Agent 架构</a>
+<a href="11-hooks.html" class="nav-link">Hook 机制</a>
+<div class="nav-section-title">扩展体系</div>
+<a href="05-mcp.html" class="nav-link">MCP 体系</a>
+<a href="07-plugins.html" class="nav-link">插件系统</a>
+<a href="08-commands.html" class="nav-link">命令系统</a>
+<div class="nav-section-title">数据与服务</div>
+<a href="06-context-mgmt.html" class="nav-link">上下文管理</a>
+<a href="10-services.html" class="nav-link">服务层</a>
+<a href="15-cost-limits.html" class="nav-link">成本与限流</a>
+<div class="nav-section-title">界面与配置</div>
+<a href="09-ui.html" class="nav-link">UI 交互层</a>
+<a href="13-config.html" class="nav-link">配置与迁移</a>
+<div class="nav-section-title">外围能力</div>
+<a href="12-external.html" class="nav-link">外部集成</a>
+<a href="14-native.html" class="nav-link">Native 能力</a>
+<div class="nav-section-title">安全专题</div>
+<a href="16-anti-distillation.html" class="nav-link">反蒸馏与输出保护</a>
+<a href="17-buddy.html" class="nav-link">Buddy 宠物系统</a>
+<div class="nav-section-title">数据专题</div>
+<a href="18-telemetry.html" class="nav-link">遥测与用户画像</a>
+<div class="nav-section-title">流程图</div>
+<a href="flows/tool-execution.html" class="nav-link">工具执行流程</a>
+<a href="flows/agent-collab.html" class="nav-link">Agent 协作流程</a>
+</nav>
+    <main class="content">
+        <header class="page-header">
+            <span class="breadcrumb"><a href="index.html">源码分析</a></span>
+            <h1>启动链路</h1>
+            <p class="subtitle">从 CLI 入口到 REPL 渲染的完整初始化序列，涵盖快速路径分发、配置加载、信任校验与状态初始化</p>
+        </header>
+
+        <nav class="page-toc">
+    <div class="page-toc-title">页面导航</div>
+        <a href="#overview"><span class="toc-dot dot-overview"></span>职责概述</a>
+        <a href="#architecture"><span class="toc-dot dot-arch"></span>架构设计</a>
+        <a href="#dataflow"><span class="toc-dot dot-data"></span>数据流</a>
+        <a href="#interfaces"><span class="toc-dot dot-arch"></span>核心接口</a>
+        <a href="#patterns"><span class="toc-dot dot-arch"></span>设计模式</a>
+        <a href="#dev-guide"><span class="toc-dot dot-code"></span>开发者指南</a>
+        <a href="#arch-guide"><span class="toc-dot dot-arch"></span>架构师指南</a>
+        <a href="#topology"><span class="toc-dot dot-data"></span>处理拓扑图</a>
+        <a href="#core-flow"><span class="toc-dot dot-data"></span>核心流程详解</a>
+        <a href="#design-essence"><span class="toc-dot dot-design"></span>设计精华</a>
+        <a href="#agent-practice"><span class="toc-dot dot-practice"></span>Agent 实践借鉴</a>
+        <a href="#code-index"><span class="toc-dot dot-code"></span>代码索引</a>
+</nav>
+
+        <section id="overview" class="card">
+            <h2>职责概述</h2>
+
+            <p><strong>解决的问题：</strong>用户在终端输入 <code>claude</code> 后到出现交互界面，中间需要完成认证、环境检测、配置加载、权限初始化等一系列前置工作。启动链路将这些步骤编排为一条可靠的初始化管道，确保首次安装和日常使用都能快速进入交互状态。</p>
+            <p><strong>应用场景：</strong>① 首次安装后的 OAuth 认证引导 ② 每次启动时的环境检测（Node 版本、终端类型、代理配置）③ 从 CI/CD、IDE 插件、SDK 等不同入口点进入时的差异化初始化 ④ 断线恢复和会话续接。</p>
+            <p><strong>一句话理解：</strong>就像电脑的开机流程——从按下电源键到桌面出现，中间的 BIOS 自检、驱动加载、登录界面都在这一层。</p>
+        </section>
+
+        <section id="architecture" class="card">
+            <h2>架构设计</h2>
+            <div class="layer-diagram">
+                <div class="layer layer-entry">
+                    <div class="layer-header">Bootstrap 入口层</div>
+                    <div class="layer-body">
+                        <div class="layer-component highlight">entrypoints/cli.tsx</div>
+                        <div class="layer-component">bootstrap/state.ts</div>
+                    </div>
+                </div>
+                <div class="layer-arrow">▼</div>
+                <div class="layer layer-orchestration">
+                    <div class="layer-header">全局初始化层</div>
+                    <div class="layer-body">
+                        <div class="layer-component highlight">entrypoints/init.ts</div>
+                        <div class="layer-component">main.tsx main()</div>
+                    </div>
+                </div>
+                <div class="layer-arrow">▼</div>
+                <div class="layer layer-engine">
+                    <div class="layer-header">命令注册与环境层</div>
+                    <div class="layer-body">
+                        <div class="layer-component">main.tsx run()</div>
+                        <div class="layer-component highlight">setup.ts</div>
+                    </div>
+                </div>
+                <div class="layer-arrow">▼</div>
+                <div class="layer layer-ui">
+                    <div class="layer-header">交互设置与渲染层</div>
+                    <div class="layer-body">
+                        <div class="layer-component">interactiveHelpers.tsx</div>
+                        <div class="layer-component">dialogLaunchers.tsx</div>
+                        <div class="layer-component highlight">replLauncher.tsx</div>
+                    </div>
+                </div>
+                <div class="layer-arrow">▼</div>
+                <div class="layer layer-data">
+                    <div class="layer-header">状态管理层</div>
+                    <div class="layer-body">
+                        <div class="layer-component">state/store.ts</div>
+                        <div class="layer-component">state/AppStateStore.ts</div>
+                        <div class="layer-component">state/AppState.tsx</div>
+                        <div class="layer-component">state/onChangeAppState.ts</div>
+                    </div>
+                </div>
+            </div>
+        </section>
+
+        <section id="dataflow" class="card">
+            <h2>核心数据流</h2>
+            <div class="flow-chart vertical">
+                <div class="flow-step">
+                    <div class="flow-step-title">1. cli.tsx 快速路径分发</div>
+                    <div class="flow-step-desc">
+                        <code>entrypoints/cli.tsx:33</code> 中的 <code>main()</code> 函数是整个 CLI 的真正入口。它首先检查 <code>--version/-v/-V</code> 实现零模块加载快速退出，然后依次检测十几种快速路径（bridge、daemon、bg sessions、templates 等），每种路径使用动态 import 避免加载无关代码。
+                        <br><br>
+                        <pre><code>// entrypoints/cli.tsx:37-42
+if (args.length === 1 && (args[0] === '--version' || ...)) {
+  console.log(`${MACRO.VERSION} (Claude Code)`);
+  return;
+}</code></pre>
+                        未匹配任何快速路径时，通过 <code>startCapturingEarlyInput()</code> 开始捕获终端早期输入（用户在加载过程中键入的字符），然后动态 import <code>main.tsx</code> 并调用 <code>cliMain()</code>。
+                    </div>
+                </div>
+                <div class="flow-arrow">▼</div>
+                <div class="flow-step">
+                    <div class="flow-step-title">2. main.tsx main() — 安全与协议预处理</div>
+                    <div class="flow-step-desc">
+                        <code>main.tsx:585</code> 在进入 Commander 解析之前完成多项关键预处理：
+                        <ul>
+                            <li><strong>安全设置</strong>：设置 <code>NoDefaultCurrentDirectoryInExePath</code> 防止 Windows PATH 劫持</li>
+                            <li><strong>信号处理</strong>：注册 SIGINT 和 exit 处理器</li>
+                            <li><strong>URL/协议处理</strong>：解析 <code>cc://</code> 深链接、macOS URL scheme、<code>claude assistant</code>、<code>claude ssh</code></li>
+                            <li><strong>模式检测</strong>：判断交互/非交互模式，设置 clientType（cli/sdk/github-action 等）</li>
+                        </ul>
+                        <pre><code>// main.tsx:803-812
+const isNonInteractive = hasPrintFlag || hasInitOnlyFlag || hasSdkUrl || !process.stdout.isTTY;
+setIsInteractive(!isNonInteractive);
+initializeEntrypoint(isNonInteractive);
+eagerLoadSettings();</code></pre>
+                    </div>
+                </div>
+                <div class="flow-arrow">▼</div>
+                <div class="flow-step">
+                    <div class="flow-step-title">3. run() — Commander preAction 钩子</div>
+                    <div class="flow-step-desc">
+                        <code>main.tsx:884</code> 中的 <code>run()</code> 创建 Commander 程序实例，通过 <code>preAction</code> 钩子执行所有子命令共享的初始化逻辑：
+                        <pre><code>// main.tsx:907-967
+program.hook('preAction', async thisCommand => {
+  await Promise.all([ensureMdmSettingsLoaded(), ensureKeychainPrefetchCompleted()]);
+  await init();
+  // ... initSinks, loadRemoteManagedSettings, loadPolicyLimits 等
+});</code></pre>
+                        这确保只有真正执行命令时才触发初始化，显示帮助信息时不加载。
+                    </div>
+                </div>
+                <div class="flow-arrow">▼</div>
+                <div class="flow-step">
+                    <div class="flow-step-title">4. init.ts — 全局服务初始化</div>
+                    <div class="flow-step-desc">
+                        <code>entrypoints/init.ts:57</code> 使用 <code>memoize</code> 确保只执行一次，按序初始化：
+                        <ul>
+                            <li><code>enableConfigs()</code> — 启用配置系统</li>
+                            <li><code>applySafeConfigEnvironmentVariables()</code> — 仅应用安全环境变量（信任对话框之前）</li>
+                            <li><code>setupGracefulShutdown()</code> — 注册退出清理</li>
+                            <li><code>configureGlobalMTLS()</code> + <code>configureGlobalAgents()</code> — 网络层配置</li>
+                            <li><code>preconnectAnthropicApi()</code> — 预热 TLS 连接</li>
+                            <li>远程管理设置加载、LSP 清理注册、scratchpad 初始化</li>
+                        </ul>
+                    </div>
+                </div>
+                <div class="flow-arrow">▼</div>
+                <div class="flow-step">
+                    <div class="flow-step-title">5. setup.ts — 环境与权限准备</div>
+                    <div class="flow-step-desc">
+                        <code>setup.ts:56</code> 接收 cwd、权限模式、worktree 选项等参数，执行：
+                        <ul>
+                            <li>Node.js 版本检查（&ge;18）</li>
+                            <li>UDS 消息服务器启动（用于 teammate 通信）</li>
+                            <li>终端备份恢复（iTerm2 / Terminal.app 中断恢复）</li>
+                            <li>Worktree 创建与 tmux 会话管理</li>
+                            <li>后台任务启动：SessionMemory、ContextCollapse、归因钩子、插件预加载</li>
+                            <li>安全沙箱验证（<code>--dangerously-skip-permissions</code> 仅允许在无网络容器中使用）</li>
+                        </ul>
+                        <pre><code>// setup.ts:160-161
+setCwd(cwd);
+captureHooksConfigSnapshot(); // 在 setCwd 之后，确保 hooks 从正确目录加载</code></pre>
+                    </div>
+                </div>
+                <div class="flow-arrow">▼</div>
+                <div class="flow-step">
+                    <div class="flow-step-title">6. showSetupScreens — 交互式设置对话框序列</div>
+                    <div class="flow-step-desc">
+                        <code>interactiveHelpers.tsx:104</code> 按序显示多个设置对话框：
+                        <ul>
+                            <li><strong>Onboarding</strong> — 首次使用引导（主题选择等）</li>
+                            <li><strong>TrustDialog</strong> — 工作区信任确认（安全边界，检查 CLAUDE.md 外部引用）</li>
+                            <li><strong>MCP Server Approvals</strong> — .mcp.json 服务器审批</li>
+                            <li><strong>Grove Policy</strong> — 企业策略接受</li>
+                            <li><strong>API Key Approval</strong> — 自定义 API Key 确认</li>
+                            <li><strong>BypassPermissions Mode Dialog</strong> — 危险模式警告</li>
+                            <li><strong>Auto Mode Opt-in</strong> — 自动模式同意</li>
+                        </ul>
+                        信任确认后触发：GrowthBook 重新初始化、完整环境变量应用、遥测初始化。
+                    </div>
+                </div>
+                <div class="flow-arrow">▼</div>
+                <div class="flow-step">
+                    <div class="flow-step-title">7. launchRepl — REPL 启动</div>
+                    <div class="flow-step-desc">
+                        <code>replLauncher.tsx:12</code> 是最终启动点，通过动态 import 加载 <code>App</code> 和 <code>REPL</code> 组件：
+                        <pre><code>// replLauncher.tsx:12-22
+export async function launchRepl(root, appProps, replProps, renderAndRun) {
+  const { App } = await import('./components/App.js');
+  const { REPL } = await import('./screens/REPL.js');
+  await renderAndRun(root, &lt;App {...appProps}&gt;&lt;REPL {...replProps} /&gt;&lt;/App&gt;);
+}</code></pre>
+                        <code>renderAndRun</code>（<code>interactiveHelpers.tsx:98</code>）调用 <code>root.render()</code> 渲染 React 组件树，然后调用 <code>startDeferredPrefetches()</code> 启动延迟预取，最后 <code>await root.waitUntilExit()</code> 等待 REPL 退出。
+                    </div>
+                </div>
+            </div>
+        </section>
+
+        <section id="interfaces" class="card">
+            <h2>关键类型与接口</h2>
+
+            <h3>Bootstrap 全局状态 (bootstrap/state.ts)</h3>
+            <pre><code>// bootstrap/state.ts:45-120 (核心字段)
+type State = {
+  originalCwd: string           // 原始工作目录
+  projectRoot: string           // 项目根目录（稳定，不随 worktree 变化）
+  sessionId: SessionId          // 当前会话 ID
+  isInteractive: boolean        // 是否交互式会话
+  clientType: string            // 客户端类型 (cli/sdk/github-action 等)
+  modelUsage: { [modelName: string]: ModelUsage }  // 模型使用统计
+  // ...遥测、日志、OpenTelemetry 状态
+  agentColorMap: Map&lt;string, AgentColorName&gt;  // Agent 颜色映射
+  allowedSettingSources: SettingSource[]     // 允许的设置来源
+}</code></pre>
+
+            <h3>AppState 类型 (state/AppStateStore.ts)</h3>
+            <pre><code>// state/AppStateStore.ts:89+
+export type AppState = DeepImmutable&lt;{
+  settings: SettingsJson
+  verbose: boolean
+  mainLoopModel: ModelSetting
+  toolPermissionContext: ToolPermissionContext
+  tasks: Record&lt;string, TaskState&gt;
+  mcp: { clients: MCPServerConnection[]; tools: ... }
+  speculationState: SpeculationState
+  fastMode: FastModeState
+  effortValue: EffortValue | undefined
+  fileHistory: FileHistoryState
+  attribution: AttributionState
+  // ... teammate、bridge、denial tracking 等字段
+}&gt;</code></pre>
+
+            <h3>通用状态容器 (state/store.ts)</h3>
+            <pre><code>// state/store.ts:4-34
+export type Store&lt;T&gt; = {
+  getState: () =&gt; T
+  setState: (updater: (prev: T) =&gt; T) =&gt; void
+  subscribe: (listener: Listener) =&gt; () =&gt; void
+}
+// 不可变比较优化：Object.is(next, prev) 时跳过通知
+export function createStore&lt;T&gt;(initialState: T, onChange?: OnChange&lt;T&gt;): Store&lt;T&gt;</code></pre>
+
+            <h3>AppWrapperProps (replLauncher.tsx)</h3>
+            <pre><code>// replLauncher.tsx:7-11
+type AppWrapperProps = {
+  getFpsMetrics: () =&gt; FpsMetrics | undefined;
+  stats?: StatsStore;
+  initialState: AppState;
+};</code></pre>
+        </section>
+
+        <section id="patterns" class="card">
+            <h2>设计模式与亮点</h2>
+
+            <h3>1. 渐进式加载与快速路径 (Fast-Path Dispatch)</h3>
+            <p><code>cli.tsx</code> 采用策略模式分发到十几种快速路径，每种路径只加载所需模块。这利用了 Bun 的 <code>feature()</code> 函数在构建时进行死代码消除（DCE），确保外部构建不包含内部功能。</p>
+            <div class="info-box tip">这种设计使得 <code>--version</code> 的启动时间接近零（无模块加载），而完整交互模式的启动约需 300-500ms。</div>
+
+            <h3>2. 副作用排序 (Side-Effect Ordering)</h3>
+            <p><code>main.tsx:1-20</code> 在所有 import 之前执行三个并行副作用：启动性能分析标记、MDM 子进程启动、macOS Keychain 预取。这些操作与其余 135ms 的模块 import 重叠执行，显著减少首屏延迟。</p>
+
+            <h3>3. 延迟预取 (Deferred Prefetch)</h3>
+            <p>将非首屏必需的预取工作（插件加载、Git 归因钩子、SessionMemory 初始化等）推迟到 <code>startDeferredPrefetches()</code> 在 REPL 渲染后才执行，避免阻塞首次渲染。</p>
+
+            <h3>4. 不可变状态容器 (Immutable Store)</h3>
+            <p><code>state/store.ts</code> 实现了一个极简的不可变状态容器：<code>setState</code> 接受 updater 函数返回新状态，通过 <code>Object.is</code> 比较避免不必要通知。AppStateProvider 在 React 层封装并提供 <code>onChangeAppState</code> 回调，实现状态变更的副作用管理（如权限模式变更时通知 SDK）。</p>
+
+            <h3>5. 信任边界 (Trust Boundary)</h3>
+            <p>系统区分"安全"和"完整"环境变量：<code>applySafeConfigEnvironmentVariables()</code> 在信任对话框之前执行，<code>applyConfigEnvironmentVariables()</code> 在信任确认之后执行。这防止了不受信任的工作目录通过 settings.json 注入危险环境变量。</p>
+        </section>
+
+        <section id="dev-guide" class="card developer">
+            <h2>开发者实践指南</h2>
+            <div class="info-box tip">在添加新的启动阶段时，使用 <code>profileCheckpoint('label')</code> 标记关键时间点，这会输出到启动性能分析报告中。</div>
+
+            <h3>添加新的快速路径</h3>
+            <p>在 <code>entrypoints/cli.tsx</code> 的 <code>main()</code> 函数中，按照现有模式添加新的快速路径检测。所有 import 必须是动态的，以保持最小加载。使用 <code>feature('FLAG')</code> 包裹内部功能：</p>
+            <pre><code>// entrypoints/cli.tsx 模式
+if (feature('MY_FLAG') && args[0] === 'my-command') {
+  profileCheckpoint('cli_my_command_path');
+  const { myMain } = await import('../myModule/main.js');
+  await myMain(args.slice(1));
+  return;
+}</code></pre>
+
+            <h3>添加新的设置对话框</h3>
+            <p>在 <code>interactiveHelpers.tsx showSetupScreens()</code> 中按条件插入新对话框。使用 <code>showSetupDialog</code> 包裹以获得 AppStateProvider 和 KeybindingSetup 的上下文。对话框遵循 <code>(done) =&gt; ReactNode</code> 回调模式。</p>
+
+            <h3>扩展全局状态</h3>
+            <p>新的全局状态优先添加到 <code>AppState</code> 类型中（通过 <code>state/AppStateStore.ts</code>），而非 <code>bootstrap/state.ts</code>。Bootstrap state 仅用于在 React 渲染之前就需要访问的底层状态（如 sessionId、cwd）。AppState 通过 React Context 注入，支持响应式更新。</p>
+        </section>
+
+        <section id="arch-guide" class="card architect">
+            <h2>架构师决策指南</h2>
+
+            <h3>性能与启动时间的权衡</h3>
+            <p>启动链路的设计围绕"最小化首次可交互时间"展开。关键决策：</p>
+            <ul>
+                <li><strong>动态 import vs 静态 import</strong>：启动路径上的模块全部使用动态 import，使 Bun 的 tree-shaking 能移除未使用的代码。代价是略微增加代码复杂度和丧失类型推断。</li>
+                <li><strong>并行副作用 vs 串行</strong>：MDM 读取和 Keychain 预取在模块加载阶段并行启动，但它们的结果在后续阶段按需等待。这种"发射后等待"模式避免了阻塞主线程。</li>
+                <li><strong>preAction 钩子 vs 显式调用</strong>：Commander 的 preAction 确保初始化只在实际执行命令时运行，而非在显示帮助时。这是一个关键的延迟优化。</li>
+            </ul>
+
+            <h3>状态管理的分层</h3>
+            <p>系统采用两层状态管理：</p>
+            <ul>
+                <li><strong>Bootstrap State</strong>（<code>bootstrap/state.ts</code>）：全局可变状态，使用 signal 模式。适用于 React 之外的底层代码（如 API 层、工具执行）。</li>
+                <li><strong>AppState</strong>（<code>state/AppStateStore.ts</code>）：不可变状态容器，通过 React Context 注入。适用于 UI 组件和需要响应式更新的场景。</li>
+            </ul>
+            <div class="info-box warning">不要在两个状态系统之间创建循环依赖。Bootstrap state 的变更不会触发 React 重渲染；如需 UI 更新，必须同时更新 AppState。</div>
+
+            <h3>安全边界的扩展性</h3>
+            <p>信任对话框是所有安全策略的锚点。添加新的安全检查时，应将其放入 <code>showSetupScreens</code> 中信任对话框之后的位置。环境变量分为"安全"和"完整"两套，任何可能被不受信任工作目录控制的环境变量都必须归类到"完整"集合中。</p>
+        </section>
+
+        <section id="topology" class="card">
+            <h2><span class="icon" style="background:rgba(139,92,246,.15);color:var(--purple);">◈</span> 可视化处理拓扑图</h2>
+            <p>启动链路是一条漏斗式管线：CLI 入口以零加载代价快速分流特殊路径，未匹配的请求依次经过安全预处理、Commander 注册、全局初始化、环境准备和交互设置，最终启动 REPL。每个快速路径在 <code>cli.tsx</code> 就地返回，只加载自身所需模块。</p>
+
+            <!-- Phase 1: 快速路径漏斗 -->
+            <div class="fc">
+                <div class="fc-center">
+                    <div class="fn n-start">进程启动 — process.argv<span class="sub">entrypoints/cli.tsx:33</span></div>
+                    <div class="vc s20"></div>
+
+                    <div class="fn n-check ww">快速路径分流 — main()<span class="sub">cli.tsx:37-274 — 零模块加载判断</span></div>
+                    <div class="vc s20"></div>
+
+                    <!-- 快速路径分支 -->
+                    <div class="fn n-process" style="font-size:10px;color:var(--text-muted);max-width:640px;">↓ 命中快速路径 → 就地返回（零额外加载）</div>
+                    <div class="vc s16"></div>
+
+                    <div class="fc-row" style="gap:8px;flex-wrap:wrap;justify-content:center;">
+                        <div class="fn n-allow" style="max-width:120px;font-size:11px;">--version<span class="sub">cli.tsx:37</span></div>
+                        <div class="fn n-allow" style="max-width:120px;font-size:11px;">MCP 服务器<span class="sub">cli.tsx:72</span></div>
+                        <div class="fn n-allow" style="max-width:120px;font-size:11px;">daemon worker<span class="sub">cli.tsx:100</span></div>
+                        <div class="fn n-allow" style="max-width:120px;font-size:11px;">bridge 模式<span class="sub">cli.tsx:112</span></div>
+                    </div>
+                    <div class="vc s16"></div>
+                    <div class="fc-row" style="gap:8px;flex-wrap:wrap;justify-content:center;">
+                        <div class="fn n-allow" style="max-width:120px;font-size:11px;">后台会话<span class="sub">cli.tsx:185</span></div>
+                        <div class="fn n-allow" style="max-width:120px;font-size:11px;">模板任务<span class="sub">cli.tsx:212</span></div>
+                        <div class="fn n-allow" style="max-width:120px;font-size:11px;">~10 个其他<span class="sub">feature() 守卫</span></div>
+                    </div>
+                    <div class="vc s20"><span class="vc-label">无快速路径匹配 ↓</span></div>
+
+                    <div class="fn n-process" style="border-color:var(--blue);">↓ 进入主路径 — 动态 import main.tsx ↓</div>
+                </div>
+            </div>
+
+            <!-- Phase 2: 主路径管线 -->
+            <div class="fc">
+                <div class="fc-center">
+                    <div class="fn n-process" style="font-size:11px;color:var(--text-muted);">Phase 2 — 主路径初始化管线</div>
+                    <div class="vc s20"></div>
+
+                    <div class="fn n-start">startCapturingEarlyInput + import main.tsx<span class="sub">cli.tsx:288-296 — 约 135ms</span></div>
+                    <div class="vc s20"></div>
+
+                    <div class="fn n-check w">安全预处理 — 攻击面防御<span class="sub">main.tsx:585-607</span></div>
+                    <div class="vc s20"></div>
+
+                    <div class="fc-row">
+                        <div class="fn n-process w">Windows PATH 劫持防护<span class="sub">main.tsx:591</span></div>
+                        <div class="hc s20"></div>
+                        <div class="fn n-process w">信号处理器注册<span class="sub">main.tsx:595</span></div>
+                        <div class="hc s20"></div>
+                        <div class="fn n-process w">cc:// URL 重写<span class="sub">main.tsx:612</span></div>
+                    </div>
+                    <div class="vc s20"></div>
+
+                    <div class="fn n-check w">argv 预处理 — 多模式检测<span class="sub">main.tsx:647-770 — URI/assistant/SSH</span></div>
+                    <div class="vc s20"></div>
+
+                    <div class="fn n-check w">交互模式检测 + 早期设置加载<span class="sub">main.tsx:803-812</span></div>
+                    <div class="vc s20"></div>
+
+                    <div class="fn n-process">Commander 程序实例 — preAction 钩子<span class="sub">main.tsx:884-967</span></div>
+                    <div class="vc s20"></div>
+
+                    <div class="fc-row">
+                        <div class="fn n-check w">preAction 异步初始化<span class="sub">main.tsx:907-967</span></div>
+                        <div class="hc-arrow s60 green"><span class="hc-label" style="color:var(--green);">命令执行时</span></div>
+                        <div class="fn n-process w">MDM/Keychain 预取<span class="sub">main.tsx:914</span></div>
+                    </div>
+                    <div class="vc s20"></div>
+
+                    <div class="fn n-process w">init() — 全局服务初始化 (memoize)<span class="sub">entrypoints/init.ts:57</span></div>
+                    <div class="vc s20"></div>
+
+                    <div class="fc-row" style="gap:10px;flex-wrap:wrap;justify-content:center;">
+                        <div class="fn n-process" style="max-width:140px;font-size:11px;">enableConfigs<span class="sub">init.ts:59</span></div>
+                        <div class="fn n-process" style="max-width:140px;font-size:11px;">安全环境变量<span class="sub">init.ts:62</span></div>
+                        <div class="fn n-process" style="max-width:140px;font-size:11px;">TLS 预连接<span class="sub">init.ts:78</span></div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Phase 3: 环境准备 → REPL -->
+            <div class="fc">
+                <div class="fc-center">
+                    <div class="fn n-process" style="font-size:11px;color:var(--text-muted);">Phase 3 — 环境准备与 REPL 启动</div>
+                    <div class="vc s20"></div>
+
+                    <div class="fn n-check w">选项解析与模式判断<span class="sub">main.tsx:1090-1252</span></div>
+                    <div class="vc s20"></div>
+
+                    <div class="fc-row">
+                        <div class="fn n-check w">权限上下文初始化<span class="sub">permissionSetup.ts:872</span></div>
+                        <div class="hc-arrow s60"><span class="hc-label">auto 模式</span></div>
+                        <div class="fn n-process w">verifyAutoModeGateAccess<span class="sub">permissionSetup.ts:1078</span></div>
+                    </div>
+                    <div class="vc s20"></div>
+
+                    <div class="fn n-process w">setup() — 完整环境准备<span class="sub">setup.ts:56</span></div>
+                    <div class="vc s20"></div>
+
+                    <div class="fc-row" style="gap:10px;flex-wrap:wrap;justify-content:center;">
+                        <div class="fn n-process" style="max-width:130px;font-size:11px;">Node.js 版本检查<span class="sub">setup.ts:62</span></div>
+                        <div class="fn n-process" style="max-width:130px;font-size:11px;">沙箱验证<span class="sub">setup.ts:120</span></div>
+                        <div class="fn n-process" style="max-width:130px;font-size:11px;">后台任务启动<span class="sub">setup.ts:160</span></div>
+                    </div>
+                    <div class="vc s24"></div>
+
+                    <div class="fn n-check ww">showSetupScreens — 交互式设置对话框序列<span class="sub">interactiveHelpers.tsx:104</span></div>
+                    <div class="vc s20"></div>
+
+                    <div class="fc-row" style="gap:6px;flex-wrap:wrap;justify-content:center;">
+                        <div class="fn n-ask" style="max-width:110px;font-size:10px;">Onboarding</div>
+                        <div class="fn n-immune" style="max-width:110px;font-size:10px;">TrustDialog</div>
+                        <div class="fn n-ask" style="max-width:110px;font-size:10px;">MCP 审批</div>
+                        <div class="fn n-ask" style="max-width:110px;font-size:10px;">API Key</div>
+                        <div class="fn n-deny" style="max-width:110px;font-size:10px;">Bypass 警告</div>
+                    </div>
+                    <div class="vc s24"></div>
+
+                    <div class="fn n-start w">launchRepl — REPL 启动<span class="sub">replLauncher.tsx:12</span></div>
+                    <div class="vc s20"></div>
+
+                    <div class="fc-row">
+                        <div class="fn n-process w">动态 import App + REPL<span class="sub">replLauncher.tsx:14-15</span></div>
+                        <div class="hc-arrow s40"></div>
+                        <div class="fn n-allow w">root.render() + startDeferredPrefetches<span class="sub">replLauncher.tsx:18-20</span></div>
+                    </div>
+                </div>
+            </div>
+
+            <div class="info-box info"><strong>漏斗设计要点</strong>：启动链路的核心原则是"延迟加载"——快速路径在 <code>cli.tsx</code> 就地返回（零模块加载），主路径通过 <code>preAction</code> 钩子确保 <code>--help</code> 不触发 setup，<code>feature()</code> 编译时消除未启用功能的代码，<code>startDeferredPrefetches</code> 将非首屏必需工作推迟到 REPL 渲染后。</div>
+        </section>
+
+        <section id="core-flow" class="card">
+            <h2><span class="icon" style="background:rgba(6,182,212,.15);color:var(--cyan);">⇉</span> 核心处理流程详解</h2>
+            <p>Claude Code 的启动过程采用"漏斗式"架构：先在轻量入口快速分流特殊路径，再逐步加载重量级模块。整个过程从进程启动到 REPL 渲染，经过了 8 个关键阶段，每一层都精心控制了模块加载范围以优化冷启动时间。</p>
+            <div class="flow-chart vertical">
+                <div class="flow-step highlight">
+                    <div class="flow-step-title">1. CLI 快速入口 — 特殊路径分流</div>
+                    <div class="flow-step-desc"><code>entrypoints/cli.tsx:33</code> 的 <code>main()</code> 首先检查 <code>--version</code> 等零依赖标志（L37-41）。通过后依次检测 ~15 个快速路径：MCP 服务器模式（L72-93）、daemon worker（L100-106）、bridge 模式（L112-162）、后台会话管理（L185-209）、模板任务（L212-222）等。每个快速路径使用 <code>feature()</code> 编译时消除 + <code>await import()</code> 按需加载，确保不相关代码零开销。</div>
+                </div>
+                <div class="flow-arrow">↓</div>
+                <div class="flow-step">
+                    <div class="flow-step-title">2. 主模块加载 — 触发 <code>main.tsx</code></div>
+                    <div class="flow-step-desc">所有快速路径都不匹配时，<code>cli.tsx:288-298</code> 开始捕获早期输入（<code>startCapturingEarlyInput</code>），然后动态 import <code>main.tsx</code> 的 <code>main()</code>。这里的 <code>profileCheckpoint</code> 标记精确测量了 import 耗时（约 135ms），用于性能回归检测。</div>
+                </div>
+                <div class="flow-arrow">↓</div>
+                <div class="flow-step highlight">
+                    <div class="flow-step-title">3. 安全预处理 — 攻击面防御</div>
+                    <div class="flow-step-desc"><code>main.tsx:585-607</code> 在任何业务逻辑之前执行安全加固：设置 <code>NoDefaultCurrentDirectoryInExePath='1'</code> 阻止 Windows PATH 劫持（L591），初始化警告处理器（L594），注册退出时的光标重置（L595-597）。接下来处理 cc:// URL 重写（L612-642）、deep link URI（L647-677）、assistant 模式（L685-700）和 SSH 远程（L706-770）等 argv 预处理。</div>
+                </div>
+                <div class="flow-arrow">↓</div>
+                <div class="flow-step">
+                    <div class="flow-step-title">4. Commander 注册与 preAction 初始化</div>
+                    <div class="flow-step-desc"><code>main.tsx:884-967</code> 的 <code>run()</code> 函数创建 Commander 程序实例（L902），注册 ~60 个 CLI 选项。关键设计是 <code>preAction</code> 钩子（L907-967）：只在真正执行命令时才初始化，避免 <code>--help</code> 触发昂贵的 setup。钩子内依次完成：MDM/Keychain 异步加载（L914）、<code>init()</code> 全局初始化（L916）、日志 sink 连接（L934）、迁移执行（L950）和远程设置加载（L957-958）。</div>
+                </div>
+                <div class="flow-arrow">↓</div>
+                <div class="flow-step">
+                    <div class="flow-step-title">5. 选项解析与模式判断</div>
+                    <div class="flow-step-desc"><code>main.tsx:1090-1252</code> 解析 Commander 选项：提取 print/verbose/debug 模式标志，检测 Assistant/Kairos 模式（L1048-1088，需通过信任对话框 + GrowthBook 门控），处理 worktree/tmux/teammate 选项（L1147-1218），并自动设置 SDK URL 的流式格式（L1236-1252）。</div>
+                </div>
+                <div class="flow-arrow">↓</div>
+                <div class="flow-step highlight">
+                    <div class="flow-step-title">6. 权限上下文初始化</div>
+                    <div class="flow-step-desc"><code>permissionSetup.ts:872-1033</code> 的 <code>initializeToolPermissionContext()</code> 从 CLI 标志、settings.json 和磁盘规则构建初始权限上下文。Auto 模式需通过 <code>verifyAutoModeGateAccess()</code>（L1078-1260）的异步门控检查，包括 GrowthBook 功能开关、危险权限剥离和 circuit-breaker 状态。</div>
+                </div>
+                <div class="flow-arrow">↓</div>
+                <div class="flow-step">
+                    <div class="flow-step-title">7. setup() — 完整环境准备</div>
+                    <div class="flow-step-desc"><code>main.tsx</code> 的 action handler 中调用 <code>setup()</code>（约在 L1700+ 区域），完成信任对话框展示、MCP 服务器连接、权限验证、worktree 创建和后台任务初始化。<code>startDeferredPrefetches()</code>（<code>main.tsx:388-431</code>）启动不需要在首帧渲染前完成的预取：系统上下文、git 状态、skills 发现。</div>
+                </div>
+                <div class="flow-arrow">↓</div>
+                <div class="flow-step">
+                    <div class="flow-step-title">8. REPL 启动 — 进入交互循环</div>
+                    <div class="flow-step-desc"><code>main.tsx:3733-3799</code> 调用 <code>launchRepl()</code>，该函数（<code>replLauncher.tsx</code>）动态加载 App + REPL 组件。传入的配置包括：初始消息、文件历史快照、agent 定义、会话配置等。新会话和恢复会话（<code>/resume</code>、<code>-c</code>）都汇聚到同一个 <code>launchRepl</code> 调用点，区别仅在于传入的初始数据不同。</div>
+                </div>
+            </div>
+            <div class="info-box info">整个启动链路的核心设计原则是"延迟加载"：快速路径在 <code>cli.tsx</code> 就地返回，零模块加载；主路径按需初始化——<code>preAction</code> 钩子确保 <code>--help</code> 不触发 setup，<code>feature()</code> 编译时消除未启用的功能代码，<code>startCapturingEarlyInput</code> 在模块加载期间并行捕获用户输入，最大化利用等待时间。</div>
+        </section>
+        <section id="design-essence" class="card">
+            <h2><span class="icon" style="background:rgba(245,158,11,.15);color:var(--amber);">★</span> 设计精华</h2>
+            <h3>1. feature() 编译时特性消除</h3>
+            <p>所有功能开关通过 <code>import { feature } from 'bun:bundle'</code> 引入。Bun 打包器在构建时对 <code>feature('XXX')</code> 进行死代码消除——外部构建直接移除内部功能代码块，使产物体积最小化。这比运行时 if 检查更安全：即使代码中引用了内部包名，它们也不会出现在外部构建中。</p>
+            <div class="component-box">
+                <div class="name">Feature Flag Dead Code Elimination</div>
+                <div class="desc">源码中大量使用此模式——快速路径、MCP 集成、bridge 模式等全部用 feature() 包裹</div>
+                <pre><code>// entrypoints/cli.tsx:86 — 编译时决定是否包含此代码
+if (feature('CHICAGO_MCP') && process.argv[2] === '--computer-use-mcp') {
+  const { runComputerUseMcpServer } = await import('../utils/computerUse/mcpServer.js');
+  await runComputerUseMcpServer();
+  return; // 外部构建中此分支完全不存在
+}</code></pre>
+            </div>
+            <div class="info-box tip">这种设计使得同一份源码能产出"内部版"和"外部版"两个差异巨大的构建产物，而无需维护分支。关键在于 Bun 的 <code>feature()</code> 既是运行时函数又是编译时标记——编译器能识别 <code>if (feature('X'))</code> 模式并消除整个分支。</div>
+            <h3>2. 快速路径漏斗 — 零加载分派</h3>
+            <p><code>cli.tsx</code> 是整个系统最薄的一层。它通过字符串匹配 <code>process.argv</code> 快速分流 ~15 个子路径，每个子路径只 <code>await import()</code> 自己需要的模块。这意味着 <code>claude --version</code> 的开销几乎等于一次 <code>console.log</code>，而 <code>claude daemon</code> 完全不会加载 React、权限系统或工具定义。</p>
+            <div class="component-box">
+                <div class="name">Zero-Load Fast Path</div>
+                <div class="desc">cli.tsx:37-274 的每个快速路径都遵循同一模式</div>
+                <pre><code>// cli.tsx:37-41 — 最快的快速路径，零模块加载
+if (args.length === 1 && (args[0] === '--version' || args[0] === '-v')) {
+  console.log(`${MACRO.VERSION} (Claude Code)`);
+  return; // 不加载 profiler、config、任何业务模块
+}
+
+// cli.tsx:100-106 — daemon worker 只加载自己
+if (feature('DAEMON') && args[0] === '--daemon-worker') {
+  const { runDaemonWorker } = await import('../daemon/workerRegistry.js');
+  await runDaemonWorker(args[1]);
+  return;
+}</code></pre>
+            </div>
+            <div class="info-box tip">快速路径模式的精妙之处在于每个分支都是"自包含"的——只加载自己需要的代码，且 <code>return</code> 后不会继续执行后续逻辑。这使得添加新的子命令不影响已有路径的性能。</div>
+            <h3>3. preAction 延迟初始化钩子</h3>
+            <p><code>main.tsx:907-967</code> 的 <code>preAction</code> 钩子解决了"何时初始化"的经典问题：用户输入 <code>claude --help</code> 时不需要连接网络、加载设置或初始化遥测——只有真正执行命令（action handler 触发）时才做昂贵操作。这种设计将帮助文本的响应时间从数百毫秒降到数十毫秒。</p>
+            <div class="component-box">
+                <div class="name">Lazy Initialization via preAction Hook</div>
+                <div class="desc">Commander 的 preAction 钩子确保只在命令执行时初始化</div>
+                <pre><code>// main.tsx:907-916
+program.hook('preAction', async thisCommand => {
+  // 只在真正执行命令时才触发，--help 不会进入这里
+  await Promise.all([ensureMdmSettingsLoaded(), ensureKeychainPrefetchCompleted()]);
+  await init(); // 全局初始化（配置、网络、遥测）
+  // ...
+  void loadRemoteManagedSettings(); // 非阻塞，企业设置热加载
+  void loadPolicyLimits();           // 非阻塞，策略限制
+});</code></pre>
+            </div>
+            <div class="info-box tip">preAction 钩子内部的 <code>void loadRemoteManagedSettings()</code> 和 <code>void loadPolicyLimits()</code> 使用"发射即忘"模式——它们不阻塞 REPL 启动，结果通过热更新机制异步生效。这是"乐观启动"策略的体现：先用默认值启动，等远程配置到达后再更新。</div>
+            <h3>4. 信任门控的安全边界</h3>
+            <p>在恶意仓库中，<code>.claude/settings.json</code> 和 <code>.claude/agents/</code> 是攻击者可控的。系统在 <code>main.tsx:1042-1048</code> 附近实现了信任门控：<code>checkHasTrustDialogAccepted()</code> 必须在启用 assistant 模式、加载 agent 定义或执行 hooks 之前通过。这确保即使攻击者构造了恶意配置，也不会在用户明确信任工作目录前生效。</p>
+            <div class="component-box">
+                <div class="name">Trust Gate Pattern</div>
+                <div class="desc">所有安全敏感操作都锚定在信任对话框之后</div>
+                <pre><code>// main.tsx:1067-1069
+if (!checkHasTrustDialogAccepted()) {
+  console.warn('Assistant mode disabled: directory is not trusted.');
+} else {
+  kairosEnabled = assistantModule.isAssistantForced()
+    || (await kairosGate.isKairosEnabled());
+  // ... 只有信任后才初始化团队和 agent
+}</code></pre>
+            </div>
+            <div class="info-box tip">信任门控是纵深防御的关键一环。它不替代权限系统（权限检查在运行时每个工具调用时都执行），而是阻止在启动阶段的"灰色地带"——hooks 执行、agent 提示词注入、settings.json 中的自动权限规则——这些在用户尚未确认信任时就可能触发。</div>
+            <h3>5. profileCheckpoint 性能遥测管线</h3>
+            <p>启动路径中散布的 <code>profileCheckpoint()</code> 调用（<code>cli.tsx:48,292,296</code>、<code>main.tsx:586,607,885,903,1007</code> 等）构建了一个细粒度的启动时间线。每个 checkpoint 记录时间戳和标签，用于回归检测——如果某次提交导致 <code>cli_before_main_import</code> 到 <code>cli_after_main_import</code> 的时间增长超过阈值，CI 会自动报警。</p>
+            <div class="component-box">
+                <div class="name">Startup Profiler Timeline</div>
+                <div class="desc">checkpoint 从入口到 REPL 渲染覆盖完整链路</div>
+                <pre><code>// cli.tsx 中关键 checkpoint 序列
+profileCheckpoint('cli_entry');           // L48: 入口开始
+profileCheckpoint('cli_before_main_import'); // L292: 加载 main.tsx 前
+profileCheckpoint('cli_after_main_import');  // L296: 加载完成
+profileCheckpoint('cli_after_main_complete'); // L298: main() 返回后
+
+// main.tsx 中继续
+profileCheckpoint('main_function_start');     // L586
+profileCheckpoint('run_function_start');      // L885
+profileCheckpoint('preAction_start');         // L908
+profileCheckpoint('action_handler_start');    // L1007</code></pre>
+            </div>
+            <div class="info-box tip">性能遥测不仅用于 CI 回归检测，还通过 Statsig 聚合到后端——产品团队能看到 P50/P95 的各阶段耗时，精确定位"某次发布后 macOS 上的 Keychain 预取变慢了 200ms"这类问题。这种数据驱动的性能优化让启动时间在功能持续增长的同时保持稳定。</div>
+        </section>
+
+        <section id="agent-practice" class="card">
+            <h2><span class="icon" style="background:rgba(34,197,94,.15);color:var(--green);">◈</span> Agent 实践借鉴 — 客服 Agent 启动设计</h2>
+
+            <h3>场景映射：客服 Agent 启动时会遇到什么真实问题？</h3>
+            <p>一个客服 Agent 上线时要面对的远不止"加载代码"这么简单。真实痛点是：</p>
+            <ul>
+                <li><strong>多系统集成</strong>：CRM（查客户画像）、订单系统（查订单详情）、支付系统（查退款状态）、知识库（查商品 FAQ）。这四个系统任何一个连接慢，客户都在等待。</li>
+                <li><strong>渠道差异</strong>：电话客服坐席需要 ASR/TTS 通道，在线客服需要富文本消息能力，工单处理只需要后台 API。如果把所有渠道的初始化都跑一遍，50% 的工作是浪费的。</li>
+                <li><strong>冷启动即客户等待</strong>：坐席签到后，客户电话就打进来了。如果 Agent 还在连接 CRM，客户听到的是沉默。</li>
+                <li><strong>可选依赖</strong>：SMS 通知只在部分渠道开启，情感分析只在电话渠道需要。这些不应该拖慢其他渠道的启动。</li>
+            </ul>
+
+            <h3>借鉴 CC：Claude Code 是怎么解决启动问题的？</h3>
+            <p>CC 的启动是一个"漏斗式"管线：<code>cli.tsx</code> 先做零依赖的快速路径分流（如 <code>--version</code> 直接返回），不匹配快速路径的才进入主初始化管线。主管线内部采用<strong>渐进式加载</strong>：先展示 REPL 界面 → 再加载工具定义 → 再连接 MCP 服务器。整个过程通过 <code>profileCheckpoint()</code> 在每个阶段打点，方便定位哪个阶段慢了。</p>
+            <pre><code>// CC 的启动管线（简化）
+// cli.tsx: 零依赖快速路径
+if (args[0] === '--version') { console.log(VERSION); return; }
+
+// 主路径：渐进式加载
+profileCheckpoint('cli_entry');
+startCapturingEarlyInput();                // 并行捕获用户输入
+const { cliMain } = await import('./main.js');  // ~135ms
+profileCheckpoint('cli_after_import');
+
+// main.tsx preAction: 只在命令执行时初始化
+program.hook('preAction', async () => {
+  await Promise.all([loadMDM(), prefetchKeychain()]);  // 并行预取
+  await init();          // 全局初始化（配置、网络、遥测）
+  void loadRemoteSettings();  // 发射即忘，不阻塞启动
+});
+
+// 最后：渲染 REPL 界面，后台继续加载工具和 MCP
+launchRepl();
+startDeferredPrefetches();  // 插件、git 状态、skills 延迟加载</code></pre>
+
+            <h3>客服 Agent 怎么改：多阶段启动管线</h3>
+            <p>借鉴 CC 的渐进式加载思路，但不用 feature flag 编译时消除（客服 Agent 不需要同一份代码出两个构建产物，用运行时配置区分渠道即可）。改造后的启动管线分三个阶段：</p>
+            <pre><code>// 客服 Agent 多阶段启动管线
+type ChannelType = 'phone' | 'online' | 'ticket';
+
+async function bootstrapAgent(channel: ChannelType, config: AgentConfig) {
+  const checkpoints = new Map&lt;string, number&gt;();
+  const mark = (label: string) => checkpoints.set(label, Date.now());
+
+  // ===== 阶段 1：建立对话能力（类比 CC 的 cli.tsx → 展示 REPL）=====
+  // 目标：让坐席看到界面，客户能发消息，即使后面系统还没连上
+  mark('stage1_start');
+  const chatEngine = initChatEngine(channel);  // 同步，&lt;10ms
+  const basicPrompt = buildSystemPrompt(config.basePrompt);
+  mark('stage1_complete');
+  // 此时坐席已经能看到对话界面，客户消息已能接收（暂存在队列中）
+
+  // ===== 阶段 2：加载业务工具（类比 CC 的工具注册 + REPL 渲染）=====
+  // 目标：Agent 能开始处理基础问题（查 FAQ、查知识库）
+  mark('stage2_start');
+  const baseTools = loadBaseTools();           // 查知识库、查 FAQ、转人工（所有渠道通用）
+  const channelTools = loadChannelTools(channel); // 按渠道加载
+  // online 渠道才有"发优惠券"，phone 渠道才有"查通话录音"
+  const allTools = [...baseTools, ...channelTools];
+  mark('stage2_complete');
+  // 此时 Agent 已经能回答常见问题、查知识库
+
+  // ===== 阶段 3：连接外部系统（类比 CC 的 MCP 连接 + 延迟预取）=====
+  // 目标：Agent 能处理需要外部系统的请求（查订单、查物流、退款）
+  // 这些连接异步进行，不阻塞前面的阶段
+  mark('stage3_start');
+  const externalConnections: Record&lt;string, Promise&lt;any&gt;&gt; = {};
+
+  // 并行连接所有外部系统
+  const connectPromises = {
+    crm:     connectCRM(config.crmUrl),           // 客户画像
+    order:   connectOrderSystem(config.orderUrl),  // 订单查询
+    payment: connectPaymentSystem(config.payUrl),  // 退款状态
+    sms:     channel === 'online' ? connectSMS(config.smsUrl) : Promise.resolve(null),
+    // ↑ SMS 只在在线渠道连接，电话/工单渠道跳过（懒加载）
+  };
+
+  // 不等待连接完成，先让 Agent 上线
+  // 工具调用时检查连接状态，未就绪则返回"系统加载中，请稍后"
+  externalConnections.ready = Promise.allSettled(Object.values(connectPromises))
+    .then(() => { mark('stage3_complete'); });
+
+  return {
+    chatEngine,
+    basicPrompt,
+    allTools,
+    externalConnections,
+    getCheckpoints: () => Object.fromEntries(checkpoints),
+  };
+}
+
+// 渠道差异化工具加载（运行时配置，不需要编译时 feature flag）
+function loadChannelTools(channel: ChannelType): Tool[] {
+  const toolMap: Record&lt;ChannelType, string[]&gt; = {
+    online: ['sendCoupon', 'sendLink', 'richTextReply'],
+    phone:  ['checkCallRecording', 'transferCall'],
+    ticket: ['createTicket', 'updateTicket', 'assignTicket'],
+  };
+  return toolMap[channel].map(name => buildTool(toolDefs[name]));
+}</code></pre>
+
+            <h4>启动遥测：定位"慢在哪里"</h4>
+            <pre><code>// 借鉴 CC 的 profileCheckpoint 模式
+// 客服场景需要监控每个阶段的耗时，方便定位启动瓶颈
+interface StartupReport {
+  totalMs: number;
+  stages: {
+    stage1_dialogReady: number;   // 目标 &lt; 50ms
+    stage2_toolsReady: number;    // 目标 &lt; 200ms
+    stage3_externalReady: number; // 目标 &lt; 2000ms（异步，不阻塞）
+  };
+  channel: ChannelType;
+  timestamp: string;
+}
+
+// 每次启动上报到监控面板
+// 告警规则：stage1 > 100ms 触发 P1 告警（客户等待）
+// 告警规则：stage3 的某个系统连接 > 5s 触发 P2 告警（降级服务）</code></pre>
+
+            <h3>落地清单</h3>
+            <div class="two-col">
+                <div class="info-box tip">
+                    <strong>必须抄的：</strong>
+                    <ul>
+                        <li><strong>渐进式加载</strong>：先让对话能力就绪（阶段 1），再加载工具（阶段 2），最后连外部系统（阶段 3）。客户感知到的等待时间只取决于阶段 1。</li>
+                        <li><strong>启动分阶段遥测</strong>：每个阶段打时间戳，上报到监控。当 CRM 连接超时导致 stage3 变慢时，能立刻知道"是 CRM 慢了"而不是"Agent 整体慢了"。</li>
+                        <li><strong>并行连接外部系统</strong>：CRM、订单、支付同时连，不要串行。借鉴 CC 的 <code>Promise.all([loadMDM(), prefetchKeychain()])</code>。</li>
+                        <li><strong>延迟加载非必要能力</strong>：SMS 通知、情感分析等只在特定渠道才需要，不加载。</li>
+                    </ul>
+                </div>
+                <div class="info-box warning">
+                    <strong>不需要抄的：</strong>
+                    <ul>
+                        <li><strong>Feature flag 编译时消除</strong>：CC 用 <code>feature('XXX')</code> 是为了同一份源码出内外两个构建。客服 Agent 不需要这个——渠道差异用运行时配置就够了，直接 <code>if (channel === 'online')</code> 更直观。</li>
+                        <li><strong>零依赖快速路径</strong>：CC 有 <code>--version</code> 等十几个零加载路径，客服 Agent 只有一个入口（坐席签到），不需要这个模式。</li>
+                        <li><strong>早期输入捕获</strong>：CC 在模块加载的 135ms 窗口捕获用户打字。客服 Agent 启动时客户还没接入，不需要这个。</li>
+                    </ul>
+                </div>
+            </div>
+
+            <div class="info-box warning">
+                <strong>常见坑：</strong>
+                <ul>
+                    <li><strong>把所有外部系统连接放在阶段 1</strong>：CRM 连接超时 3s，坐席对着空白界面等 3 秒。正确做法是阶段 1 只做 UI 就绪（&lt;50ms），外部系统全部异步连接。</li>
+                    <li><strong>串行连接外部系统</strong>：先连 CRM → 再连订单 → 再连支付。如果每个 500ms，总计 1.5s。改为 <code>Promise.allSettled()</code> 并行连接，最慢的那个决定总时间。</li>
+                    <li><strong>工具未就绪时客户消息丢失</strong>：阶段 2 还没加载完，客户发来"我要退货"。如果消息队列没做好，这条消息就丢了。正确做法是阶段 1 就建好消息队列，后续阶段消费。</li>
+                    <li><strong>忽略 <code>Promise.allSettled</code> 和 <code>Promise.all</code> 的区别</code></strong>：用 <code>Promise.all</code> 连接外部系统，一个超时全部失败。应该用 <code>allSettled</code>，哪个连不上就降级那个，不影响其他系统。</li>
+                </ul>
+            </div>
+        </section>
+
+        <section id="code-index" class="card">
+            <h2>代码索引</h2>
+            <table>
+                <thead><tr><th>文件</th><th>行数</th><th>说明</th></tr></thead>
+                <tbody>
+                    <tr><td><code>entrypoints/cli.tsx</code></td><td>~300</td><td>Bootstrap 入口，快速路径分发</td></tr>
+                    <tr><td><code>main.tsx</code></td><td>~4684</td><td>主入口：安全预处理、Commander 注册、REPL 启动</td></tr>
+                    <tr><td><code>entrypoints/init.ts</code></td><td>~341</td><td>全局初始化：配置、网络、遥测</td></tr>
+                    <tr><td><code>setup.ts</code></td><td>~478</td><td>环境设置：权限验证、worktree、后台任务</td></tr>
+                    <tr><td><code>bootstrap/state.ts</code></td><td>~1500</td><td>全局可变状态（sessionId、cwd、遥测等）</td></tr>
+                    <tr><td><code>replLauncher.tsx</code></td><td>~23</td><td>REPL 启动：动态加载 App + REPL 组件</td></tr>
+                    <tr><td><code>interactiveHelpers.tsx</code></td><td>~366</td><td>设置对话框序列、renderAndRun</td></tr>
+                    <tr><td><code>dialogLaunchers.tsx</code></td><td>~133</td><td>对话框启动器（恢复、快照、teleport 等）</td></tr>
+                    <tr><td><code>state/store.ts</code></td><td>~35</td><td>通用不可变状态容器</td></tr>
+                    <tr><td><code>state/AppStateStore.ts</code></td><td>~1200+</td><td>AppState 类型定义与默认值工厂</td></tr>
+                    <tr><td><code>state/AppState.tsx</code></td><td>~150</td><td>AppStateProvider（React Context + 设置变更监听）</td></tr>
+                    <tr><td><code>state/onChangeAppState.ts</code></td><td>~120</td><td>状态变更副作用（权限模式同步、遥测）</td></tr>
+                    <tr><td><code>state/selectors.ts</code></td><td>~50</td><td>派生状态选择器（纯函数）</td></tr>
+                    <tr><td><code>coordinator/coordinatorMode.ts</code></td><td>~370</td><td>协调器模式（多 Agent 调度提示词）</td></tr>
+                </tbody>
+            </table>
+        </section>
+        <footer style="text-align:center; padding:32px 0 20px; margin-top:48px; border-top:1px solid var(--border); color:var(--text-secondary); font-size:13px; line-height:2;">
+        <div style="margin-bottom:4px;">⚠️ 免责声明</div>
+        本文仅用于技术学习和架构分析目的。源码分析基于公开泄漏的代码，所有商标和版权归 <a href="https://www.anthropic.com" style="color:var(--indigo);">Anthropic</a> 所有。未经授权不得用于商业用途。
+    </footer>
+    </main>
+</body>
+</html>

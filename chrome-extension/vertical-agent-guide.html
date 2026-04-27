@@ -1,0 +1,748 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>垂直 Agent 设计实践指南 - Claude Code 源码分析</title>
+    <link rel="stylesheet" href="shared/styles.css">
+</head>
+<body>
+    <nav class="sidebar">
+        <div class="sidebar-header"><div class="logo">CC</div><div><div class="sidebar-title">Claude Code</div><div class="sidebar-subtitle">源码深度分析</div></div></div>
+                <div class="nav-section-title">总览</div>
+        <a href="reading-guide.html" class="nav-link">阅读指南</a>
+        <a href="index.html" class="nav-link">架构全景</a>
+        <a href="dependency-map.html" class="nav-link">模块依赖图</a>
+        <a href="vertical-agent-guide.html" class="nav-link active">垂直 Agent 设计指南</a>
+<div class="nav-section-title">核心流程</div>
+        <a href="00-startup.html" class="nav-link">启动链路</a>
+        <a href="01-query-loop.html" class="nav-link">Query 循环</a>
+        <a href="flows/query-lifecycle.html" class="nav-link">查询生命周期</a>
+        <div class="nav-section-title">核心机制</div>
+        <a href="02-tool-dispatch.html" class="nav-link">工具调度</a>
+        <a href="03-permissions.html" class="nav-link">权限系统</a>
+<a href="03b-security-hardening.html" class="nav-link">风控与安全加固</a>
+        <a href="04-agent-arch.html" class="nav-link">Agent 架构</a>
+        <a href="11-hooks.html" class="nav-link">Hook 机制</a>
+        <div class="nav-section-title">扩展体系</div>
+        <a href="05-mcp.html" class="nav-link">MCP 体系</a>
+        <a href="07-plugins.html" class="nav-link">插件系统</a>
+        <a href="08-commands.html" class="nav-link">命令系统</a>
+        <div class="nav-section-title">数据与服务</div>
+        <a href="06-context-mgmt.html" class="nav-link">上下文管理</a>
+        <a href="10-services.html" class="nav-link">服务层</a>
+        <a href="15-cost-limits.html" class="nav-link">成本与限流</a>
+        <div class="nav-section-title">界面与配置</div>
+        <a href="09-ui.html" class="nav-link">UI 交互层</a>
+        <a href="13-config.html" class="nav-link">配置与迁移</a>
+        <div class="nav-section-title">外围能力</div>
+        <a href="12-external.html" class="nav-link">外部集成</a>
+        <a href="14-native.html" class="nav-link">Native 能力</a>
+<div class="nav-section-title">安全专题</div>
+<a href="16-anti-distillation.html" class="nav-link">反蒸馏与输出保护</a>
+<a href="17-buddy.html" class="nav-link">Buddy 宠物系统</a>
+<div class="nav-section-title">数据专题</div>
+<a href="18-telemetry.html" class="nav-link">遥测与用户画像</a>
+        <div class="nav-section-title">流程图</div>
+        <a href="flows/tool-execution.html" class="nav-link">工具执行流程</a>
+        <a href="flows/agent-collab.html" class="nav-link">Agent 协作流程</a>
+        <div class="nav-section-title">实践</div>
+        <a href="vertical-agent-guide.html" class="nav-link active">垂直 Agent 设计指南</a>
+    </nav>
+
+    <main class="content">
+        <header class="page-header">
+            <span class="breadcrumb"><a href="index.html">源码分析</a></span>
+            <h1>垂直 Agent 设计实践指南</h1>
+            <p class="subtitle">从 Claude Code 51 万行源码中提炼的 10 个可落地设计模式，以智能客服 Agent 为例</p>
+        </header>
+
+        <!-- 导言 -->
+        <section class="card">
+            <h2>为什么这篇指南值得读</h2>
+            <p>这篇指南不是泛泛而谈的"架构建议"。每一条模式都是从 Claude Code 源码中实际读出来的，标注了源码位置，附带了可以直接抄的代码骨架。以「智能客服 Agent」为贯穿案例，说明每个模式怎么落地。</p>
+            <div class="info-box info">
+                源码依据：<code>QueryEngine.ts</code>（1296行）、<code>query.ts</code>（1730行）、<code>Tool.ts</code>（793行）、<code>context.ts</code>、<code>services/compact/</code>、<code>utils/permissions/</code>（1487行）
+            </div>
+        </section>
+
+        <!-- 模式 1 -->
+        <section class="card">
+            <h2>模式 1：AsyncGenerator 查询循环</h2>
+            <h3>源码位置</h3>
+            <p><code>query.ts:219-1358</code> — <code>async function* queryLoop()</code></p>
+
+            <h3>Claude Code 怎么做的</h3>
+            <p>核心查询循环是一个 <code>async function*</code>（AsyncGenerator）。用户输入进入循环，循环调用 LLM API，API 流式返回，工具调用在流中即时执行，结果通过 <code>yield</code> 逐条推送。循环状态通过不可变 <code>State</code> 对象在迭代间传递，每次 continue 都创建新对象。</p>
+            <pre><code>// query.ts:241-279 — 循环状态设计
+type State = {
+  messages: Message[]
+  toolUseContext: ToolUseContext
+  maxOutputTokensRecoveryCount: number
+  hasAttemptedReactiveCompact: boolean
+  pendingToolUseSummary: Promise&lt;ToolUseSummaryMessage | null&gt; | undefined
+  turnCount: number
+  transition: Continue | undefined  // 上一次 continue 的原因
+}
+
+async function* queryLoop(params) {
+  let state: State = { ...初始状态 }
+  while (true) {
+    let { toolUseContext, messages, ... } = state  // 顶部解构
+    // ... 调用 API、执行工具 ...
+    state = { ...state, messages: newMessages }     // 不可变替换
+    continue  // 进入下一轮迭代
+  }
+}</code></pre>
+
+            <h3>设计精华</h3>
+            <div class="info-box tip">
+                <strong>为什么要 AsyncGenerator 而不是 Promise？</strong><br>
+                三个原因：① 天然支持流式输出（LLM 一个 token 一个 token 吐）；② 调用方可以用 <code>for await...of</code> 消费，也可以随时 <code>.return()</code> 取消；③ <code>yield*</code> 委托子循环，子 Agent 天然嵌入。
+            </div>
+
+            <h3>智能客服 Agent 怎么抄</h3>
+            <pre><code>// 智能客服的核心对话循环
+type CustomerServiceState = {
+  conversationId: string
+  messages: ChatMessage[]
+  customerProfile: Customer | null      // 客户画像（随对话积累）
+  ticketId: string | null               // 工单 ID（可能后续创建）
+  escalationCount: number               // 转人工次数
+  turnCount: number
+  lastAction: 'none' | 'query_order' | 'create_ticket' | 'refund' | 'escalate'
+}
+
+async function* customerServiceLoop(
+  input: string,
+  initialState: CustomerServiceState
+): AsyncGenerator&lt;LoopEvent, void, unknown&gt; {
+  let state = initialState
+
+  while (true) {
+    // 1. 构建上下文（客户历史 + 产品知识 + 当前状态）
+    const context = buildCustomerContext(state)
+
+    // 2. 调用 LLM（流式）
+    for await (const chunk of callLLM(context)) {
+      if (chunk.type === 'tool_use') {
+        // 3. 执行工具（查订单、建工单、退款...）
+        const result = await executeTool(chunk.tool, chunk.input, state)
+        yield { type: 'tool_result', tool: chunk.tool, result }
+        state = { ...state, lastAction: chunk.tool }
+      } else {
+        yield { type: 'text', content: chunk.content }
+      }
+    }
+
+    // 4. 检查终止条件
+    if (shouldEndConversation(state)) return
+
+    // 5. 不可变状态替换
+    state = { ...state, turnCount: state.turnCount + 1 }
+  }
+}</code></pre>
+        </section>
+
+        <!-- 模式 2 -->
+        <section class="card">
+            <h2>模式 2：Fail-Closed 工具系统</h2>
+            <h3>源码位置</h3>
+            <p><code>Tool.ts:757-792</code> — <code>buildTool()</code> 工厂函数</p>
+
+            <h3>Claude Code 怎么做的</h3>
+            <p>每个工具通过 <code>buildTool()</code> 创建，未指定的安全方法自动填充"最保守"默认值：<code>isConcurrencySafe → false</code>、<code>isReadOnly → false</code>。开发者必须显式声明"安全"才能获得安全行为。这叫 Fail-Closed：忘记配置不会产生安全漏洞。</p>
+            <pre><code>// Tool.ts:757-769 — fail-closed 默认值
+const TOOL_DEFAULTS = {
+  isEnabled: () => true,
+  isConcurrencySafe: (_input?: unknown) =&gt; false,  // 默认不安全
+  isReadOnly: (_input?: unknown) =&gt; false,           // 默认会写
+  isDestructive: (_input?: unknown) =&gt; false,
+  checkPermissions: (input) =&gt;
+    Promise.resolve({ behavior: 'allow', updatedInput: input }),
+  toAutoClassifierInput: (_input?: unknown) =&gt; '',
+  userFacingName: (_input?: unknown) =&gt; '',
+}
+
+// Tool.ts:783-792 — 展开合并
+export function buildTool&lt;D extends AnyToolDef&gt;(def: D): BuiltTool&lt;D&gt; {
+  return { ...TOOL_DEFAULTS, userFacingName: () =&gt; def.name, ...def }
+}</code></pre>
+
+            <h3>设计精华</h3>
+            <div class="info-box tip">
+                <strong>TypeScript 类型体操保证编译时安全</strong>：<code>BuiltTool&lt;D&gt;</code> 在类型层面精确模拟了运行时的 <code>{...TOOL_DEFAULTS, ...def}</code>。如果工具没提供 <code>isConcurrencySafe</code>，类型系统知道它用的是默认的 <code>false</code>。这比运行时检查早了一个阶段。
+            </div>
+
+            <h3>智能客服 Agent 怎么抄</h3>
+            <pre><code>// 客服工具的 fail-closed 设计
+const CUSTOMER_SERVICE_TOOL_DEFAULTS = {
+  // 默认全部需要人工确认
+  requiresApproval: () =&gt; true,
+  // 默认不可并发（防止重复退款）
+  isConcurrencySafe: () =&gt; false,
+  // 默认会影响数据（不假设是只读查询）
+  isReadOnly: () =&gt; false,
+  // 默认不可回滚
+  isReversible: () =&gt; false,
+}
+
+function defineTool(def: Partial&lt;CustomerServiceTool&gt;) {
+  return { ...CUSTOMER_SERVICE_TOOL_DEFAULTS, ...def }
+}
+
+// 查订单 — 安全的只读操作
+const queryOrder = defineTool({
+  name: 'query_order',
+  description: '查询订单状态',
+  isReadOnly: () =&gt; true,
+  requiresApproval: () =&gt; false,  // 查询不需要审批
+  isConcurrencySafe: () =&gt; true,  // 可以并发查
+  execute: async (input) =&gt; { /* 查数据库 */ },
+})
+
+// 退款 — 危险操作，默认就锁住
+const processRefund = defineTool({
+  name: 'process_refund',
+  description: '处理退款',
+  // 没写 requiresApproval → 默认 true → 必须人工确认
+  // 没写 isReversible → 默认 false → 标记为不可回滚
+  execute: async (input) =&gt; { /* 调用退款 API */ },
+})</code></pre>
+        </section>
+
+        <!-- 模式 3 -->
+        <section class="card">
+            <h2>模式 3：多级上下文压缩管线</h2>
+            <h3>源码位置</h3>
+            <p><code>query.ts:400-468</code> — 压缩管线入口</p>
+
+            <h3>Claude Code 怎么做的</h3>
+            <p>上下文压缩不是一步到位的，而是 4 级管线，每级比上一级更重：</p>
+            <div class="flow-chart vertical" style="margin:16px 0">
+                <div class="flow-step">
+                    <div class="flow-step-title">Level 1: Snip（轻量裁剪）</div>
+                    <div class="flow-step-desc">按 token 预算裁剪旧消息，不调 API，0 成本</div>
+                </div>
+                <div class="flow-arrow">&#9660;</div>
+                <div class="flow-step">
+                    <div class="flow-step-title">Level 2: Microcompact（缓存编辑）</div>
+                    <div class="flow-step-desc">利用 API 缓存删除机制，在服务端"删除"旧内容，几乎不花 token</div>
+                </div>
+                <div class="flow-arrow">&#9660;</div>
+                <div class="flow-step">
+                    <div class="flow-step-title">Level 3: Context Collapse（折叠）</div>
+                    <div class="flow-step-desc">将连续的搜索/读取操作折叠为摘要，保留粒度信息</div>
+                </div>
+                <div class="flow-arrow">&#9660;</div>
+                <div class="flow-step highlight">
+                    <div class="flow-step-title">Level 4: Autocompact（全量压缩）</div>
+                    <div class="flow-step-desc">调一次 LLM，将完整对话历史压缩为摘要消息。最重但最有效</div>
+                </div>
+            </div>
+            <div class="info-box tip">
+                <strong>设计精髓</strong>：4 级管线串联执行，每级输出是下一级输入。如果 Level 2 就够了，不会触发 Level 4。渐进式压缩 = 渐进式成本。这在长对话中节省 90%+ 的 token 消耗。
+            </div>
+
+            <h3>智能客服 Agent 怎么抄</h3>
+            <pre><code>// 客服场景的上下文压缩管线
+async function compressContext(messages: ChatMessage[], budget: number) {
+  let compressed = [...messages]
+
+  // Level 1: 裁剪无关消息（系统通知、已关闭工单的对话）
+  compressed = pruneIrrelevantMessages(compressed)
+  if (tokenCount(compressed) &lt; budget) return compressed
+
+  // Level 2: 摘要历史对话（客户之前咨询过的记录）
+  compressed = await summarizeOldConversations(compressed)
+  if (tokenCount(compressed) &lt; budget) return compressed
+
+  // Level 3: 压缩冗余工具调用（多次查订单 → 保留最新一次结果）
+  compressed = deduplicateToolResults(compressed)
+  if (tokenCount(compressed) &lt; budget) return compressed
+
+  // Level 4: 全量摘要（最重，调 LLM 生成对话概要）
+  return await fullCompact(compressed)
+}</code></pre>
+        </section>
+
+        <!-- 模式 4 -->
+        <section class="card">
+            <h2>模式 4：延迟暴露的错误恢复</h2>
+            <h3>源码位置</h3>
+            <p><code>query.ts:788-820</code>（错误隐藏）+ <code>query.ts:1065-1183</code>（恢复逻辑）</p>
+
+            <h3>Claude Code 怎么做的</h3>
+            <p>这是整个源码中最精妙的设计之一。当 LLM API 返回错误（如 prompt-too-long、max-output-tokens），Claude Code 不会立即暴露给用户。而是：</p>
+            <ol>
+                <li><strong>Withhold（隐藏）</strong>：标记错误为 <code>withheld = true</code>，不 yield 给用户</li>
+                <li><strong>Attempt recovery（尝试恢复）</strong>：压缩上下文、裁剪图片、提升 token 限制</li>
+                <li><strong>Retry（重试）</strong>：用恢复后的状态重新进入循环</li>
+                <li><strong>Surface if exhausted（用尽后暴露）</strong>：所有恢复路径都失败了，才把原始错误暴露给用户</li>
+            </ol>
+            <pre><code>// query.ts:788-823 — 错误隐藏机制
+let withheld = false
+if (feature('CONTEXT_COLLAPSE') &amp;&amp;
+    contextCollapse?.isWithheldPromptTooLong(message, ...)) {
+  withheld = true
+}
+if (reactiveCompact?.isWithheldPromptTooLong(message)) {
+  withheld = true
+}
+if (isWithheldMaxOutputTokens(message)) {
+  withheld = true
+}
+if (!withheld) {
+  yield yieldMessage  // 只有不隐藏的才 yield
+}
+assistantMessages.push(message)  // 隐藏的也要收集，用于后续恢复判断</code></pre>
+
+            <h3>设计精华</h3>
+            <div class="info-box warning">
+                <strong>为什么要隐藏错误？</strong><br>
+                如果直接暴露 prompt-too-long 给用户，用户看到的是"你的对话太长了"。但实际上系统可以自动压缩、重试，用户完全不需要知道发生了什么。这叫<strong>透明恢复</strong>——在用户感知不到的情况下解决问题。
+            </div>
+
+            <h3>智能客服 Agent 怎么抄</h3>
+            <pre><code>// 客服场景的延迟错误恢复
+async function* handleWithRecovery(
+  call: () =&gt; AsyncGenerator&lt;Event&gt;
+): AsyncGenerator&lt;Event&gt; {
+  let lastError: Error | null = null
+
+  for await (const event of call()) {
+    if (event.type === 'error') {
+      // 隐藏错误，先尝试恢复
+      if (event.error === 'context_too_long') {
+        const recovered = await autoCompactConversation()
+        if (recovered) continue  // 恢复成功，不暴露错误
+      }
+      if (event.error === 'rate_limit') {
+        await sleep(calculateBackoff(event.retryAfter))
+        continue  // 自动重试
+      }
+      if (event.error === 'model_overloaded') {
+        const fallback = switchToFallbackModel()
+        if (fallback) continue  // 切换到备用模型
+      }
+      // 所有恢复路径都失败，才暴露
+      lastError = event
+    } else {
+      yield event
+    }
+  }
+  if (lastError) yield { type: 'error', error: lastError }
+}</code></pre>
+        </section>
+
+        <!-- 模式 5 -->
+        <section class="card">
+            <h2>模式 5：流式并发工具执行</h2>
+            <h3>源码位置</h3>
+            <p><code>query.ts:561-568</code>（StreamingToolExecutor 创建）+ <code>query.ts:838-862</code>（并发结果收集）</p>
+
+            <h3>Claude Code 怎么做的</h3>
+            <p>当 LLM 在流式响应中吐出多个 tool_use 块时，Claude Code 不会等流结束再执行工具。而是用 <code>StreamingToolExecutor</code>，每收到一个 tool_use 块就立即开始执行，不等其他工具。结果按完成顺序 yield。</p>
+            <pre><code>// query.ts:838-862 — 流式执行期间就收集工具结果
+for await (const message of deps.callModel({...})) {
+  if (message.type === 'assistant') {
+    const toolUseBlocks = message.message.content.filter(
+      c =&gt; c.type === 'tool_use'
+    )
+    // 每收到一个 tool_use 就丢给 executor
+    if (streamingToolExecutor) {
+      for (const toolBlock of toolUseBlocks) {
+        streamingToolExecutor.addTool(toolBlock, message)
+      }
+    }
+  }
+  // 非阻塞地收集已完成的结果
+  if (streamingToolExecutor) {
+    for (const result of streamingToolExecutor.getCompletedResults()) {
+      yield result.message  // 按完成顺序 yield
+    }
+  }
+}</code></pre>
+
+            <h3>智能客服 Agent 怎么抄</h3>
+            <pre><code>// 客服场景：客户问"我的订单到哪了，顺便能退款吗"
+// LLM 可能输出两个 tool_use：query_order + check_refund_eligibility
+// 不需要等两个都输出完才开始执行
+
+class StreamingToolRunner {
+  private running = new Map&lt;string, Promise&lt;ToolResult&gt;&gt;()
+
+  addTool(toolCall: ToolCall) {
+    const promise = this.executeTool(toolCall)
+    this.running.set(toolCall.id, promise)
+  }
+
+  getCompletedResults(): ToolResult[] {
+    const results: ToolResult[] = []
+    for (const [id, promise] of this.running) {
+      // 检查是否完成（非阻塞）
+      if (promise.isSettled()) {
+        results.push(promise.value)
+        this.running.delete(id)
+      }
+    }
+    return results
+  }
+}</code></pre>
+        </section>
+
+        <!-- 模式 6 -->
+        <section class="card">
+            <h2>模式 6：模型降级链</h2>
+            <h3>源码位置</h3>
+            <p><code>query.ts:894-953</code> — FallbackTriggeredError 处理</p>
+
+            <h3>Claude Code 怎么做的</h3>
+            <p>当主模型过载或出错时，自动切换到备用模型。切换过程会：① 清除所有已收集的 assistant 消息和工具块；② 丢弃 StreamingToolExecutor 中的待处理结果；③ 剥离 thinking signature（不同模型不兼容）；④ yield 系统提示告知用户。</p>
+            <pre><code>// query.ts:894-953 — 模型降级
+if (innerError instanceof FallbackTriggeredError &amp;&amp; fallbackModel) {
+  currentModel = fallbackModel
+  assistantMessages.length = 0  // 清空
+  toolResults.length = 0
+  toolUseBlocks.length = 0
+  needsFollowUp = false
+  if (streamingToolExecutor) {
+    streamingToolExecutor.discard()  // 丢弃正在执行的工具
+    streamingToolExecutor = new StreamingToolExecutor(...)  // 重建
+  }
+  yield createSystemMessage(
+    `Switched to ${fallbackModel} due to high demand`, 'warning'
+  )
+  continue  // 重试整个请求
+}</code></pre>
+
+            <h3>智能客服 Agent 怎么抄</h3>
+            <pre><code>// 客服场景的模型降级策略
+const MODEL_CHAIN = [
+  { model: 'gpt-4o', maxRetries: 2, timeout: 30000 },
+  { model: 'claude-sonnet-4-6', maxRetries: 1, timeout: 20000 },
+  { model: 'local-qwen-72b', maxRetries: 3, timeout: 60000 },  // 本地兜底
+]
+
+async function callWithFallback(prompt: string): Promise&lt;Response&gt; {
+  for (const config of MODEL_CHAIN) {
+    for (let attempt = 0; attempt &lt; config.maxRetries; attempt++) {
+      try {
+        return await callModel(config.model, prompt, config.timeout)
+      } catch (e) {
+        if (e.status === 429 || e.status &gt;= 500) {
+          log.warn(`${config.model} failed (attempt ${attempt+1}), trying next...`)
+          continue
+        }
+        throw e  // 4xx 客户端错误不重试
+      }
+    }
+  }
+  throw new Error('All models exhausted')  // 全部失败 → 转人工
+}</code></pre>
+        </section>
+
+        <!-- 模式 7 -->
+        <section class="card">
+            <h2>模式 7：先写日志再调 API（Crash Safety）</h2>
+            <h3>源码位置</h3>
+            <p><code>QueryEngine.ts:436-463</code></p>
+
+            <h3>Claude Code 怎么做的</h3>
+            <p>用户消息在进入查询循环之前就先持久化到 transcript。如果进程在 API 调用期间崩溃，下次 <code>--resume</code> 时至少能看到用户的最后一条消息。注释写得很明确：</p>
+            <pre><code>// QueryEngine.ts:436-448
+// Persist the user's message(s) to transcript BEFORE entering the query
+// loop. If the process is killed before that (e.g. user clicks Stop),
+// the transcript is left with only queue-operation entries; getLastSessionLog
+// returns null, and --resume fails with "No conversation found".
+// Writing now makes the transcript resumable from the point the user
+// message was accepted, even if no API response ever arrives.
+if (persistSession &amp;&amp; messagesFromUserInput.length > 0) {
+  const transcriptPromise = recordTranscript(messages)
+  if (isBareMode()) {
+    void transcriptPromise  // 脚本模式 fire-and-forget
+  } else {
+    await transcriptPromise  // 交互模式阻塞等待
+  }
+}</code></pre>
+
+            <h3>设计精华</h3>
+            <div class="info-box warning">
+                <strong>为什么要分两种模式？</strong><br>
+                脚本模式（bare mode）下写 transcript 大约 4-30ms。交互模式下用户可以接受这个延迟（后续还要等 API 响应），所以阻塞等。脚本模式追求速度，fire-and-forget 丢弃这个延迟。这个 10 行代码里的条件分支，体现了「性能和可靠性的精确权衡」。
+            </div>
+
+            <h3>智能客服 Agent 怎么抄</h3>
+            <pre><code>// 客服场景：先持久化客户消息，再处理
+async function handleCustomerMessage(msg: CustomerMessage) {
+  // 1. 先写数据库（保证不丢失）
+  await db.saveMessage({
+    conversationId: msg.conversationId,
+    role: 'customer',
+    content: msg.content,
+    timestamp: Date.now(),
+    status: 'received'  // 标记为已收到但未处理
+  })
+
+  // 2. 再调 LLM（可能失败）
+  try {
+    const response = await processWithLLM(msg)
+    await db.updateMessageStatus(msg.id, 'processed')
+    return response
+  } catch (e) {
+    // 即使 LLM 崩溃，客户消息已保存，可以重新处理
+    await db.updateMessageStatus(msg.id, 'failed')
+    throw e
+  }
+}</code></pre>
+        </section>
+
+        <!-- 模式 8 -->
+        <section class="card">
+            <h2>模式 8：不可变输入的 Backfill 模式</h2>
+            <h3>源码位置</h3>
+            <p><code>query.ts:746-787</code> — backfillObservableInput + 克隆逻辑</p>
+
+            <h3>Claude Code 怎么做的</h3>
+            <p>当 LLM 返回 tool_use 块时，Claude Code 不会直接修改原始 input。而是：</p>
+            <ol>
+                <li>克隆一份 input：<code>const inputCopy = { ...originalInput }</code></li>
+                <li>在克隆上调用 <code>backfillObservableInput(inputCopy)</code> 添加派生字段</li>
+                <li>只有当 backfill 新增了字段时，才 yield 克隆版本</li>
+                <li>原始 input 保持不变，用于 API 回传（保护 prompt cache）</li>
+            </ol>
+            <pre><code>// query.ts:760-786 — 不可变输入保护
+if (tool?.backfillObservableInput) {
+  const originalInput = block.input
+  const inputCopy = { ...originalInput }  // 浅克隆
+  tool.backfillObservableInput(inputCopy)  // 在克隆上修改
+
+  // 只有新增字段时才 yield 克隆（避免破坏 transcript hash）
+  const addedFields = Object.keys(inputCopy).some(
+    k =&gt; !(k in originalInput)
+  )
+  if (addedFields) {
+    clonedContent ??= [...message.message.content]
+    clonedContent[i] = { ...block, input: inputCopy }
+  }
+}</code></pre>
+
+            <h3>设计精华</h3>
+            <div class="info-box tip">
+                <strong>为什么要这么麻烦？</strong><br>
+                Prompt caching 要求 API 请求的字节完全一致。如果修改了 tool_use input 中的任何字段（哪怕只是把相对路径扩展为绝对路径），cache 就失效了。所以原始 input 必须原封不动地回传给 API，派生字段只能在克隆上添加。
+            </div>
+
+            <h3>智能客服 Agent 怎么抄</h3>
+            <pre><code>// 客服场景：工具输入的不可变保护
+type ToolInput = { orderId: string }
+type EnrichedInput = ToolInput &amp; { orderDetails: Order | null }
+
+async function executeWithEnrichment(
+  tool: Tool, input: ToolInput, context: Context
+) {
+  // 1. 原始 input 不动（可能用于 cache key）
+  const enriched: EnrichedInput = {
+    ...input,
+    orderDetails: await db.findOrder(input.orderId)  // 派生字段
+  }
+
+  // 2. 用 enriched input 执行
+  return tool.execute(enriched, context)
+}</code></pre>
+        </section>
+
+        <!-- 模式 9 -->
+        <section class="card">
+            <h2>模式 9：权限决策包裹（Permission Wrapping）</h2>
+            <h3>源码位置</h3>
+            <p><code>QueryEngine.ts:244-271</code></p>
+
+            <h3>Claude Code 怎么做的</h3>
+            <p>权限检查函数被包裹了一层。外层只做一件事：记录拒绝。核心权限逻辑不变，但 SDK 消费者现在能知道哪些工具被拒绝了。这是典型的 <strong>Decorator 模式</strong>——不修改被包裹函数的任何行为，只添加副作用。</p>
+            <pre><code>// QueryEngine.ts:244-271
+const wrappedCanUseTool: CanUseToolFn = async (
+  tool, input, toolUseContext, assistantMessage, toolUseID, forceDecision
+) =&gt; {
+  const result = await canUseTool(
+    tool, input, toolUseContext, assistantMessage, toolUseID, forceDecision
+  )
+  // 只添加了一件事：记录拒绝
+  if (result.behavior !== 'allow') {
+    this.permissionDenials.push({
+      tool_name: sdkCompatToolName(tool.name),
+      tool_use_id: toolUseID,
+      tool_input: input,
+    })
+  }
+  return result  // 原样返回
+}</code></pre>
+
+            <h3>智能客服 Agent 怎么抄</h3>
+            <pre><code>// 客服场景：操作审计包裹
+function withAudit&lt;T extends (...args: any[]) =&gt; Promise&lt;any&gt;&gt;(
+  fn: T,
+  auditLog: AuditLog
+): T {
+  return (async (...args: any[]) =&gt; {
+    const startTime = Date.now()
+    try {
+      const result = await fn(...args)
+      auditLog.record({
+        action: fn.name,
+        status: 'success',
+        duration: Date.now() - startTime,
+        operator: 'ai_agent',
+      })
+      return result
+    } catch (e) {
+      auditLog.record({
+        action: fn.name,
+        status: 'failed',
+        error: e.message,
+        operator: 'ai_agent',
+      })
+      throw e
+    }
+  }) as T
+}
+
+// 使用：自动记录每次退款操作
+const auditedRefund = withAudit(processRefund, auditLog)
+await auditedRefund({ orderId: '123', amount: 99.9 })</code></pre>
+        </section>
+
+        <!-- 模式 10 -->
+        <section class="card">
+            <h2>模式 10：死亡螺旋防护（Death Spiral Prevention）</h2>
+            <h3>源码位置</h3>
+            <p><code>query.ts:1258-1305</code> — stop hook blocking 循环防护</p>
+
+            <h3>Claude Code 怎么做的</h3>
+            <p>当 stop hook 阻止了循环继续时，系统会注入错误消息并重新循环。但如果错误消息本身又触发了 hook 阻止，就会形成死亡螺旋：error → hook block → retry → error → hook block → ...</p>
+            <p>Claude Code 用两个机制防止：</p>
+            <ol>
+                <li><code>hasAttemptedReactiveCompact</code> — 保留前一轮的标记，不会无限重试压缩</li>
+                <li><code>stopHookActive</code> — 标记"已经因为 stop hook 重试过"，避免重复</li>
+            </ol>
+            <pre><code>// query.ts:1292-1297 — 保留压缩防护标记
+const next: State = {
+  messages: [...messagesForQuery, ...assistantMessages, ...stopHookResult.blockingErrors],
+  // 关键：不重置 hasAttemptedReactiveCompact！
+  hasAttemptedReactiveCompact,  // 保留，防止 compact → still too long → 重试循环
+  stopHookActive: true,         // 标记 stop hook 已激活
+  transition: { reason: 'stop_hook_blocking' },
+}</code></pre>
+
+            <h3>设计精华</h3>
+            <div class="info-box danger">
+                <strong>这是 Agent 系统最容易踩的坑</strong>。AI 系统的错误处理本身也是 AI 在处理。如果不加防护，错误恢复机制本身会变成新的错误源。每个循环重试必须有<strong>递减预算</strong>和<strong>跨轮状态记忆</strong>。
+            </div>
+
+            <h3>智能客服 Agent 怎么抄</h3>
+            <pre><code>// 客服场景：防止"帮客户解决问题"本身产生问题
+type RecoveryState = {
+  recoveryAttempts: number       // 恢复尝试次数
+  lastRecoveryMethod: string     // 上次用的恢复方法
+  maxRecoveryAttempts: number    // 硬上限（如 3 次）
+}
+
+async function recoverFromError(
+  error: ServiceError,
+  recovery: RecoveryState
+): Promise&lt;'retry' | 'escalate'&gt; {
+  // 硬上限：超过 3 次直接转人工
+  if (recovery.recoveryAttempts &gt;= recovery.maxRecoveryAttempts) {
+    return 'escalate'
+  }
+
+  // 不能连续用同一种恢复方法（防止死亡螺旋）
+  const method = pickRecoveryMethod(error, {
+    excludeLast: recovery.lastRecoveryMethod
+  })
+
+  const success = await attemptRecovery(method)
+  if (!success) {
+    // 恢复也失败了，次数+1但不重置（关键！）
+    return recoverFromError(error, {
+      ...recovery,
+      recoveryAttempts: recovery.recoveryAttempts + 1,
+      lastRecoveryMethod: method,
+    })
+  }
+  return 'retry'
+}</code></pre>
+        </section>
+
+        <!-- 总结 -->
+        <section class="card architect">
+            <h2>10 个模式速查表</h2>
+            <table>
+                <thead><tr><th>#</th><th>模式</th><th>解决的问题</th><th>智能客服落地场景</th></tr></thead>
+                <tbody>
+                    <tr><td>1</td><td>AsyncGenerator 循环</td><td>流式输出 + 可取消</td><td>客服对话主循环</td></tr>
+                    <tr><td>2</td><td>Fail-Closed 工具</td><td>默认安全</td><td>退款/改单等高危操作</td></tr>
+                    <tr><td>3</td><td>多级压缩管线</td><td>上下文窗口不够</td><td>长对话历史压缩</td></tr>
+                    <tr><td>4</td><td>延迟错误恢复</td><td>透明重试</td><td>API 超时自动重试</td></tr>
+                    <tr><td>5</td><td>流式并发执行</td><td>工具执行等待</td><td>同时查订单+查库存</td></tr>
+                    <tr><td>6</td><td>模型降级链</td><td>模型不可用</td><td>GPT-4 → Claude → 本地模型</td></tr>
+                    <tr><td>7</td><td>先写日志再处理</td><td>崩溃丢消息</td><td>客服消息不丢失</td></tr>
+                    <tr><td>8</td><td>不可变输入 Backfill</td><td>Cache 失效</td><td>工具输入缓存</td></tr>
+                    <tr><td>9</td><td>权限决策包裹</td><td>操作审计</td><td>客服操作可追溯</td></tr>
+                    <tr><td>10</td><td>死亡螺旋防护</td><td>恢复机制死循环</td><td>错误恢复不超 3 次</td></tr>
+                </tbody>
+            </table>
+        </section>
+
+        <section class="card developer">
+            <h2>快速启动：30 分钟搭一个客服 Agent 骨架</h2>
+            <pre><code>// 30 分钟可以搭出的客服 Agent 骨架
+import { z } from 'zod'
+
+// 1. 定义工具（用 Fail-Closed 模式）
+const tools = {
+  queryOrder: defineTool({
+    name: 'query_order', isReadOnly: () =&gt; true,
+    input: z.object({ orderId: z.string() }),
+    execute: async (input) =&gt; db.findOrder(input.orderId),
+  }),
+  createTicket: defineTool({
+    name: 'create_ticket',  // 没写 requiresApproval → 默认需要审批
+    input: z.object({ title: z.string(), body: z.string() }),
+    execute: async (input) =&gt; ticketSystem.create(input),
+  }),
+}
+
+// 2. 启动对话循环（AsyncGenerator 模式）
+async function* serve(input: string, state: State) {
+  let s = state
+  while (true) {
+    const ctx = buildContext(s)                // 3. 多级压缩
+    const stream = callWithFallback(ctx)       // 6. 模型降级
+    for await (const event of stream) {
+      if (event.type === 'tool_use') {
+        const result = await executeTool(event, s)  // 2. Fail-Closed
+        yield { type: 'tool_result', result }
+      } else if (event.type === 'error') {
+        const decision = await recoverFromError(event, s)  // 4+10. 恢复+防螺旋
+        if (decision === 'escalate') {
+          yield { type: 'transfer_to_human' }
+          return
+        }
+        continue
+      } else {
+        yield event
+      }
+    }
+    s = { ...s, turnCount: s.turnCount + 1 }  // 不可变状态替换
+  }
+}</code></pre>
+        </section>
+
+        <footer style="text-align:center; padding:32px 0 20px; margin-top:48px; border-top:1px solid var(--border); color:var(--text-secondary); font-size:13px; line-height:2;">
+        <div style="margin-bottom:4px;">⚠️ 免责声明</div>
+        本文仅用于技术学习和架构分析目的。源码分析基于公开泄漏的代码，所有商标和版权归 <a href="https://www.anthropic.com" style="color:var(--indigo);">Anthropic</a> 所有。未经授权不得用于商业用途。
+    </footer>
+    </main>
+</body>
+</html>

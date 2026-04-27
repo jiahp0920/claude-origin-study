@@ -16,7 +16,6 @@ body {
 ::-webkit-scrollbar { width: 6px; }
 ::-webkit-scrollbar-track { background: transparent; }
 ::-webkit-scrollbar-thumb { background: #30363d; border-radius: 3px; }
-
 .header {
   padding: 14px 16px 10px;
   border-bottom: 1px solid #21262d;
@@ -38,7 +37,6 @@ body {
 }
 .header-text h1 { font-size: 14px; font-weight: 600; color: #f0f6fc; }
 .header-text p { font-size: 11px; color: #8b949e; margin-top: 2px; }
-
 .section-title {
   padding: 8px 16px 4px;
   font-size: 10px;
@@ -47,7 +45,6 @@ body {
   text-transform: uppercase;
   letter-spacing: 0.5px;
 }
-
 .link {
   display: flex;
   align-items: center;
@@ -59,12 +56,7 @@ body {
   transition: background 0.15s;
 }
 .link:hover { background: #161b22; }
-.link:active { background: #1c2333; }
-.dot {
-  width: 6px; height: 6px;
-  border-radius: 50%;
-  flex-shrink: 0;
-}
+.dot { width: 6px; height: 6px; border-radius: 50%; flex-shrink: 0; }
 .dot-blue { background: #58a6ff; }
 .dot-purple { background: #bc8cff; }
 .dot-green { background: #3fb950; }
@@ -75,13 +67,7 @@ body {
 .dot-gray { background: #8b949e; }
 .link-text { flex: 1; }
 .link-arrow { color: #484f58; font-size: 11px; }
-
-.divider {
-  height: 1px;
-  background: #21262d;
-  margin: 4px 16px;
-}
-
+.divider { height: 1px; background: #21262d; margin: 4px 16px; }
 .search-box {
   margin: 8px 12px;
   padding: 6px 10px;
@@ -95,6 +81,7 @@ body {
 }
 .search-box::placeholder { color: #484f58; }
 .search-box:focus { border-color: #58a6ff; }
+.hidden { display: none !important; }
 </style>
 </head>
 <body>
@@ -110,84 +97,88 @@ body {
 <input type="text" class="search-box" id="search" placeholder="搜索模块..." autocomplete="off">
 
 <div id="links">
-  <div class="section-title">总览</div>
-  <a class="link" data-keywords="阅读指南" href="file:///Users/apple/Desktop/github-ws/claude-origin-study/reading-guide.html"><span class="dot dot-gray"></span><span class="link-text">阅读指南</span><span class="link-arrow">→</span></a>
-  <a class="link" data-keywords="架构全景 总览" href="file:///Users/apple/Desktop/github-ws/claude-origin-study/index.html"><span class="dot dot-gray"></span><span class="link-text">架构全景</span><span class="link-arrow">→</span></a>
-  <a class="link" data-keywords="依赖图 模块" href="file:///Users/apple/Desktop/github-ws/claude-origin-study/dependency-map.html"><span class="dot dot-gray"></span><span class="link-text">模块依赖图</span><span class="link-arrow">→</span></a>
-  <a class="link" data-keywords="垂直 agent 设计指南" href="file:///Users/apple/Desktop/github-ws/claude-origin-study/vertical-agent-guide.html"><span class="dot dot-gray"></span><span class="link-text">垂直 Agent 设计指南</span><span class="link-arrow">→</span></a>
+  <div class="section-title" data-section>总览</div>
+  <a class="link" data-kw="阅读指南" data-page="reading-guide.html"><span class="dot dot-gray"></span><span class="link-text">阅读指南</span><span class="link-arrow">→</span></a>
+  <a class="link" data-kw="架构全景 总览 index" data-page="index.html"><span class="dot dot-gray"></span><span class="link-text">架构全景</span><span class="link-arrow">→</span></a>
+  <a class="link" data-kw="依赖图 模块" data-page="dependency-map.html"><span class="dot dot-gray"></span><span class="link-text">模块依赖图</span><span class="link-arrow">→</span></a>
+  <a class="link" data-kw="垂直 agent 设计指南" data-page="vertical-agent-guide.html"><span class="dot dot-gray"></span><span class="link-text">垂直 Agent 指南</span><span class="link-arrow">→</span></a>
 
   <div class="divider"></div>
-  <div class="section-title">核心流程</div>
-  <a class="link" data-keywords="启动 开机 初始化 认证" href="file:///Users/apple/Desktop/github-ws/claude-origin-study/00-startup.html"><span class="dot dot-blue"></span><span class="link-text">启动链路</span><span class="link-arrow">→</span></a>
-  <a class="link" data-keywords="query 循环 核心 引擎 API" href="file:///Users/apple/Desktop/github-ws/claude-origin-study/01-query-loop.html"><span class="dot dot-blue"></span><span class="link-text">Query 循环</span><span class="link-arrow">→</span></a>
-  <a class="link" data-keywords="查询 生命周期" href="file:///Users/apple/Desktop/github-ws/claude-origin-study/flows/query-lifecycle.html"><span class="dot dot-blue"></span><span class="link-text">查询生命周期</span><span class="link-arrow">→</span></a>
+  <div class="section-title" data-section>核心流程</div>
+  <a class="link" data-kw="启动 开机 初始化 认证" data-page="00-startup.html"><span class="dot dot-blue"></span><span class="link-text">启动链路</span><span class="link-arrow">→</span></a>
+  <a class="link" data-kw="query 循环 核心 引擎" data-page="01-query-loop.html"><span class="dot dot-blue"></span><span class="link-text">Query 循环</span><span class="link-arrow">→</span></a>
+  <a class="link" data-kw="查询 生命周期" data-page="flows/query-lifecycle.html"><span class="dot dot-blue"></span><span class="link-text">查询生命周期</span><span class="link-arrow">→</span></a>
 
   <div class="divider"></div>
-  <div class="section-title">核心机制</div>
-  <a class="link" data-keywords="工具 调度 dispatch 文件 命令" href="file:///Users/apple/Desktop/github-ws/claude-origin-study/02-tool-dispatch.html"><span class="dot dot-purple"></span><span class="link-text">工具调度</span><span class="link-arrow">→</span></a>
-  <a class="link" data-keywords="权限 安全 允许 拒绝" href="file:///Users/apple/Desktop/github-ws/claude-origin-study/03-permissions.html"><span class="dot dot-purple"></span><span class="link-text">权限系统</span><span class="link-arrow">→</span></a>
-  <a class="link" data-keywords="风控 安全加固 纵深防御 注入" href="file:///Users/apple/Desktop/github-ws/claude-origin-study/03b-security-hardening.html"><span class="dot dot-red"></span><span class="link-text">风控与安全加固</span><span class="link-arrow">→</span></a>
-  <a class="link" data-keywords="agent 架构 子任务 并行 团队" href="file:///Users/apple/Desktop/github-ws/claude-origin-study/04-agent-arch.html"><span class="dot dot-purple"></span><span class="link-text">Agent 架构</span><span class="link-arrow">→</span></a>
-  <a class="link" data-keywords="hook 钩子 拦截 生命周期" href="file:///Users/apple/Desktop/github-ws/claude-origin-study/11-hooks.html"><span class="dot dot-purple"></span><span class="link-text">Hook 机制</span><span class="link-arrow">→</span></a>
+  <div class="section-title" data-section>核心机制</div>
+  <a class="link" data-kw="工具 调度" data-page="02-tool-dispatch.html"><span class="dot dot-purple"></span><span class="link-text">工具调度</span><span class="link-arrow">→</span></a>
+  <a class="link" data-kw="权限 安全" data-page="03-permissions.html"><span class="dot dot-purple"></span><span class="link-text">权限系统</span><span class="link-arrow">→</span></a>
+  <a class="link" data-kw="风控 安全 加固" data-page="03b-security-hardening.html"><span class="dot dot-red"></span><span class="link-text">风控与安全加固</span><span class="link-arrow">→</span></a>
+  <a class="link" data-kw="agent 架构" data-page="04-agent-arch.html"><span class="dot dot-purple"></span><span class="link-text">Agent 架构</span><span class="link-arrow">→</span></a>
+  <a class="link" data-kw="hook 钩子" data-page="11-hooks.html"><span class="dot dot-purple"></span><span class="link-text">Hook 机制</span><span class="link-arrow">→</span></a>
 
   <div class="divider"></div>
-  <div class="section-title">扩展体系</div>
-  <a class="link" data-keywords="MCP 插件协议 应用商店" href="file:///Users/apple/Desktop/github-ws/claude-origin-study/05-mcp.html"><span class="dot dot-green"></span><span class="link-text">MCP 体系</span><span class="link-arrow">→</span></a>
-  <a class="link" data-keywords="插件 技能 市场 扩展" href="file:///Users/apple/Desktop/github-ws/claude-origin-study/07-plugins.html"><span class="dot dot-green"></span><span class="link-text">插件系统</span><span class="link-arrow">→</span></a>
-  <a class="link" data-keywords="命令 斜杠 /model /compact" href="file:///Users/apple/Desktop/github-ws/claude-origin-study/08-commands.html"><span class="dot dot-green"></span><span class="link-text">命令系统</span><span class="link-arrow">→</span></a>
+  <div class="section-title" data-section>扩展体系</div>
+  <a class="link" data-kw="MCP 插件" data-page="05-mcp.html"><span class="dot dot-green"></span><span class="link-text">MCP 体系</span><span class="link-arrow">→</span></a>
+  <a class="link" data-kw="插件 技能 市场" data-page="07-plugins.html"><span class="dot dot-green"></span><span class="link-text">插件系统</span><span class="link-arrow">→</span></a>
+  <a class="link" data-kw="命令 斜杠" data-page="08-commands.html"><span class="dot dot-green"></span><span class="link-text">命令系统</span><span class="link-arrow">→</span></a>
 
   <div class="divider"></div>
-  <div class="section-title">数据与服务</div>
-  <a class="link" data-keywords="上下文 压缩 记忆 token 窗口" href="file:///Users/apple/Desktop/github-ws/claude-origin-study/06-context-mgmt.html"><span class="dot dot-amber"></span><span class="link-text">上下文管理</span><span class="link-arrow">→</span></a>
-  <a class="link" data-keywords="服务层 后台 订阅 同步" href="file:///Users/apple/Desktop/github-ws/claude-origin-study/10-services.html"><span class="dot dot-amber"></span><span class="link-text">服务层</span><span class="link-arrow">→</span></a>
-  <a class="link" data-keywords="成本 限流 费用 预算 token" href="file:///Users/apple/Desktop/github-ws/claude-origin-study/15-cost-limits.html"><span class="dot dot-amber"></span><span class="link-text">成本与限流</span><span class="link-arrow">→</span></a>
+  <div class="section-title" data-section>数据与服务</div>
+  <a class="link" data-kw="上下文 压缩 记忆" data-page="06-context-mgmt.html"><span class="dot dot-amber"></span><span class="link-text">上下文管理</span><span class="link-arrow">→</span></a>
+  <a class="link" data-kw="服务层 后台" data-page="10-services.html"><span class="dot dot-amber"></span><span class="link-text">服务层</span><span class="link-arrow">→</span></a>
+  <a class="link" data-kw="成本 限流 费用" data-page="15-cost-limits.html"><span class="dot dot-amber"></span><span class="link-text">成本与限流</span><span class="link-arrow">→</span></a>
 
   <div class="divider"></div>
-  <div class="section-title">界面与配置</div>
-  <a class="link" data-keywords="UI 终端 界面 渲染 交互" href="file:///Users/apple/Desktop/github-ws/claude-origin-study/09-ui.html"><span class="dot dot-cyan"></span><span class="link-text">UI 交互层</span><span class="link-arrow">→</span></a>
-  <a class="link" data-keywords="配置 设置 迁移 settings" href="file:///Users/apple/Desktop/github-ws/claude-origin-study/13-config.html"><span class="dot dot-cyan"></span><span class="link-text">配置与迁移</span><span class="link-arrow">→</span></a>
+  <div class="section-title" data-section>界面与配置</div>
+  <a class="link" data-kw="UI 终端 界面" data-page="09-ui.html"><span class="dot dot-cyan"></span><span class="link-text">UI 交互层</span><span class="link-arrow">→</span></a>
+  <a class="link" data-kw="配置 设置 迁移" data-page="13-config.html"><span class="dot dot-cyan"></span><span class="link-text">配置与迁移</span><span class="link-arrow">→</span></a>
 
   <div class="divider"></div>
-  <div class="section-title">外围能力</div>
-  <a class="link" data-keywords="外部 shell git 浏览器 语音" href="file:///Users/apple/Desktop/github-ws/claude-origin-study/12-external.html"><span class="dot dot-gray"></span><span class="link-text">外部集成</span><span class="link-arrow">→</span></a>
-  <a class="link" data-keywords="native 原生 高亮 搜索 布局" href="file:///Users/apple/Desktop/github-ws/claude-origin-study/14-native.html"><span class="dot dot-gray"></span><span class="link-text">Native 能力</span><span class="link-arrow">→</span></a>
+  <div class="section-title" data-section>外围能力</div>
+  <a class="link" data-kw="外部 集成 shell git" data-page="12-external.html"><span class="dot dot-gray"></span><span class="link-text">外部集成</span><span class="link-arrow">→</span></a>
+  <a class="link" data-kw="native 原生" data-page="14-native.html"><span class="dot dot-gray"></span><span class="link-text">Native 能力</span><span class="link-arrow">→</span></a>
 
   <div class="divider"></div>
-  <div class="section-title">安全专题</div>
-  <a class="link" data-keywords="反蒸馏 蒸馏 防护 fake tool 认证" href="file:///Users/apple/Desktop/github-ws/claude-origin-study/16-anti-distillation.html"><span class="dot dot-red"></span><span class="link-text">反蒸馏与输出保护</span><span class="link-arrow">→</span></a>
+  <div class="section-title" data-section>安全专题</div>
+  <a class="link" data-kw="反蒸馏 蒸馏" data-page="16-anti-distillation.html"><span class="dot dot-red"></span><span class="link-text">反蒸馏与输出保护</span><span class="link-arrow">→</span></a>
 
   <div class="divider"></div>
-  <div class="section-title">彩蛋</div>
-  <a class="link" data-keywords="buddy 宠物 精灵 彩蛋 趣味" href="file:///Users/apple/Desktop/github-ws/claude-origin-study/17-buddy.html"><span class="dot dot-pink"></span><span class="link-text">Buddy 宠物系统</span><span class="link-arrow">→</span></a>
+  <div class="section-title" data-section>彩蛋</div>
+  <a class="link" data-kw="buddy 宠物 彩蛋" data-page="17-buddy.html"><span class="dot dot-pink"></span><span class="link-text">Buddy 宠物系统</span><span class="link-arrow">→</span></a>
 
   <div class="divider"></div>
-  <div class="section-title">数据专题</div>
-  <a class="link" data-keywords="遥测 画像 分析 隐私 growthbook" href="file:///Users/apple/Desktop/github-ws/claude-origin-study/18-telemetry.html"><span class="dot dot-blue"></span><span class="link-text">遥测与用户画像</span><span class="link-arrow">→</span></a>
+  <div class="section-title" data-section>数据专题</div>
+  <a class="link" data-kw="遥测 画像 隐私" data-page="18-telemetry.html"><span class="dot dot-blue"></span><span class="link-text">遥测与用户画像</span><span class="link-arrow">→</span></a>
 
   <div class="divider"></div>
-  <div class="section-title">流程图</div>
-  <a class="link" data-keywords="流程图 工具 执行" href="file:///Users/apple/Desktop/github-ws/claude-origin-study/flows/tool-execution.html"><span class="dot dot-gray"></span><span class="link-text">工具执行流程</span><span class="link-arrow">→</span></a>
-  <a class="link" data-keywords="流程图 agent 协作" href="file:///Users/apple/Desktop/github-ws/claude-origin-study/flows/agent-collab.html"><span class="dot dot-gray"></span><span class="link-text">Agent 协作流程</span><span class="link-arrow">→</span></a>
+  <div class="section-title" data-section>流程图</div>
+  <a class="link" data-kw="流程图 工具 执行" data-page="flows/tool-execution.html"><span class="dot dot-gray"></span><span class="link-text">工具执行流程</span><span class="link-arrow">→</span></a>
+  <a class="link" data-kw="流程图 agent 协作" data-page="flows/agent-collab.html"><span class="dot dot-gray"></span><span class="link-text">Agent 协作流程</span><span class="link-arrow">→</span></a>
 </div>
 
 <script>
+function openPage(page) {
+  chrome.tabs.create({ url: chrome.runtime.getURL(page) });
+}
+
 document.addEventListener('click', function(e) {
-  const link = e.target.closest('.link');
-  if (!link) return;
-  e.preventDefault();
-  const href = link.getAttribute('href');
-  if (href) window.open(href, '_blank');
+  var link = e.target.closest('.link');
+  if (link && link.dataset.page) {
+    e.preventDefault();
+    openPage(link.dataset.page);
+  }
 });
 
 document.getElementById('search').addEventListener('input', function(e) {
-  const q = e.target.value.toLowerCase();
-  document.querySelectorAll('.link').forEach(el => {
-    const text = el.textContent.toLowerCase();
-    const kw = (el.dataset.keywords || '').toLowerCase();
-    el.style.display = (!q || text.includes(q) || kw.includes(q)) ? '' : 'none';
+  var q = e.target.value.toLowerCase();
+  document.querySelectorAll('.link').forEach(function(el) {
+    var text = el.textContent.toLowerCase();
+    var kw = (el.dataset.kw || '').toLowerCase();
+    el.classList.toggle('hidden', q && !text.includes(q) && !kw.includes(q));
   });
-  document.querySelectorAll('.section-title, .divider').forEach(el => {
-    el.style.display = q ? 'none' : '';
+  document.querySelectorAll('.section-title, .divider').forEach(function(el) {
+    el.classList.toggle('hidden', !!q);
   });
 });
 </script>

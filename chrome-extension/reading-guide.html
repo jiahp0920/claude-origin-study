@@ -1,0 +1,655 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>阅读指南 - Claude Code 源码分析</title>
+    <link rel="stylesheet" href="shared/styles.css">
+    <style>
+        .reading-path {
+            background:var(--bg-base); border:1px solid var(--border);
+            border-radius:12px; padding:24px; margin:20px 0;
+        }
+        .reading-path h3 {
+            display:flex; align-items:center; gap:10px;
+            font-size:17px; margin-bottom:16px;
+        }
+        .path-role {
+            display:inline-block; padding:4px 12px; border-radius:20px;
+            font-size:12px; font-weight:700; margin-right:8px;
+        }
+        .path-step {
+            display:flex; align-items:center; gap:12px;
+            padding:10px 16px; margin:4px 0;
+            background:var(--bg-surface); border:1px solid var(--border);
+            border-radius:8px; transition:all .15s;
+        }
+        .path-step:hover { border-color:var(--blue); background:rgba(59,130,246,.05); }
+        .path-step .step-num {
+            width:28px; height:28px; border-radius:50%;
+            display:flex; align-items:center; justify-content:center;
+            font-size:12px; font-weight:700; color:#fff; flex-shrink:0;
+        }
+        .path-step .step-info { flex:1; }
+        .path-step .step-title { font-size:14px; font-weight:600; color:var(--text-primary); }
+        .path-step .step-desc { font-size:12px; color:var(--text-muted); margin-top:2px; }
+        .path-step a { color:var(--blue); text-decoration:none; }
+        .path-step a:hover { text-decoration:underline; }
+        .path-arrow { text-align:center; color:var(--text-muted); font-size:14px; padding:2px 0; }
+        .legend-box {
+            display:inline-flex; align-items:center; gap:6px;
+            padding:6px 14px; border-radius:6px;
+            font-size:12px; margin:4px;
+        }
+        .priority-grid {
+            display:grid; grid-template-columns:repeat(3,1fr); gap:12px; margin:16px 0;
+        }
+        .priority-card {
+            background:var(--bg-surface); border:1px solid var(--border);
+            border-radius:10px; padding:18px; text-align:center;
+        }
+        .priority-card .p-level { font-size:24px; font-weight:800; margin-bottom:4px; }
+        .priority-card .p-label { font-size:12px; color:var(--text-muted); }
+        .priority-card .p-desc { font-size:13px; color:var(--text-secondary); margin-top:8px; }
+        .module-map {
+            display:grid; grid-template-columns:repeat(auto-fill,minmax(220px,1fr));
+            gap:10px; margin:16px 0;
+        }
+        .module-map-item {
+            display:flex; align-items:center; gap:10px;
+            background:var(--bg-surface); border:1px solid var(--border);
+            border-radius:8px; padding:12px 16px; text-decoration:none;
+            transition:all .15s;
+        }
+        .module-map-item:hover { border-color:var(--blue); transform:translateY(-1px); }
+        .module-map-item .mm-icon {
+            width:32px; height:32px; border-radius:6px;
+            display:flex; align-items:center; justify-content:center;
+            font-size:14px; flex-shrink:0;
+        }
+        .module-map-item .mm-info { flex:1; }
+        .module-map-item .mm-name { font-size:13px; font-weight:600; color:var(--text-primary); }
+        .module-map-item .mm-tag { font-size:11px; color:var(--text-muted); }
+        .section-chapter {
+            display:flex; gap:16px; margin:12px 0; padding:14px;
+            background:var(--bg-base); border-radius:8px; border:1px solid var(--border);
+        }
+        .section-chapter .sc-icon {
+            font-size:20px; flex-shrink:0; width:36px; text-align:center;
+            padding-top:2px;
+        }
+        .section-chapter .sc-body { flex:1; }
+        .section-chapter .sc-title { font-size:14px; font-weight:700; color:var(--text-primary); }
+        .section-chapter .sc-desc { font-size:12.5px; color:var(--text-secondary); margin-top:4px; }
+        .faq-item { margin:12px 0; }
+        .faq-q { font-size:14px; font-weight:600; color:var(--blue); margin-bottom:4px; }
+        .faq-a { font-size:13.5px; color:var(--text-secondary); padding-left:16px; border-left:2px solid var(--border); }
+        @media (max-width:768px) {
+            .priority-grid { grid-template-columns:1fr; }
+            .module-map { grid-template-columns:1fr; }
+        }
+    </style>
+</head>
+<body>
+    <nav class="sidebar">
+        <div class="sidebar-header"><div class="logo">CC</div><div><div class="sidebar-title">Claude Code</div><div class="sidebar-subtitle">源码深度分析</div></div></div>
+                <div class="nav-section-title">总览</div>
+        <a href="reading-guide.html" class="nav-link active">阅读指南</a>
+        <a href="index.html" class="nav-link">架构全景</a>
+        <a href="dependency-map.html" class="nav-link">模块依赖图</a>
+        <a href="vertical-agent-guide.html" class="nav-link">垂直 Agent 设计指南</a>
+<div class="nav-section-title">核心流程</div>
+        <a href="00-startup.html" class="nav-link">启动链路</a>
+        <a href="01-query-loop.html" class="nav-link">Query 循环</a>
+        <a href="flows/query-lifecycle.html" class="nav-link">查询生命周期</a>
+        <div class="nav-section-title">核心机制</div>
+        <a href="02-tool-dispatch.html" class="nav-link">工具调度</a>
+        <a href="03-permissions.html" class="nav-link">权限系统</a>
+<a href="03b-security-hardening.html" class="nav-link">风控与安全加固</a>
+        <a href="04-agent-arch.html" class="nav-link">Agent 架构</a>
+        <a href="11-hooks.html" class="nav-link">Hook 机制</a>
+        <div class="nav-section-title">扩展体系</div>
+        <a href="05-mcp.html" class="nav-link">MCP 体系</a>
+        <a href="07-plugins.html" class="nav-link">插件系统</a>
+        <a href="08-commands.html" class="nav-link">命令系统</a>
+        <div class="nav-section-title">数据与服务</div>
+        <a href="06-context-mgmt.html" class="nav-link">上下文管理</a>
+        <a href="10-services.html" class="nav-link">服务层</a>
+        <a href="15-cost-limits.html" class="nav-link">成本与限流</a>
+        <div class="nav-section-title">界面与配置</div>
+        <a href="09-ui.html" class="nav-link">UI 交互层</a>
+        <a href="13-config.html" class="nav-link">配置与迁移</a>
+        <div class="nav-section-title">外围能力</div>
+        <a href="12-external.html" class="nav-link">外部集成</a>
+        <a href="14-native.html" class="nav-link">Native 能力</a>
+<div class="nav-section-title">安全专题</div>
+<a href="16-anti-distillation.html" class="nav-link">反蒸馏与输出保护</a>
+<a href="17-buddy.html" class="nav-link">Buddy 宠物系统</a>
+<div class="nav-section-title">数据专题</div>
+<a href="18-telemetry.html" class="nav-link">遥测与用户画像</a>
+        <div class="nav-section-title">流程图</div>
+        <a href="flows/tool-execution.html" class="nav-link">工具执行流程</a>
+        <a href="flows/agent-collab.html" class="nav-link">Agent 协作流程</a>
+    </nav>
+
+    <main class="content">
+        <header class="page-header">
+            <span class="breadcrumb"><a href="index.html">源码分析</a></span>
+            <h1>阅读指南</h1>
+            <p class="subtitle">如何高效阅读这 20 篇源码分析文档 — 按角色和目标推荐阅读路径</p>
+        </header>
+
+        <!-- 文档体系概览 -->
+        <section id="overview" class="card">
+            <h2>文档体系概览</h2>
+            <p>本套文档对 Anthropic 官方 CLI 工具 <strong>Claude Code</strong> 的 <strong>1884 个 TypeScript 文件、51 万行代码</strong>进行了完整的源码级分析。文档共 20 篇，按六层架构组织，覆盖从启动链路到外部集成的全部核心模块。</p>
+
+            <div class="priority-grid" style="margin-top:20px;">
+                <div class="priority-card">
+                    <div class="p-level" style="color:var(--blue);">20</div>
+                    <div class="p-label">篇分析文档</div>
+                    <div class="p-desc">16 个模块 + 1 架构全景 + 1 依赖图 + 1 设计指南 + 1 阅读指南</div>
+                </div>
+                <div class="priority-card">
+                    <div class="p-level" style="color:var(--green);">10</div>
+                    <div class="p-label">标准化章节</div>
+                    <div class="p-desc">每篇包含职责概述、架构设计、数据流、类型接口、设计模式、流程详解、设计精华、开发指南、架构指南、代码索引</div>
+                </div>
+                <div class="priority-card">
+                    <div class="p-level" style="color:var(--amber);">3</div>
+                    <div class="p-label">篇流程图</div>
+                    <div class="p-desc">查询生命周期、工具执行流程、Agent 协作流程</div>
+                </div>
+            </div>
+
+            <h3>章节结构说明</h3>
+            <p>每个模块文档均包含以下 10 个标准化章节，从概览到细节逐层递进：</p>
+
+            <div class="section-chapter">
+                <div class="sc-icon" style="color:var(--blue);">01</div>
+                <div class="sc-body">
+                    <div class="sc-title">职责概述</div>
+                    <div class="sc-desc">一段话说清这个模块干什么。看完就知道要不要继续往下读。</div>
+                </div>
+            </div>
+            <div class="section-chapter">
+                <div class="sc-icon" style="color:var(--purple);">02</div>
+                <div class="sc-body">
+                    <div class="sc-title">架构设计</div>
+                    <div class="sc-desc">模块内部分层图，展示各子模块的层级关系和职责边界。用颜色区分不同类型的层。</div>
+                </div>
+            </div>
+            <div class="section-chapter">
+                <div class="sc-icon" style="color:var(--green);">03</div>
+                <div class="sc-body">
+                    <div class="sc-title">核心数据流</div>
+                    <div class="sc-desc">数据在模块内部的流转路径，从输入到输出的完整链路。横向流程图展示。</div>
+                </div>
+            </div>
+            <div class="section-chapter">
+                <div class="sc-icon" style="color:var(--cyan);">04</div>
+                <div class="sc-body">
+                    <div class="sc-title">关键类型与接口</div>
+                    <div class="sc-desc">模块对外暴露的核心类型定义，带真实代码片段。是理解模块 API 的关键入口。</div>
+                </div>
+            </div>
+            <div class="section-chapter">
+                <div class="sc-icon" style="color:var(--amber);">05</div>
+                <div class="sc-body">
+                    <div class="sc-title">设计模式与亮点</div>
+                    <div class="sc-desc">模块中运用的设计模式和值得学习的实现技巧。面向所有读者。</div>
+                </div>
+            </div>
+            <div class="section-chapter">
+                <div class="sc-icon" style="color:var(--cyan);">06</div>
+                <div class="sc-body">
+                    <div class="sc-title">核心处理流程详解 <span class="tag tag-cyan">重点</span></div>
+                    <div class="sc-desc">纵向流程图，逐步骤展示数据如何变换、决策如何做出、边界条件如何处理。每步标注源码行号。</div>
+                </div>
+            </div>
+            <div class="section-chapter">
+                <div class="sc-icon" style="color:var(--amber);">07</div>
+                <div class="sc-body">
+                    <div class="sc-title">设计精华 <span class="tag tag-orange">重点</span></div>
+                    <div class="sc-desc">模块中最精妙的设计决策，深入分析"为什么这样设计"而不仅是"怎么设计"。</div>
+                </div>
+            </div>
+            <div class="section-chapter">
+                <div class="sc-icon" style="color:var(--green);">08</div>
+                <div class="sc-body">
+                    <div class="sc-title">开发者实践指南</div>
+                    <div class="sc-desc">如何扩展/修改此模块，常见开发模式和注意事项。绿色左边框标识。</div>
+                </div>
+            </div>
+            <div class="section-chapter">
+                <div class="sc-icon" style="color:var(--purple);">09</div>
+                <div class="sc-body">
+                    <div class="sc-title">架构师决策指南</div>
+                    <div class="sc-desc">设计权衡、扩展性考量、性能取舍。紫色左边框标识。</div>
+                </div>
+            </div>
+            <div class="section-chapter">
+                <div class="sc-icon" style="color:var(--text-muted);">10</div>
+                <div class="sc-body">
+                    <div class="sc-title">代码索引</div>
+                    <div class="sc-desc">模块涉及的关键文件列表，含行数和功能描述。快速定位源码。</div>
+                </div>
+            </div>
+        </section>
+
+        <!-- 推荐阅读路径 -->
+        <section id="paths" class="card">
+            <h2>推荐阅读路径</h2>
+            <p>不同角色和目标的读者，建议按以下路径阅读：</p>
+
+            <!-- 路径 1：快速理解 -->
+            <div class="reading-path">
+                <h3>
+                    <span class="path-role" style="background:rgba(59,130,246,.15);color:var(--blue);">路径 A</span>
+                    快速理解全局（30 分钟）
+                </h3>
+                <p style="color:var(--text-secondary);font-size:13px;margin-bottom:16px;">适合：新加入项目的开发者、技术管理者、想快速了解 Claude Code 架构的人</p>
+
+                <div class="path-step">
+                    <div class="step-num" style="background:var(--blue);">1</div>
+                    <div class="step-info">
+                        <div class="step-title"><a href="index.html">架构全景</a></div>
+        <a href="reading-guide.html" class="nav-link active">阅读指南</a>
+                        <div class="step-desc">理解六层架构划分，建立全局心智模型</div>
+                    </div>
+                </div>
+                <div class="path-arrow">↓</div>
+                <div class="path-step">
+                    <div class="step-num" style="background:var(--blue);">2</div>
+                    <div class="step-info">
+                        <div class="step-title"><a href="dependency-map.html">模块依赖图</a></div>
+                        <div class="step-desc">看模块之间的依赖关系，理解系统耦合度</div>
+                    </div>
+                </div>
+                <div class="path-arrow">↓</div>
+                <div class="path-step">
+                    <div class="step-num" style="background:var(--blue);">3</div>
+                    <div class="step-info">
+                        <div class="step-title"><a href="00-startup.html">启动链路</a> — 只看"职责概述"+"架构设计"</div>
+                        <div class="step-desc">快速过一遍启动过程，不需要深入细节</div>
+                    </div>
+                </div>
+                <div class="path-arrow">↓</div>
+                <div class="path-step">
+                    <div class="step-num" style="background:var(--blue);">4</div>
+                    <div class="step-info">
+                        <div class="step-title"><a href="01-query-loop.html">Query 循环</a> — 只看"核心处理流程详解"</div>
+                        <div class="step-desc">这是整个系统的核心引擎，理解它就理解了 80% 的运行机制</div>
+                    </div>
+                </div>
+                <div class="path-arrow">↓</div>
+                <div class="path-step">
+                    <div class="step-num" style="background:var(--blue);">5</div>
+                    <div class="step-info">
+                        <div class="step-title"><a href="flows/query-lifecycle.html">查询生命周期流程图</a></div>
+                        <div class="step-desc">可视化理解一次用户查询的完整生命周期</div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- 路径 2：开发者 -->
+            <div class="reading-path">
+                <h3>
+                    <span class="path-role" style="background:rgba(34,197,94,.15);color:var(--green);">路径 B</span>
+                    开发者深度阅读（2-3 小时）
+                </h3>
+                <p style="color:var(--text-secondary);font-size:13px;margin-bottom:16px;">适合：准备贡献代码、二次开发、或者基于 Claude Code 设计自己系统的开发者</p>
+
+                <div class="path-step">
+                    <div class="step-num" style="background:var(--green);">1</div>
+                    <div class="step-info">
+                        <div class="step-title"><a href="index.html">架构全景</a></div>
+        <a href="reading-guide.html" class="nav-link active">阅读指南</a>
+                        <div class="step-desc">完整阅读，理解每层职责和模块分布</div>
+                    </div>
+                </div>
+                <div class="path-arrow">↓</div>
+                <div class="path-step">
+                    <div class="step-num" style="background:var(--green);">2</div>
+                    <div class="step-info">
+                        <div class="step-title"><a href="00-startup.html">启动链路</a> — 完整阅读</div>
+                        <div class="step-desc">理解初始化流程、模块加载顺序、快速路径分流</div>
+                    </div>
+                </div>
+                <div class="path-arrow">↓</div>
+                <div class="path-step">
+                    <div class="step-num" style="background:var(--green);">3</div>
+                    <div class="step-info">
+                        <div class="step-title"><a href="01-query-loop.html">Query 循环</a> — 完整阅读，重点看"核心处理流程"+"设计精华"</div>
+                        <div class="step-desc">系统最核心的模块，必须深入理解 AsyncGenerator 循环、四层压缩管道、流式工具执行</div>
+                    </div>
+                </div>
+                <div class="path-arrow">↓</div>
+                <div class="path-step">
+                    <div class="step-num" style="background:var(--green);">4</div>
+                    <div class="step-info">
+                        <div class="step-title"><a href="02-tool-dispatch.html">工具调度</a> + <a href="03-permissions.html">权限系统</a></div>
+                        <div class="step-desc">理解工具如何注册、调度、并发执行，以及权限检查如何保护每次工具调用</div>
+                    </div>
+                </div>
+                <div class="path-arrow">↓</div>
+                <div class="path-step">
+                    <div class="step-num" style="background:var(--green);">5</div>
+                    <div class="step-info">
+                        <div class="step-title"><a href="04-agent-arch.html">Agent 架构</a> + <a href="flows/agent-collab.html">Agent 协作流程</a></div>
+                        <div class="step-desc">理解子 Agent 如何被 Fork、如何并发执行、如何收集结果</div>
+                    </div>
+                </div>
+                <div class="path-arrow">↓</div>
+                <div class="path-step">
+                    <div class="step-num" style="background:var(--green);">6</div>
+                    <div class="step-info">
+                        <div class="step-title">按需深入 — 根据你的开发目标选择模块</div>
+                        <div class="step-desc">开发插件 → <a href="07-plugins.html">插件系统</a>；接 MCP → <a href="05-mcp.html">MCP 体系</a>；做 UI → <a href="09-ui.html">UI 交互</a>；加命令 → <a href="08-commands.html">命令系统</a></div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- 路径 3：架构师 -->
+            <div class="reading-path">
+                <h3>
+                    <span class="path-role" style="background:rgba(139,92,246,.15);color:var(--purple);">路径 C</span>
+                    架构师设计决策（1-2 小时）
+                </h3>
+                <p style="color:var(--text-secondary);font-size:13px;margin-bottom:16px;">适合：技术架构师、准备设计类似系统、或者评估 Claude Code 设计取舍的人</p>
+
+                <div class="path-step">
+                    <div class="step-num" style="background:var(--purple);">1</div>
+                    <div class="step-info">
+                        <div class="step-title"><a href="index.html">架构全景</a> — 重点看"设计原则"+"技术栈"</div>
+        <a href="reading-guide.html" class="nav-link active">阅读指南</a>
+                        <div class="step-desc">理解六层分层的取舍和核心设计哲学</div>
+                    </div>
+                </div>
+                <div class="path-arrow">↓</div>
+                <div class="path-step">
+                    <div class="step-num" style="background:var(--purple);">2</div>
+                    <div class="step-info">
+                        <div class="step-title">每个模块只看 <strong>"架构师决策指南"</strong> 章节（紫色左边框）</div>
+                        <div class="step-desc">这些章节集中讨论设计权衡、扩展性、性能取舍</div>
+                    </div>
+                </div>
+                <div class="path-arrow">↓</div>
+                <div class="path-step">
+                    <div class="step-num" style="background:var(--purple);">3</div>
+                    <div class="step-info">
+                        <div class="step-title">每个模块只看 <strong>"设计精华"</strong> 章节</div>
+                        <div class="step-desc">这些章节提炼了最精妙的设计决策及其背后的原因</div>
+                    </div>
+                </div>
+                <div class="path-arrow">↓</div>
+                <div class="path-step">
+                    <div class="step-num" style="background:var(--purple);">4</div>
+                    <div class="step-info">
+                        <div class="step-title"><a href="vertical-agent-guide.html">垂直 Agent 设计指南</a></div>
+                        <div class="step-desc">从 Claude Code 提炼出的 10 个可复用设计模式，可直接应用于你自己的 Agent 系统</div>
+                    </div>
+                </div>
+                <div class="path-arrow">↓</div>
+                <div class="path-step">
+                    <div class="step-num" style="background:var(--purple);">5</div>
+                    <div class="step-info">
+                        <div class="step-title"><a href="dependency-map.html">模块依赖图</a> — 重点看跨层依赖</div>
+                        <div class="step-desc">理解哪些模块是核心依赖，哪些是可选扩展，帮你做出正确的架构分层决策</div>
+                    </div>
+                </div>
+            </div>
+        </section>
+
+        <!-- 模块速查地图 -->
+        <section id="module-map" class="card">
+            <h2>模块速查地图</h2>
+            <p>按六层架构组织的完整文档索引，点击直达对应分析页。</p>
+
+            <h3 style="color:var(--blue);">入口层</h3>
+            <div class="module-map">
+                <a href="00-startup.html" class="module-map-item">
+                    <div class="mm-icon" style="background:rgba(59,130,246,.12);color:var(--blue);">⚡</div>
+                    <div class="mm-info">
+                        <div class="mm-name">启动链路</div>
+                        <div class="mm-tag">CLI 入口 → 初始化 → REPL</div>
+                    </div>
+                </a>
+            </div>
+
+            <h3 style="color:var(--purple);">编排层</h3>
+            <div class="module-map">
+                <a href="01-query-loop.html" class="module-map-item">
+                    <div class="mm-icon" style="background:rgba(139,92,246,.12);color:var(--purple);">🔄</div>
+                    <div class="mm-info">
+                        <div class="mm-name">Query 循环</div>
+                        <div class="mm-tag">AsyncGenerator 主循环</div>
+                    </div>
+                </a>
+                <a href="flows/query-lifecycle.html" class="module-map-item">
+                    <div class="mm-icon" style="background:rgba(139,92,246,.12);color:var(--purple);">📋</div>
+                    <div class="mm-info">
+                        <div class="mm-name">查询生命周期</div>
+                        <div class="mm-tag">流程图</div>
+                    </div>
+                </a>
+                <a href="11-hooks.html" class="module-map-item">
+                    <div class="mm-icon" style="background:rgba(139,92,246,.12);color:var(--purple);">🪝</div>
+                    <div class="mm-info">
+                        <div class="mm-name">Hook 机制</div>
+                        <div class="mm-tag">生命周期钩子</div>
+                    </div>
+                </a>
+            </div>
+
+            <h3 style="color:var(--green);">工具与任务层</h3>
+            <div class="module-map">
+                <a href="02-tool-dispatch.html" class="module-map-item">
+                    <div class="mm-icon" style="background:rgba(34,197,94,.12);color:var(--green);">🔧</div>
+                    <div class="mm-info">
+                        <div class="mm-name">工具调度</div>
+                        <div class="mm-tag">buildTool 工厂 + 并发执行</div>
+                    </div>
+                </a>
+                <a href="03-permissions.html" class="module-map-item">
+                    <div class="mm-icon" style="background:rgba(34,197,94,.12);color:var(--green);">🔒</div>
+                    <div class="mm-info">
+                        <div class="mm-name">权限系统</div>
+                        <div class="mm-tag">多层防线 + AI 分类器</div>
+                    </div>
+                </a>
+                <a href="04-agent-arch.html" class="module-map-item">
+                    <div class="mm-icon" style="background:rgba(34,197,94,.12);color:var(--green);">🤖</div>
+                    <div class="mm-info">
+                        <div class="mm-name">Agent 架构</div>
+                        <div class="mm-tag">Fork + 并发 + 结果收集</div>
+                    </div>
+                </a>
+                <a href="flows/tool-execution.html" class="module-map-item">
+                    <div class="mm-icon" style="background:rgba(34,197,94,.12);color:var(--green);">📋</div>
+                    <div class="mm-info">
+                        <div class="mm-name">工具执行流程</div>
+                        <div class="mm-tag">流程图</div>
+                    </div>
+                </a>
+                <a href="flows/agent-collab.html" class="module-map-item">
+                    <div class="mm-icon" style="background:rgba(34,197,94,.12);color:var(--green);">📋</div>
+                    <div class="mm-info">
+                        <div class="mm-name">Agent 协作流程</div>
+                        <div class="mm-tag">流程图</div>
+                    </div>
+                </a>
+            </div>
+
+            <h3 style="color:var(--orange);">扩展层</h3>
+            <div class="module-map">
+                <a href="05-mcp.html" class="module-map-item">
+                    <div class="mm-icon" style="background:rgba(249,115,22,.12);color:var(--orange);">🔌</div>
+                    <div class="mm-info">
+                        <div class="mm-name">MCP 体系</div>
+                        <div class="mm-tag">多 Transport + 工具发现</div>
+                    </div>
+                </a>
+                <a href="07-plugins.html" class="module-map-item">
+                    <div class="mm-icon" style="background:rgba(249,115,22,.12);color:var(--orange);">📦</div>
+                    <div class="mm-info">
+                        <div class="mm-name">插件系统</div>
+                        <div class="mm-tag">技能加载 + 三层安全</div>
+                    </div>
+                </a>
+                <a href="08-commands.html" class="module-map-item">
+                    <div class="mm-icon" style="background:rgba(249,115,22,.12);color:var(--orange);">⌨</div>
+                    <div class="mm-info">
+                        <div class="mm-name">命令系统</div>
+                        <div class="mm-tag">三级类型 + 动态加载</div>
+                    </div>
+                </a>
+            </div>
+
+            <h3 style="color:var(--slate);">服务层</h3>
+            <div class="module-map">
+                <a href="06-context-mgmt.html" class="module-map-item">
+                    <div class="mm-icon" style="background:rgba(100,116,139,.12);color:var(--slate);">🧠</div>
+                    <div class="mm-info">
+                        <div class="mm-name">上下文管理</div>
+                        <div class="mm-tag">四层压缩管道</div>
+                    </div>
+                </a>
+                <a href="10-services.html" class="module-map-item">
+                    <div class="mm-icon" style="background:rgba(100,116,139,.12);color:var(--slate);">📡</div>
+                    <div class="mm-info">
+                        <div class="mm-name">服务层</div>
+                        <div class="mm-tag">五后端 + 流式重试</div>
+                    </div>
+                </a>
+                <a href="15-cost-limits.html" class="module-map-item">
+                    <div class="mm-icon" style="background:rgba(100,116,139,.12);color:var(--slate);">💰</div>
+                    <div class="mm-info">
+                        <div class="mm-name">成本与限流</div>
+                        <div class="mm-tag">实时追踪 + 策略限制</div>
+                    </div>
+                </a>
+            </div>
+
+            <h3 style="color:var(--pink);">界面与配置层</h3>
+            <div class="module-map">
+                <a href="09-ui.html" class="module-map-item">
+                    <div class="mm-icon" style="background:rgba(236,72,153,.12);color:var(--pink);">🖥</div>
+                    <div class="mm-info">
+                        <div class="mm-name">UI 交互层</div>
+                        <div class="mm-tag">React Reconciler + 双缓冲</div>
+                    </div>
+                </a>
+                <a href="13-config.html" class="module-map-item">
+                    <div class="mm-icon" style="background:rgba(236,72,153,.12);color:var(--pink);">⚙</div>
+                    <div class="mm-info">
+                        <div class="mm-name">配置与迁移</div>
+                        <div class="mm-tag">多源合并 + 版本迁移</div>
+                    </div>
+                </a>
+            </div>
+
+            <h3 style="color:var(--cyan);">外围能力</h3>
+            <div class="module-map">
+                <a href="12-external.html" class="module-map-item">
+                    <div class="mm-icon" style="background:rgba(6,182,212,.12);color:var(--cyan);">🌐</div>
+                    <div class="mm-info">
+                        <div class="mm-name">外部集成</div>
+                        <div class="mm-tag">Shell + Git + Telemetry</div>
+                    </div>
+                </a>
+                <a href="14-native.html" class="module-map-item">
+                    <div class="mm-icon" style="background:rgba(6,182,212,.12);color:var(--cyan);">🖥</div>
+                    <div class="mm-info">
+                        <div class="mm-name">Native 能力</div>
+                        <div class="mm-tag">Diff 高亮 + 模糊搜索 + 布局</div>
+                    </div>
+                </a>
+            </div>
+        </section>
+
+        <!-- 前置知识 -->
+        <section id="prerequisites" class="card">
+            <h2>前置知识</h2>
+            <p>为了高效阅读本套文档，建议具备以下背景知识：</p>
+
+            <div class="two-col">
+                <div>
+                    <h3>必须掌握</h3>
+                    <ul>
+                        <li><strong>TypeScript</strong> — 类型系统、泛型、联合类型、条件类型</li>
+                        <li><strong>Async/Await</strong> — 异步编程模型、Promise 链</li>
+                        <li><strong>Async Generator</strong> — <code>async function*</code>、<code>yield</code>、<code>for await...of</code>（这是理解 Query 循环的关键）</li>
+                        <li><strong>React 基础</strong> — Hooks、函数组件（UI 模块需要）</li>
+                    </ul>
+                </div>
+                <div>
+                    <h3>了解即可</h3>
+                    <ul>
+                        <li><strong>React Reconciler</strong> — 自定义渲染器（UI 模块深入阅读时需要）</li>
+                        <li><strong>MCP 协议</strong> — Model Context Protocol 基本概念</li>
+                        <li><strong>ANSI 转义序列</strong> — 终端渲染原理</li>
+                        <li><strong>Yoga Flexbox</strong> — 终端布局引擎</li>
+                    </ul>
+                </div>
+            </div>
+        </section>
+
+        <!-- FAQ -->
+        <section id="faq" class="card">
+            <h2>常见问题</h2>
+
+            <div class="faq-item">
+                <div class="faq-q">Q: 我是前端开发者，应该从哪里开始？</div>
+                <div class="faq-a">按路径 A 快速过全局，然后重点看 <a href="09-ui.html">UI 交互层</a>（React Reconciler 在终端的实现）和 <a href="01-query-loop.html">Query 循环</a>（AsyncGenerator 流式管道）。这两个模块对前端思维转换最有价值。</div>
+            </div>
+            <div class="faq-item">
+                <div class="faq-q">Q: 我想基于 Claude Code 开发自己的 Agent 系统，应该重点看哪些？</div>
+                <div class="faq-a">直接看 <a href="vertical-agent-guide.html">垂直 Agent 设计指南</a>，然后深入 <a href="01-query-loop.html">Query 循环</a>（核心引擎）、<a href="02-tool-dispatch.html">工具调度</a>（Fail-Closed 模式）和 <a href="04-agent-arch.html">Agent 架构</a>（Fork 并发模型）。</div>
+            </div>
+            <div class="faq-item">
+                <div class="faq-q">Q: 文档中的代码行号和实际源码对不上？</div>
+                <div class="faq-a">文档中的行号基于分析时的源码版本。Claude Code 仍在快速迭代，部分行号可能有偏移。建议通过函数名/类名搜索定位，而非精确行号。</div>
+            </div>
+            <div class="faq-item">
+                <div class="faq-q">Q: 为什么没有分析 XXX 模块？</div>
+                <div class="faq-a">本套文档聚焦核心模块。辅助功能（如自动更新、崩溃上报）和小工具函数未单独成篇，但它们的功能已在相关模块的"代码索引"中列出。</div>
+            </div>
+            <div class="faq-item">
+                <div class="faq-q">Q: 流程图看不懂怎么办？</div>
+                <div class="faq-a">流程图中的蓝色高亮步骤（<span class="tag tag-blue">highlight</span>）是关键决策点，建议优先理解这些。灰色步骤是常规数据流转。每个步骤下方的 <code>code</code> 标签标注了对应源码位置。</div>
+            </div>
+        </section>
+
+        <!-- 阅读建议 -->
+        <section id="tips" class="card">
+            <h2>高效阅读建议</h2>
+            <div class="two-col">
+                <div>
+                    <h3>推荐做法</h3>
+                    <ul>
+                        <li><strong>先图后文</strong> — 每篇先看架构图和流程图建立全局观，再读文字细节</li>
+                        <li><strong>对照源码</strong> — 打开对应的 TypeScript 文件，边看分析边看原始代码</li>
+                        <li><strong>重点关注高亮步骤</strong> — 流程图中的蓝色步骤是核心决策点</li>
+                        <li><strong>看"设计精华"章节</strong> — 每个模块最值得学习的设计都在这里</li>
+                        <li><strong>关注紫色/绿色卡片</strong> — 架构师指南和开发者指南分别用不同颜色标识</li>
+                    </ul>
+                </div>
+                <div>
+                    <h3>避免误区</h3>
+                    <ul>
+                        <li><strong>不要从第一页线性读到最后</strong> — 按你的角色和目标选择路径</li>
+                        <li><strong>不要跳过 Query 循环</strong> — 这是整个系统的核心，不理解它就看不懂其他模块</li>
+                        <li><strong>不要忽略类型定义</strong> — TypeScript 类型系统是理解模块边界的钥匙</li>
+                        <li><strong>不要只看流程图不看文字</strong> — 图展示"怎么做"，文字解释"为什么"</li>
+                    </ul>
+                </div>
+            </div>
+        </section>
+        <footer style="text-align:center; padding:32px 0 20px; margin-top:48px; border-top:1px solid var(--border); color:var(--text-secondary); font-size:13px; line-height:2;">
+        <div style="margin-bottom:4px;">⚠️ 免责声明</div>
+        本文仅用于技术学习和架构分析目的。源码分析基于公开泄漏的代码，所有商标和版权归 <a href="https://www.anthropic.com" style="color:var(--indigo);">Anthropic</a> 所有。未经授权不得用于商业用途。
+    </footer>
+    </main>
+</body>
+</html>
