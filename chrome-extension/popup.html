@@ -171,6 +171,14 @@ body {
 </div>
 
 <script>
+document.addEventListener('click', function(e) {
+  const link = e.target.closest('.link');
+  if (!link) return;
+  e.preventDefault();
+  const href = link.getAttribute('href');
+  if (href) window.open(href, '_blank');
+});
+
 document.getElementById('search').addEventListener('input', function(e) {
   const q = e.target.value.toLowerCase();
   document.querySelectorAll('.link').forEach(el => {

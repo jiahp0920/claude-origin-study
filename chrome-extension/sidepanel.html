@@ -2,7 +2,6 @@
 <html lang="zh-CN">
 <head>
 <meta charset="UTF-8">
-<base target="_blank">
 <style>
 * { margin: 0; padding: 0; box-sizing: border-box; }
 body {
@@ -179,6 +178,19 @@ body {
 </div>
 
 <script>
+const BASE = 'file:///Users/apple/Desktop/github-ws/claude-origin-study/';
+
+// 用 JS 点击事件打开链接（绕过 side panel 对 file:// 的限制）
+document.addEventListener('click', function(e) {
+  const link = e.target.closest('.link, .footer a');
+  if (!link) return;
+  e.preventDefault();
+  const href = link.getAttribute('href');
+  if (href) {
+    window.open(href, '_blank');
+  }
+});
+
 document.getElementById('search').addEventListener('input', function(e) {
   const q = e.target.value.toLowerCase().trim();
   const links = document.querySelectorAll('.link');
