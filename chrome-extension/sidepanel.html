@@ -169,43 +169,6 @@ body {
   <span id="open-all">在浏览器中打开完整站点</span>
 </div>
 
-<script>
-// 核心：用 chrome.tabs.create 打开插件内嵌的 HTML 文件
-function openPage(page) {
-  const url = chrome.runtime.getURL(page);
-  chrome.tabs.create({ url: url });
-}
-
-document.addEventListener('click', function(e) {
-  const link = e.target.closest('.link');
-  if (link && link.dataset.page) {
-    e.preventDefault();
-    openPage(link.dataset.page);
-  }
-});
-
-document.getElementById('open-all').addEventListener('click', function() {
-  openPage('index.html');
-});
-
-document.getElementById('search').addEventListener('input', function(e) {
-  const q = e.target.value.toLowerCase().trim();
-  const links = document.querySelectorAll('.link');
-  const sections = document.querySelectorAll('[data-section]');
-
-  if (!q) {
-    links.forEach(l => l.classList.remove('hidden'));
-    sections.forEach(s => s.classList.remove('hidden'));
-    return;
-  }
-
-  sections.forEach(s => s.classList.add('hidden'));
-  links.forEach(el => {
-    const text = el.textContent.toLowerCase();
-    const kw = (el.dataset.kw || '').toLowerCase();
-    el.classList.toggle('hidden', !(text.includes(q) || kw.includes(q)));
-  });
-});
-</script>
+<script src="sidepanel.js"></script>
 </body>
 </html>
