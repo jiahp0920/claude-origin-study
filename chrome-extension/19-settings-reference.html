@@ -1,0 +1,701 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>settings.json 全局参数配置 - Claude Code 源码分析</title>
+    <link rel="stylesheet" href="shared/styles.css">
+</head>
+<body>
+    <nav class="sidebar">
+<div class="sidebar-header"><div class="logo">CC</div><div><div class="sidebar-title">Claude Code</div><div class="sidebar-subtitle">源码深度分析</div></div></div>
+        <div class="nav-section-title">总览</div>
+        <a href="reading-guide.html" class="nav-link">阅读指南</a>
+        <a href="index.html" class="nav-link">架构全景</a>
+        <a href="dependency-map.html" class="nav-link">模块依赖图</a>
+        <a href="vertical-agent-guide.html" class="nav-link">垂直 Agent 设计指南</a>
+<div class="nav-section-title">核心流程</div>
+<a href="00-startup.html" class="nav-link">启动链路</a>
+<a href="01-query-loop.html" class="nav-link">Query 循环</a>
+<a href="flows/query-lifecycle.html" class="nav-link">查询生命周期</a>
+<div class="nav-section-title">核心机制</div>
+<a href="02-tool-dispatch.html" class="nav-link">工具调度</a>
+<a href="03-permissions.html" class="nav-link">权限系统</a>
+<a href="03b-security-hardening.html" class="nav-link">风控与安全加固</a>
+<a href="04-agent-arch.html" class="nav-link">Agent 架构</a>
+<a href="11-hooks.html" class="nav-link">Hook 机制</a>
+<div class="nav-section-title">扩展体系</div>
+<a href="05-mcp.html" class="nav-link">MCP 体系</a>
+<a href="07-plugins.html" class="nav-link">插件系统</a>
+<a href="08-commands.html" class="nav-link">命令系统</a>
+<div class="nav-section-title">数据与服务</div>
+<a href="06-context-mgmt.html" class="nav-link">上下文管理</a>
+<a href="10-services.html" class="nav-link">服务层</a>
+<a href="15-cost-limits.html" class="nav-link">成本与限流</a>
+<div class="nav-section-title">界面与配置</div>
+<a href="09-ui.html" class="nav-link">UI 交互层</a>
+<a href="13-config.html" class="nav-link">配置与迁移</a>
+<a href="19-settings-reference.html" class="nav-link active">settings.json 参数手册</a>
+<div class="nav-section-title">外围能力</div>
+<a href="12-external.html" class="nav-link">外部集成</a>
+<a href="14-native.html" class="nav-link">Native 能力</a>
+<div class="nav-section-title">安全专题</div>
+<a href="16-anti-distillation.html" class="nav-link">反蒸馏与输出保护</a>
+<div class="nav-section-title">彩蛋</div>
+<a href="17-buddy.html" class="nav-link">Buddy 宠物系统</a>
+<div class="nav-section-title">数据专题</div>
+<a href="18-telemetry.html" class="nav-link">遥测与用户画像</a>
+<div class="nav-section-title">流程图</div>
+<a href="flows/tool-execution.html" class="nav-link">工具执行流程</a>
+<a href="flows/agent-collab.html" class="nav-link">Agent 协作流程</a>
+</nav>
+    <main class="content">
+        <header class="page-header">
+            <span class="breadcrumb"><a href="index.html">源码分析</a></span>
+            <h1>settings.json 全局参数配置</h1>
+            <p class="subtitle">60+ 参数的全量手册：从模型选择、权限控制、沙盒隔离到记忆系统的完整配置指南，附源码出处</p>
+        </header>
+
+        <nav class="page-toc">
+    <div class="page-toc-title">页面导航</div>
+        <a href="#overview"><span class="toc-dot dot-overview"></span>职责概述</a>
+        <a href="#layers"><span class="toc-dot dot-arch"></span>配置层级体系</a>
+        <a href="#merge"><span class="toc-dot dot-data"></span>合并规则</a>
+        <a href="#model"><span class="toc-dot dot-blue"></span>模型与推理</a>
+        <a href="#permissions"><span class="toc-dot dot-red"></span>权限系统</a>
+        <a href="#mcp"><span class="toc-dot dot-green"></span>MCP 服务器管理</a>
+        <a href="#hooks"><span class="toc-dot dot-purple"></span>Hook 系统</a>
+        <a href="#memory"><span class="toc-dot dot-amber"></span>记忆与自动学习</a>
+        <a href="#env"><span class="toc-dot dot-code"></span>环境变量</a>
+        <a href="#sandbox"><span class="toc-dot dot-red"></span>沙盒配置</a>
+        <a href="#ui"><span class="toc-dot dot-cyan"></span>UI 与显示</a>
+        <a href="#auth"><span class="toc-dot dot-purple"></span>认证与企业</a>
+        <a href="#plugins"><span class="toc-dot dot-green"></span>插件与市场</a>
+        <a href="#git"><span class="toc-dot dot-blue"></span>Git 与 Attribution</a>
+        <a href="#update"><span class="toc-dot dot-gray"></span>自动更新</a>
+        <a href="#workspace"><span class="toc-dot dot-cyan"></span>文件与工作区</a>
+        <a href="#ssh"><span class="toc-dot dot-gray"></span>SSH 远程连接</a>
+        <a href="#example"><span class="toc-dot dot-practice"></span>实战配置示例</a>
+        <a href="#code-index"><span class="toc-dot dot-code"></span>源码索引</a>
+</nav>
+
+        <section id="overview" class="card">
+            <h2>职责概述</h2>
+            <p><strong>解决的问题：</strong>Claude Code 作为一个可编程的 AI 编程助手，需要一种灵活的配置机制，让不同角色（个人开发者、团队、企业管理员）能精确控制模型选择、权限边界、安全策略、UI 行为等 60+ 个维度。配置必须支持层级覆盖（用户级→项目级→企业级），同时保证向后兼容和安全隔离。</p>
+            <p><strong>应用场景：</strong>① 个人开发者想默认用 opus 模型，同时开启自动记忆 ② 团队项目需要统一 MCP 服务器配置和权限规则，提交到 git ③ 企业管理员通过 managed-settings.json 限制可用模型、禁用危险模式、强制沙盒 ④ CI/CD 管道通过 --settings 注入一次性配置。</p>
+            <p><strong>一句话理解：</strong>就像 VS Code 的 settings.json——五层优先级（用户→项目→本地→命令行→企业策略），支持深度合并、数组去重拼接、"先到先得"策略，用 Zod Schema 保证类型安全。</p>
+        </section>
+
+        <section id="layers" class="card">
+            <h2>配置层级体系</h2>
+            <p>源码位置：<code>utils/settings/settings.ts:645</code>，<code>utils/settings/constants.ts</code></p>
+
+            <div class="flow-chain">
+                <div class="flow-step">
+                    <div class="flow-step-title">1. pluginSettings</div>
+                    <div class="flow-step-desc">插件注入的基础配置（最低优先级）</div>
+                </div>
+                <div class="flow-arrow">&rarr;</div>
+                <div class="flow-step">
+                    <div class="flow-step-title">2. userSettings</div>
+                    <div class="flow-step-desc"><code>~/.claude/settings.json</code><br>用户全局配置</div>
+                </div>
+                <div class="flow-arrow">&rarr;</div>
+                <div class="flow-step">
+                    <div class="flow-step-title">3. projectSettings</div>
+                    <div class="flow-step-desc"><code>.claude/settings.json</code><br>可提交 git 的项目配置</div>
+                </div>
+                <div class="flow-arrow">&rarr;</div>
+                <div class="flow-step">
+                    <div class="flow-step-title">4. localSettings</div>
+                    <div class="flow-step-desc"><code>.claude/settings.local.json</code><br>本机独有（gitignore）</div>
+                </div>
+                <div class="flow-arrow">&rarr;</div>
+                <div class="flow-step">
+                    <div class="flow-step-title">5. flagSettings</div>
+                    <div class="flow-step-desc"><code>--settings &lt;path&gt;</code><br>CLI/SDK 一次性注入</div>
+                </div>
+            </div>
+
+            <div class="data-box" style="margin-top:1.5rem;">
+                <div class="data-box-title">policySettings（企业策略层）</div>
+                <p style="margin:0.5rem 0;font-size:0.9rem;">独立于上述 5 层，采用 <strong>"first source wins"</strong> 策略，4 个子源竞争，第一个有内容的胜出：</p>
+                <div class="flow-chain" style="margin-top:0.5rem;">
+                    <div class="flow-step" style="padding:0.5rem;">
+                        <div class="flow-step-title" style="font-size:0.8rem;">远程 API</div>
+                        <div class="flow-step-desc" style="font-size:0.75rem;">/api/claude_code/settings</div>
+                    </div>
+                    <div class="flow-arrow">&gt;</div>
+                    <div class="flow-step" style="padding:0.5rem;">
+                        <div class="flow-step-title" style="font-size:0.8rem;">MDM</div>
+                        <div class="flow-step-desc" style="font-size:0.75rem;">macOS plist / Win HKLM</div>
+                    </div>
+                    <div class="flow-arrow">&gt;</div>
+                    <div class="flow-step" style="padding:0.5rem;">
+                        <div class="flow-step-title" style="font-size:0.8rem;">文件</div>
+                        <div class="flow-step-desc" style="font-size:0.75rem;">managed-settings.json + .d/</div>
+                    </div>
+                    <div class="flow-arrow">&gt;</div>
+                    <div class="flow-step" style="padding:0.5rem;">
+                        <div class="flow-step-title" style="font-size:0.8rem;">HKCU</div>
+                        <div class="flow-step-desc" style="font-size:0.75rem;">Windows 用户注册表</div>
+                    </div>
+                </div>
+            </div>
+
+            <table style="margin-top:1.5rem;width:100%;font-size:0.9rem;">
+                <thead><tr><th>层级</th><th>文件路径</th><th>谁来写</th><th>合并策略</th></tr></thead>
+                <tbody>
+                    <tr><td>userSettings</td><td><code>~/.claude/settings.json</code></td><td>用户自己</td><td>深度合并</td></tr>
+                    <tr><td>projectSettings</td><td><code>.claude/settings.json</code></td><td>项目团队</td><td>深度合并</td></tr>
+                    <tr><td>localSettings</td><td><code>.claude/settings.local.json</code></td><td>用户本机</td><td>深度合并</td></tr>
+                    <tr><td>flagSettings</td><td>CLI 参数 / SDK inline</td><td>自动化管道</td><td>深度合并</td></tr>
+                    <tr><td>policySettings</td><td>managed-settings.json / MDM</td><td>企业管理员</td><td>first source wins</td></tr>
+                </tbody>
+            </table>
+        </section>
+
+        <section id="merge" class="card">
+            <h2>合并规则</h2>
+            <p>源码位置：<code>utils/settings/settings.ts:529-547</code></p>
+
+            <div class="code-block"><pre><code>function settingsMergeCustomizer(objValue, srcValue) {
+  if (Array.isArray(objValue) && Array.isArray(srcValue)) {
+    return uniq([...objValue, ...srcValue])  // 数组：拼接 + 去重
+  }
+  return undefined  // 其他：lodash 默认深度合并
+}</code></pre></div>
+
+            <table style="margin-top:1rem;width:100%;font-size:0.9rem;">
+                <thead><tr><th>数据类型</th><th>合并行为</th><th>示例</th></tr></thead>
+                <tbody>
+                    <tr><td><strong>数组</strong></td><td>底层 + 高层拼接，然后去重</td><td>用户 allow=["A"] + 项目 allow=["B"] → ["A","B"]</td></tr>
+                    <tr><td><strong>对象</strong></td><td>深度合并，高层覆盖低层</td><td>用户 env={X:"1"} + 项目 env={Y:"2"} → {X:"1",Y:"2"}</td></tr>
+                    <tr><td><strong>标量</strong></td><td>高层直接覆盖低层</td><td>用户 model="opus" + 项目 model="sonnet" → "sonnet"</td></tr>
+                    <tr><td><strong>policySettings</strong></td><td>first source wins，不合并</td><td>远程有内容 → 直接用，不再看 MDM</td></tr>
+                </tbody>
+            </table>
+        </section>
+
+        <!-- ==================== 模型与推理 ==================== -->
+        <section id="model" class="card">
+            <h2>模型与推理</h2>
+            <table style="width:100%;font-size:0.9rem;">
+                <thead><tr><th style="width:25%">参数</th><th style="width:15%">类型</th><th style="width:15%">默认值</th><th>含义与使用场景</th></tr></thead>
+                <tbody>
+                    <tr>
+                        <td><code>model</code></td>
+                        <td>string</td>
+                        <td>平台默认 sonnet</td>
+                        <td>覆盖使用的模型。可选 <code>"opus"</code> <code>"sonnet"</code> <code>"haiku"</code> 或完整模型 ID。<br><strong>场景：</strong>个人用户切 opus 获得更强推理能力。</td>
+                    </tr>
+                    <tr>
+                        <td><code>availableModels</code></td>
+                        <td>string[]</td>
+                        <td>无（全部可用）</td>
+                        <td>企业模型白名单。支持 family alias（<code>"opus"</code>）、version prefix（<code>"opus-4-5"</code>）、完整 ID。空数组=仅默认模型。<br><strong>场景：</strong>企业限制员工只用 sonnet 控制成本。</td>
+                    </tr>
+                    <tr>
+                        <td><code>modelOverrides</code></td>
+                        <td>Record&lt;string,string&gt;</td>
+                        <td>无</td>
+                        <td>模型 ID 映射。如 <code>{"claude-opus-4-6": "arn:aws:bedrock:..."}</code>。<br><strong>场景：</strong>Bedrock/Vertex 用户将 Anthropic ID 映射为云厂商 ARN。</td>
+                    </tr>
+                    <tr>
+                        <td><code>advisorModel</code></td>
+                        <td>string</td>
+                        <td>无</td>
+                        <td>服务端 advisor 工具使用的模型。</td>
+                    </tr>
+                    <tr>
+                        <td><code>alwaysThinkingEnabled</code></td>
+                        <td>boolean</td>
+                        <td>true</td>
+                        <td>启用扩展思考。设 false 关闭。<br><strong>场景：</strong>简单任务关掉思考加速响应。</td>
+                    </tr>
+                    <tr>
+                        <td><code>effortLevel</code></td>
+                        <td>"low"|"medium"|"high"|"max"</td>
+                        <td>无</td>
+                        <td>推理努力级别。max 仅内部可用。<br><strong>场景：</strong>日常设 medium，复杂 bug 设 high。</td>
+                    </tr>
+                    <tr>
+                        <td><code>fastMode</code></td>
+                        <td>boolean</td>
+                        <td>false</td>
+                        <td>快速模式（Opus 4.6 加速输出）。</td>
+                    </tr>
+                    <tr>
+                        <td><code>fastModePerSessionOptIn</code></td>
+                        <td>boolean</td>
+                        <td>false</td>
+                        <td>快速模式仅当次会话有效，下次启动不持久化。</td>
+                    </tr>
+                </tbody>
+            </table>
+        </section>
+
+        <!-- ==================== 权限系统 ==================== -->
+        <section id="permissions" class="card">
+            <h2>权限系统</h2>
+            <p>源码位置：<code>utils/settings/types.ts:42-85</code>，<code>utils/settings/permissionValidation.ts</code></p>
+
+            <table style="width:100%;font-size:0.9rem;">
+                <thead><tr><th style="width:28%">参数</th><th style="width:12%">类型</th><th>含义与使用场景</th></tr></thead>
+                <tbody>
+                    <tr><td><code>permissions.allow</code></td><td>string[]</td><td>自动放行的操作规则。<strong>场景：</strong>信任的 git 操作不需要每次确认。</td></tr>
+                    <tr><td><code>permissions.deny</code></td><td>string[]</td><td>明确拒绝的操作规则。优先于 allow。</td></tr>
+                    <tr><td><code>permissions.ask</code></td><td>string[]</td><td>总是弹确认的操作规则。</td></tr>
+                    <tr>
+                        <td><code>permissions.defaultMode</code></td>
+                        <td>enum</td>
+                        <td>默认权限模式：<br>
+                        &bull; <code>"default"</code> — 标准模式，每次询问<br>
+                        &bull; <code>"plan"</code> — 计划模式，先规划再执行<br>
+                        &bull; <code>"acceptEdits"</code> — 自动接受文件编辑<br>
+                        &bull; <code>"dontAsk"</code> — 不弹确认（危险）<br>
+                        &bull; <code>"auto"</code> — AI 自动判断（功能门控）
+                        </td>
+                    </tr>
+                    <tr><td><code>permissions.disableBypassPermissionsMode</code></td><td>"disable"</td><td>禁用危险模式（bypass），企业安全策略。</td></tr>
+                    <tr><td><code>permissions.disableAutoMode</code></td><td>"disable"</td><td>禁用 auto 模式。</td></tr>
+                    <tr><td><code>permissions.additionalDirectories</code></td><td>string[]</td><td>扩展权限作用域到额外目录。</td></tr>
+                    <tr><td><code>allowManagedPermissionRulesOnly</code></td><td>boolean</td><td>仅托管设置的权限规则生效（企业策略）。</td></tr>
+                    <tr><td><code>skipDangerousModePermissionPrompt</code></td><td>boolean</td><td>已接受 bypass 模式对话框。注意：projectSettings 中此值被忽略（防 RCE）。</td></tr>
+                    <tr><td><code>skipAutoPermissionPrompt</code></td><td>boolean</td><td>已接受 auto 模式对话框。</td></tr>
+                </tbody>
+            </table>
+
+            <div class="code-block" style="margin-top:1rem;"><pre><code>// 权限规则格式示例
+{
+  "permissions": {
+    "allow": [
+      "Bash(git *)",      // Bash 命令前缀匹配
+      "Bash(npm test *)", // npm test 自动放行
+      "Read",             // 所有读取操作
+      "Edit",             // 所有编辑操作
+      "Glob"              // 文件搜索
+    ],
+    "deny": ["Bash(rm -rf /*)"],
+    "ask": ["Bash(curl *)"],
+    "defaultMode": "plan"
+  }
+}</code></pre></div>
+        </section>
+
+        <!-- ==================== MCP 服务器管理 ==================== -->
+        <section id="mcp" class="card">
+            <h2>MCP 服务器管理</h2>
+            <table style="width:100%;font-size:0.9rem;">
+                <thead><tr><th style="width:30%">参数</th><th style="width:15%">类型</th><th>含义与使用场景</th></tr></thead>
+                <tbody>
+                    <tr><td><code>enableAllProjectMcpServers</code></td><td>boolean</td><td>自动批准项目所有 MCP 服务器。<strong>场景：</strong>个人项目不想逐个确认。</td></tr>
+                    <tr><td><code>enabledMcpjsonServers</code></td><td>string[]</td><td>已批准的 .mcp.json 中的服务器名列表。</td></tr>
+                    <tr><td><code>disabledMcpjsonServers</code></td><td>string[]</td><td>已拒绝的 .mcp.json 中的服务器名列表。</td></tr>
+                    <tr><td><code>allowedMcpServers</code></td><td>object[]</td><td>企业 MCP 白名单。每项三选一：<code>serverName</code>、<code>serverCommand</code>、<code>serverUrl</code>。空数组=全部禁止。</td></tr>
+                    <tr><td><code>deniedMcpServers</code></td><td>object[]</td><td>企业 MCP 黑名单。优先于白名单——同时在两个列表中的服务器会被拒绝。</td></tr>
+                    <tr><td><code>allowManagedMcpServersOnly</code></td><td>boolean</td><td>仅托管设置的 MCP 白名单生效。</td></tr>
+                </tbody>
+            </table>
+
+            <div class="code-block" style="margin-top:1rem;"><pre><code>// 企业 MCP 白名单示例
+{
+  "allowedMcpServers": [
+    { "serverName": "internal-tools" },
+    { "serverCommand": ["npx", "my-mcp-server"] },
+    { "serverUrl": "https://*.example.com/*" }
+  ],
+  "deniedMcpServers": [
+    { "serverName": "dangerous-server" }
+  ]
+}</code></pre></div>
+        </section>
+
+        <!-- ==================== Hook 系统 ==================== -->
+        <section id="hooks" class="card">
+            <h2>Hook 系统</h2>
+            <p>源码位置：<code>schemas/hooks.ts</code>，<code>utils/settings/types.ts:435</code></p>
+
+            <table style="width:100%;font-size:0.9rem;">
+                <thead><tr><th style="width:30%">参数</th><th style="width:15%">类型</th><th>含义</th></tr></thead>
+                <tbody>
+                    <tr><td><code>hooks</code></td><td>object</td><td>生命周期钩子，按事件名分组。详见 <a href="11-hooks.html">Hook 机制</a></td></tr>
+                    <tr><td><code>disableAllHooks</code></td><td>boolean</td><td>禁用所有 hooks 和 statusLine 执行。</td></tr>
+                    <tr><td><code>allowManagedHooksOnly</code></td><td>boolean</td><td>仅执行托管设置的 hooks（企业策略）。</td></tr>
+                    <tr><td><code>allowedHttpHookUrls</code></td><td>string[]</td><td>HTTP hook 的 URL 白名单。支持 <code>*</code> 通配符。空数组=禁止所有。</td></tr>
+                    <tr><td><code>httpHookAllowedEnvVars</code></td><td>string[]</td><td>HTTP hook 可注入到 headers 的环境变量名白名单。</td></tr>
+                </tbody>
+            </table>
+
+            <p style="margin-top:1rem;"><strong>支持的 Hook 事件：</strong></p>
+            <div style="display:flex;flex-wrap:wrap;gap:0.5rem;margin-top:0.5rem;">
+                <span class="tag" style="background:#1e3a5f;color:#58a6ff;">PreToolUse</span>
+                <span class="tag" style="background:#1e3a5f;color:#58a6ff;">PostToolUse</span>
+                <span class="tag" style="background:#1e3a5f;color:#58a6ff;">Notification</span>
+                <span class="tag" style="background:#1e3a5f;color:#58a6ff;">UserPromptSubmit</span>
+                <span class="tag" style="background:#1e3a5f;color:#58a6ff;">SessionStart</span>
+                <span class="tag" style="background:#1e3a5f;color:#58a6ff;">SessionEnd</span>
+                <span class="tag" style="background:#1e3a5f;color:#58a6ff;">Stop</span>
+                <span class="tag" style="background:#1e3a5f;color:#58a6ff;">SubagentStop</span>
+                <span class="tag" style="background:#1e3a5f;color:#58a6ff;">PreCompact</span>
+                <span class="tag" style="background:#1e3a5f;color:#58a6ff;">PostCompact</span>
+                <span class="tag" style="background:#1e3a5f;color:#58a6ff;">TeammateIdle</span>
+                <span class="tag" style="background:#1e3a5f;color:#58a6ff;">TaskCreated</span>
+                <span class="tag" style="background:#1e3a5f;color:#58a6ff;">TaskCompleted</span>
+            </div>
+
+            <div class="code-block" style="margin-top:1rem;"><pre><code>// Hook 配置示例
+{
+  "hooks": {
+    "PreToolUse": [{
+      "matcher": "Bash",
+      "hooks": [{"type": "command", "command": "audit-log.sh"}]
+    }],
+    "PostToolUse": [{
+      "matcher": "Edit",
+      "hooks": [{"type": "command", "command": "echo 'file modified' >> log.txt"}]
+    }]
+  }
+}</code></pre></div>
+        </section>
+
+        <!-- ==================== 记忆与自动学习 ==================== -->
+        <section id="memory" class="card">
+            <h2>记忆与自动学习</h2>
+            <p>源码位置：<code>utils/settings/types.ts:938-955</code>，<code>memdir/paths.ts</code></p>
+
+            <table style="width:100%;font-size:0.9rem;">
+                <thead><tr><th style="width:25%">参数</th><th style="width:15%">类型</th><th style="width:25%">默认值</th><th>含义与使用场景</th></tr></thead>
+                <tbody>
+                    <tr>
+                        <td><code>autoMemoryEnabled</code></td>
+                        <td>boolean</td>
+                        <td>false</td>
+                        <td>启用自动记忆（读写 <code>~/.claude/projects/&lt;cwd&gt;/memory/</code>）。<br><strong>场景：</strong>跨会话保留项目知识。</td>
+                    </tr>
+                    <tr>
+                        <td><code>autoMemoryDirectory</code></td>
+                        <td>string</td>
+                        <td>~/.claude/projects/&lt;cwd&gt;/memory/</td>
+                        <td>自定义记忆存储目录，支持 <code>~/</code> 前缀。<br><strong style="color:#f85149;">安全限制：</strong>projectSettings（<code>.claude/settings.json</code>）中设置此值会被忽略，防止恶意项目重定向记忆路径。</td>
+                    </tr>
+                    <tr>
+                        <td><code>autoDreamEnabled</code></td>
+                        <td>boolean</td>
+                        <td>服务端默认</td>
+                        <td>启用后台记忆整理（auto-dream），自动从对话中提取结构化记忆。<br><strong>场景：</strong>长期项目自动积累知识库。</td>
+                    </tr>
+                </tbody>
+            </table>
+        </section>
+
+        <!-- ==================== 环境变量 ==================== -->
+        <section id="env" class="card">
+            <h2>环境变量</h2>
+            <p>源码位置：<code>utils/settings/types.ts:35-37</code></p>
+
+            <table style="width:100%;font-size:0.9rem;">
+                <thead><tr><th style="width:20%">参数</th><th style="width:20%">类型</th><th>含义</th></tr></thead>
+                <tbody>
+                    <tr>
+                        <td><code>env</code></td>
+                        <td>Record&lt;string,string&gt;</td>
+                        <td>为 Claude Code 会话注入环境变量。所有值会被 <code>z.coerce.string()</code> 强制转为字符串。<br><strong>重要：</strong>很多高级配置通过环境变量实现，如 <code>CLAUDE_AUTOCOMPACT_PCT_OVERRIDE</code> 控制压缩阈值。</td>
+                    </tr>
+                </tbody>
+            </table>
+
+            <div class="code-block" style="margin-top:1rem;"><pre><code>{
+  "env": {
+    "CLAUDE_AUTOCOMPACT_PCT_OVERRIDE": "50",  // 上下文达 50% 时触发压缩
+    "MY_API_KEY": "sk-xxx",
+    "DISABLE_AUTOUPDATER": "1"
+  }
+}</code></pre></div>
+        </section>
+
+        <!-- ==================== 沙盒配置 ==================== -->
+        <section id="sandbox" class="card">
+            <h2>沙盒配置</h2>
+            <p>源码位置：<code>entrypoints/sandboxTypes.ts</code></p>
+
+            <table style="width:100%;font-size:0.9rem;">
+                <thead><tr><th style="width:35%">参数</th><th style="width:15%">类型</th><th>含义</th></tr></thead>
+                <tbody>
+                    <tr><td><code>sandbox.enabled</code></td><td>boolean</td><td>启用沙盒隔离。</td></tr>
+                    <tr><td><code>sandbox.failIfUnavailable</code></td><td>boolean</td><td>沙盒不可用时是否失败（vs 静默降级）。</td></tr>
+                    <tr><td><code>sandbox.autoAllowBashIfSandboxed</code></td><td>boolean</td><td>在沙盒内的 Bash 命令自动放行。</td></tr>
+                    <tr><td><code>sandbox.allowUnsandboxedCommands</code></td><td>string[]</td><td>不需要沙盒的命令列表。</td></tr>
+                    <tr><td colspan="3" style="background:#161b22;"><strong>网络控制</strong></td></tr>
+                    <tr><td><code>sandbox.network.allowedDomains</code></td><td>string[]</td><td>允许的网络域名白名单。</td></tr>
+                    <tr><td><code>sandbox.network.allowManagedDomainsOnly</code></td><td>boolean</td><td>仅托管域名生效（企业）。</td></tr>
+                    <tr><td><code>sandbox.network.allowUnixSockets</code></td><td>string[]</td><td>允许的 Unix socket 路径（仅 macOS）。</td></tr>
+                    <tr><td><code>sandbox.network.allowAllUnixSockets</code></td><td>boolean</td><td>允许所有 Unix socket。</td></tr>
+                    <tr><td><code>sandbox.network.allowLocalBinding</code></td><td>boolean</td><td>允许本地端口绑定。</td></tr>
+                    <tr><td colspan="3" style="background:#161b22;"><strong>文件系统控制</strong></td></tr>
+                    <tr><td><code>sandbox.filesystem.allowWrite</code></td><td>string[]</td><td>额外允许写入的路径。</td></tr>
+                    <tr><td><code>sandbox.filesystem.denyWrite</code></td><td>string[]</td><td>拒绝写入的路径。</td></tr>
+                    <tr><td><code>sandbox.filesystem.denyRead</code></td><td>string[]</td><td>拒绝读取的路径。</td></tr>
+                    <tr><td><code>sandbox.filesystem.allowRead</code></td><td>string[]</td><td>在 denyRead 中重新允许的路径。</td></tr>
+                    <tr><td><code>sandbox.filesystem.allowManagedReadPathsOnly</code></td><td>boolean</td><td>仅托管读取路径生效。</td></tr>
+                    <tr><td colspan="3" style="background:#161b22;"><strong>其他</strong></td></tr>
+                    <tr><td><code>sandbox.ignoreViolations</code></td><td>boolean</td><td>忽略沙盒违规（仅记录日志）。</td></tr>
+                    <tr><td><code>sandbox.excludedCommands</code></td><td>string[]</td><td>排除出沙盒的命令。</td></tr>
+                    <tr><td><code>sandbox.enableWeakerNestedSandbox</code></td><td>boolean</td><td>允许弱化嵌套沙盒。</td></tr>
+                    <tr><td><code>sandbox.enableWeakerNetworkIsolation</code></td><td>boolean</td><td>允许弱化网络隔离。</td></tr>
+                </tbody>
+            </table>
+        </section>
+
+        <!-- ==================== UI 与显示 ==================== -->
+        <section id="ui" class="card">
+            <h2>UI 与显示</h2>
+            <table style="width:100%;font-size:0.9rem;">
+                <thead><tr><th style="width:30%">参数</th><th style="width:18%">类型</th><th>含义</th></tr></thead>
+                <tbody>
+                    <tr><td><code>outputStyle</code></td><td>string</td><td>助手回复的输出风格。</td></tr>
+                    <tr><td><code>language</code></td><td>string</td><td>偏好语言，如 <code>"japanese"</code> <code>"chinese"</code> <code>"spanish"</code>。影响回复语言和语音听写。</td></tr>
+                    <tr><td><code>syntaxHighlightingDisabled</code></td><td>boolean</td><td>禁用 diff 语法高亮。</td></tr>
+                    <tr><td><code>terminalTitleFromRename</code></td><td>boolean</td><td>/rename 是否更新终端标题（默认 true）。</td></tr>
+                    <tr><td><code>prefersReducedMotion</code></td><td>boolean</td><td>减少动画（无障碍辅助）。</td></tr>
+                    <tr><td><code>spinnerTipsEnabled</code></td><td>boolean</td><td>显示 spinner 提示。</td></tr>
+                    <tr><td><code>spinnerVerbs</code></td><td>{mode, verbs[]}</td><td>自定义 spinner 动词。<code>mode:"append"</code> 追加，<code>"replace"</code> 替换。</td></tr>
+                    <tr><td><code>spinnerTipsOverride</code></td><td>{excludeDefault?, tips[]}</td><td>自定义 spinner 提示文本。<code>excludeDefault:true</code> 只显示自定义。</td></tr>
+                    <tr><td><code>showThinkingSummaries</code></td><td>boolean</td><td>transcript 视图显示思考摘要（默认 false）。</td></tr>
+                    <tr><td><code>showClearContextOnPlanAccept</code></td><td>boolean</td><td>plan 审批对话框显示"清除上下文"选项。</td></tr>
+                    <tr><td><code>promptSuggestionEnabled</code></td><td>boolean</td><td>启用提示建议。</td></tr>
+                    <tr><td><code>defaultView</code></td><td>"chat"|"transcript"</td><td>默认 transcript 视图（功能门控）。</td></tr>
+                    <tr><td><code>feedbackSurveyRate</code></td><td>number (0~1)</td><td>反馈问卷弹出概率。0.05 即 5% 概率弹出。</td></tr>
+                    <tr><td><code>statusLine</code></td><td>{type:"command", command:string, padding?:number}</td><td>自定义状态栏显示。</td></tr>
+                </tbody>
+            </table>
+        </section>
+
+        <!-- ==================== 认证与企业 ==================== -->
+        <section id="auth" class="card">
+            <h2>认证与企业</h2>
+            <table style="width:100%;font-size:0.9rem;">
+                <thead><tr><th style="width:30%">参数</th><th style="width:22%">类型</th><th>含义</th></tr></thead>
+                <tbody>
+                    <tr><td><code>apiKeyHelper</code></td><td>string</td><td>输出认证值的脚本路径。</td></tr>
+                    <tr><td><code>awsCredentialExport</code></td><td>string</td><td>导出 AWS 凭证的脚本路径。</td></tr>
+                    <tr><td><code>awsAuthRefresh</code></td><td>string</td><td>刷新 AWS 认证的脚本路径。</td></tr>
+                    <tr><td><code>gcpAuthRefresh</code></td><td>string</td><td>刷新 GCP 认证的命令，如 <code>"gcloud auth application-default login"</code>。</td></tr>
+                    <tr><td><code>forceLoginMethod</code></td><td>"claudeai"|"console"</td><td>强制登录方式。<code>"claudeai"</code> = Claude Pro/Max，<code>"console"</code> = Console 计费。</td></tr>
+                    <tr><td><code>forceLoginOrgUUID</code></td><td>string</td><td>OAuth 登录的组织 UUID。</td></tr>
+                    <tr><td><code>otelHeadersHelper</code></td><td>string</td><td>输出 OpenTelemetry headers 的脚本路径。</td></tr>
+                    <tr><td><code>companyAnnouncements</code></td><td>string[]</td><td>启动时随机显示的公司公告（企业内部使用）。</td></tr>
+                </tbody>
+            </table>
+        </section>
+
+        <!-- ==================== 插件与市场 ==================== -->
+        <section id="plugins" class="card">
+            <h2>插件与市场</h2>
+            <table style="width:100%;font-size:0.9rem;">
+                <thead><tr><th style="width:30%">参数</th><th style="width:25%">类型</th><th>含义</th></tr></thead>
+                <tbody>
+                    <tr><td><code>enabledPlugins</code></td><td>Record&lt;string, boolean|string[]&gt;</td><td>已启用的插件。Key 格式 <code>"pluginName@marketplaceName"</code>。</td></tr>
+                    <tr><td><code>pluginConfigs</code></td><td>Record&lt;string, object&gt;</td><td>插件配置，含 <code>mcpServers</code> 和 <code>options</code> 子字段。</td></tr>
+                    <tr><td><code>extraKnownMarketplaces</code></td><td>Record&lt;string, object&gt;</td><td>额外市场源（通常在项目 settings 中配置团队共享市场）。</td></tr>
+                    <tr><td><code>strictKnownMarketplaces</code></td><td>object[]</td><td>企业市场白名单（仅托管设置）。下载前拦截。</td></tr>
+                    <tr><td><code>blockedMarketplaces</code></td><td>object[]</td><td>企业市场黑名单。</td></tr>
+                    <tr><td><code>strictPluginOnlyCustomization</code></td><td>boolean|("skills"|"agents"|"hooks"|"mcp")[]</td><td>限制非插件自定义源。<code>true</code>=锁定全部，数组=锁定指定项。</td></tr>
+                    <tr><td><code>pluginTrustMessage</code></td><td>string</td><td>插件信任警告追加的自定义消息（仅托管设置）。</td></tr>
+                </tbody>
+            </table>
+
+            <div class="code-block" style="margin-top:1rem;"><pre><code>// 插件配置示例
+{
+  "enabledPlugins": {
+    "formatter@anthropic-tools": true
+  },
+  "pluginConfigs": {
+    "formatter@anthropic-tools": {
+      "options": { "tabSize": 2 }
+    }
+  }
+}</code></pre></div>
+        </section>
+
+        <!-- ==================== Git 与 Attribution ==================== -->
+        <section id="git" class="card">
+            <h2>Git 与 Attribution</h2>
+            <table style="width:100%;font-size:0.9rem;">
+                <thead><tr><th style="width:30%">参数</th><th style="width:15%">类型</th><th>含义</th></tr></thead>
+                <tbody>
+                    <tr><td><code>attribution.commit</code></td><td>string</td><td>Git 提交的署名文本。空字符串 <code>""</code>=隐藏署名。</td></tr>
+                    <tr><td><code>attribution.pr</code></td><td>string</td><td>PR 描述的署名文本。空字符串=隐藏。</td></tr>
+                    <tr><td><code>includeCoAuthoredBy</code></td><td>boolean</td><td><strong style="color:#d29922;">已废弃</strong>，请用 <code>attribution</code> 代替。</td></tr>
+                    <tr><td><code>includeGitInstructions</code></td><td>boolean</td><td>系统提示中包含 Git 操作指引（默认 true）。</td></tr>
+                </tbody>
+            </table>
+        </section>
+
+        <!-- ==================== 自动更新 ==================== -->
+        <section id="update" class="card">
+            <h2>自动更新</h2>
+            <table style="width:100%;font-size:0.9rem;">
+                <thead><tr><th style="width:30%">参数</th><th style="width:25%">类型</th><th>含义</th></tr></thead>
+                <tbody>
+                    <tr><td><code>autoUpdatesChannel</code></td><td>"latest"|"stable"</td><td>自动更新频道。<code>"latest"</code> = 最新版，<code>"stable"</code> = 稳定版。</td></tr>
+                    <tr><td><code>minimumVersion</code></td><td>string</td><td>最低版本号，防止切换到 stable 频道时被降级。</td></tr>
+                </tbody>
+            </table>
+        </section>
+
+        <!-- ==================== 文件与工作区 ==================== -->
+        <section id="workspace" class="card">
+            <h2>文件与工作区</h2>
+            <table style="width:100%;font-size:0.9rem;">
+                <thead><tr><th style="width:30%">参数</th><th style="width:30%">类型</th><th>含义</th></tr></thead>
+                <tbody>
+                    <tr><td><code>fileSuggestion</code></td><td>{type:"command", command:string}</td><td>@ 提及的自定义文件建议命令。</td></tr>
+                    <tr><td><code>respectGitignore</code></td><td>boolean</td><td>文件选择器是否尊重 .gitignore（默认 true）。.ignore 始终被尊重。</td></tr>
+                    <tr><td><code>cleanupPeriodDays</code></td><td>number (&ge;0)</td><td>聊天记录保留天数（默认 30）。设 0 完全禁用持久化。</td></tr>
+                    <tr><td><code>defaultShell</code></td><td>"bash"|"powershell"</td><td><code>!</code> 命令的默认 shell。所有平台默认 bash。</td></tr>
+                    <tr><td><code>worktree.symlinkDirectories</code></td><td>string[]</td><td>worktree 中符号链接的目录，如 <code>["node_modules"]</code>。</td></tr>
+                    <tr><td><code>worktree.sparsePaths</code></td><td>string[]</td><td>worktree 稀疏检出路径，大型 monorepo 加速。</td></tr>
+                    <tr><td><code>plansDirectory</code></td><td>string</td><td>计划文件目录，相对项目根。默认 <code>~/.claude/plans/</code>。</td></tr>
+                    <tr><td><code>claudeMdExcludes</code></td><td>string[]</td><td>排除加载的 CLAUDE.md glob 模式。</td></tr>
+                </tbody>
+            </table>
+        </section>
+
+        <!-- ==================== SSH 远程连接 ==================== -->
+        <section id="ssh" class="card">
+            <h2>SSH 远程连接</h2>
+            <p>源码位置：<code>utils/settings/types.ts:1013-1052</code></p>
+
+            <table style="width:100%;font-size:0.9rem;">
+                <thead><tr><th style="width:30%">参数</th><th style="width:15%">类型</th><th>含义</th></tr></thead>
+                <tbody>
+                    <tr><td><code>sshConfigs[].id</code></td><td>string</td><td>唯一标识符。</td></tr>
+                    <tr><td><code>sshConfigs[].name</code></td><td>string</td><td>显示名称。</td></tr>
+                    <tr><td><code>sshConfigs[].sshHost</code></td><td>string</td><td>SSH 主机（user@hostname 或别名）。</td></tr>
+                    <tr><td><code>sshConfigs[].sshPort</code></td><td>number</td><td>SSH 端口（默认 22）。</td></tr>
+                    <tr><td><code>sshConfigs[].sshIdentityFile</code></td><td>string</td><td>私钥文件路径。</td></tr>
+                    <tr><td><code>sshConfigs[].startDirectory</code></td><td>string</td><td>远程默认工作目录，支持 <code>~/</code> 展开。</td></tr>
+                </tbody>
+            </table>
+
+            <div class="code-block" style="margin-top:1rem;"><pre><code>// SSH 配置示例
+{
+  "sshConfigs": [
+    {
+      "id": "dev-server",
+      "name": "开发服务器",
+      "sshHost": "dev.example.com",
+      "sshPort": 2222,
+      "sshIdentityFile": "~/.ssh/id_rsa",
+      "startDirectory": "~/projects/my-app"
+    }
+  ]
+}</code></pre></div>
+        </section>
+
+        <!-- ==================== 实战配置示例 ==================== -->
+        <section id="example" class="card">
+            <h2>实战配置示例</h2>
+
+            <h3 style="color:#58a6ff;margin-bottom:0.5rem;">个人开发者（~/.claude/settings.json）</h3>
+            <div class="code-block"><pre><code>{
+  "$schema": "https://json.schemastore.org/claude-code-settings.json",
+  "model": "opus",
+  "alwaysThinkingEnabled": true,
+  "effortLevel": "high",
+  "autoMemoryEnabled": true,
+  "language": "chinese",
+  "env": {
+    "CLAUDE_AUTOCOMPACT_PCT_OVERRIDE": "50"
+  },
+  "permissions": {
+    "allow": ["Bash(git *)", "Bash(npm *)", "Read", "Edit", "Glob"],
+    "deny": ["Bash(rm -rf /*)"],
+    "defaultMode": "plan"
+  },
+  "hooks": {
+    "PostToolUse": [{
+      "matcher": "Edit",
+      "hooks": [{"type": "command", "command": "echo 'modified' >> /tmp/cc-log.txt"}]
+    }]
+  },
+  "cleanupPeriodDays": 14,
+  "terminalTitleFromRename": true,
+  "spinnerTipsEnabled": true
+}</code></pre></div>
+
+            <h3 style="color:#58a6ff;margin:1.5rem 0 0.5rem;">团队项目（.claude/settings.json，提交 git）</h3>
+            <div class="code-block"><pre><code>{
+  "permissions": {
+    "allow": [
+      "Bash(npm test *)",
+      "Bash(npm run lint *)",
+      "Read",
+      "Edit",
+      "Glob"
+    ],
+    "defaultMode": "plan"
+  },
+  "enabledMcpjsonServers": ["database", "internal-api"],
+  "hooks": {
+    "PostToolUse": [{
+      "matcher": "Edit",
+      "hooks": [{"type": "command", "command": "npm run format"}]
+    }]
+  }
+}</code></pre></div>
+
+            <h3 style="color:#58a6ff;margin:1.5rem 0 0.5rem;">企业管理员（managed-settings.json，仅 admin 可写）</h3>
+            <div class="code-block"><pre><code>{
+  "availableModels": ["sonnet"],
+  "permissions": {
+    "deny": ["Bash(curl *external*)"],
+    "disableBypassPermissionsMode": "disable"
+  },
+  "sandbox": {
+    "enabled": true,
+    "network": {
+      "allowedDomains": ["api.internal.com"],
+      "allowManagedDomainsOnly": true
+    }
+  },
+  "strictKnownMarketplaces": [
+    { "source": { "type": "url", "url": "https://plugins.internal.com/marketplace.json" } }
+  ],
+  "strictPluginOnlyCustomization": ["hooks", "mcp"],
+  "forceLoginMethod": "console",
+  "companyAnnouncements": ["请勿将敏感数据粘贴到对话中"],
+  "cleanupPeriodDays": 7
+}</code></pre></div>
+        </section>
+
+        <!-- ==================== 源码索引 ==================== -->
+        <section id="code-index" class="card">
+            <h2>源码索引</h2>
+            <table style="width:100%;font-size:0.9rem;">
+                <thead><tr><th style="width:45%">文件</th><th>职责</th></tr></thead>
+                <tbody>
+                    <tr><td><code>utils/settings/types.ts</code></td><td>Zod Schema 定义，60+ 参数的单源真相（817 行）</td></tr>
+                    <tr><td><code>utils/settings/settings.ts</code></td><td>配置加载引擎：文件解析、5 层合并、缓存、文件监听</td></tr>
+                    <tr><td><code>utils/settings/constants.ts</code></td><td>SETTING_SOURCES 枚举、SettingSource 类型</td></tr>
+                    <tr><td><code>utils/settings/validation.ts</code></td><td>Zod 错误格式化、JSON Schema 生成</td></tr>
+                    <tr><td><code>utils/settings/permissionValidation.ts</code></td><td>PermissionRuleSchema：Bash 前缀/文件模式/MCP 规则验证</td></tr>
+                    <tr><td><code>utils/settings/settingsCache.ts</code></td><td>会话级缓存：per-source cache + parsed-file cache</td></tr>
+                    <tr><td><code>utils/settings/changeDetector.ts</code></td><td>chokidar 文件监听，配置变更自动重载</td></tr>
+                    <tr><td><code>utils/settings/applySettingsChange.ts</code></td><td>配置变更→AppState 同步（重载权限、hooks、effort level）</td></tr>
+                    <tr><td><code>utils/settings/managedPath.ts</code></td><td>平台托管路径：macOS=/Library/Application Support/ClaudeCode</td></tr>
+                    <tr><td><code>utils/settings/mdm/settings.ts</code></td><td>MDM 配置读取：macOS plist / Windows HKLM+HKCU</td></tr>
+                    <tr><td><code>utils/settings/pluginOnlyPolicy.ts</code></td><td>strictPluginOnlyCustomization 策略执行</td></tr>
+                    <tr><td><code>tools/ConfigTool/supportedSettings.ts</code></td><td>UI 可设置的配置项元数据</td></tr>
+                    <tr><td><code>entrypoints/sandboxTypes.ts</code></td><td>沙盒配置 Zod Schema</td></tr>
+                    <tr><td><code>schemas/hooks.ts</code></td><td>Hook 系统 Zod Schema（13 种事件 × 4 种类型）</td></tr>
+                    <tr><td><code>services/remoteManagedSettings/index.ts</code></td><td>远程托管配置拉取 + ETag 缓存</td></tr>
+                    <tr><td><code>services/settingsSync/index.ts</code></td><td>多设备配置同步（上传用户设置 + memory）</td></tr>
+                </tbody>
+            </table>
+        </section>
+
+    </main>
+</body>
+</html>
